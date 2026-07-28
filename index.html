@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kolaba — прототип</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="page-logo"><img src="assets/logo.svg" alt="kolaba"></header>
+
+<main class="stage">
+  <div class="phone">
+    <div class="screen">
+      <div class="viewport" id="viewport">
+
+        <div class="ios-statusbar" aria-label="iPhone status bar">
+          <img class="ios-statusbar__time" src="assets/icons/Time.svg" alt="9:41">
+          <div class="ios-statusbar__signals" aria-hidden="true">
+            <img src="assets/icons/CellularConnection.svg" alt="">
+            <img src="assets/icons/Wifi.svg" alt="">
+            <img src="assets/icons/Battery.svg" alt="">
+          </div>
+        </div>
+
+        <!-- ───────────────────────── Start Page ───────────────────────── -->
+        <section class="screen-page is-active" data-screen="start">
+          <div class="wall" id="wall"></div>
+          <div class="glow glow--bottom">
+            <span class="blob blob--purple"></span>
+            <span class="blob blob--pink"></span>
+            <span class="blob blob--white"></span>
+          </div>
+
+          <img class="start-logo" src="assets/logo.svg" alt="kolaba">
+
+          <div class="start-bottom">
+            <h1 class="display-36">Where Creators<br>Meet Opportunity</h1>
+            <p class="body-16 muted-92">Explore collabs, share your vibe, and connect with brands looking for authentic content.</p>
+            <button class="btn btn--primary" data-go="auth">
+              <span>Let's collabs for free</span>
+              <svg class="chevron" viewBox="0 0 10 16"><path d="M1.5 1.5 8 8l-6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <div class="legal">
+              <span>Privacy Policy</span><i></i><span>Terms and Conditions</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ───────────────────────── Sign Up / Log In ───────────────────────── -->
+        <section class="screen-page" data-screen="auth">
+          <div class="glow glow--bottom glow--still">
+            <span class="blob blob--purple"></span>
+            <span class="blob blob--pink"></span>
+            <span class="blob blob--white"></span>
+          </div>
+
+          <button class="pill-back" data-back="start">
+            <img src="assets/icons/IconChevron.svg" alt=""><span>Back</span>
+          </button>
+
+          <div class="page-body auth-body">
+            <img class="auth-logo" src="assets/logo.svg" alt="kolaba">
+
+            <div class="segmented" id="authSwitch">
+              <span class="segmented__pill" id="authPill"></span>
+              <button class="segmented__item is-active" data-mode="Sign Up">Sign Up</button>
+              <button class="segmented__item" data-mode="Log In">Log In</button>
+            </div>
+
+            <label class="field">
+              <img class="field__icon" src="assets/icons/IconMail.svg" alt="">
+              <input type="email" placeholder="Your email">
+            </label>
+
+            <label class="field">
+              <img class="field__icon" src="assets/icons/IconKey.svg" alt="">
+              <input type="password" placeholder="Your password" id="pwd">
+              <button class="field__eye" id="pwdToggle" type="button">
+                <img src="assets/icons/IconEyeOff.svg" alt="">
+              </button>
+            </label>
+
+            <button class="btn btn--primary" data-go="setup1">
+              <span>Next step</span>
+              <svg class="chevron" viewBox="0 0 10 16"><path d="M1.5 1.5 8 8l-6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+
+            <div class="divider"><i></i><span>Or</span><i></i></div>
+
+            <button class="btn btn--ghost btn--social">
+              <img src="assets/icons/LogoGoogle.svg" alt=""><span class="js-mode">Sign Up</span>&nbsp;with Google
+            </button>
+            <button class="btn btn--ghost btn--social">
+              <img src="assets/icons/LogoApple.svg" alt=""><span class="js-mode">Sign Up</span>&nbsp;with Apple
+            </button>
+
+            <div class="legal legal--auth">
+              <span>Privacy Policy</span><i></i><span>Terms and Conditions</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ───────────────────────── Профиль, шаг 1 ───────────────────────── -->
+        <section class="screen-page" data-screen="setup1">
+          <div class="setup-head">
+            <button class="pill-back" data-back="auth">
+              <img src="assets/icons/IconChevron.svg" alt=""><span>Back</span>
+            </button>
+            <div class="pager-dots"><i class="is-active"></i><i></i></div>
+          </div>
+
+          <div class="page-body setup-body">
+            <h2 class="display-36">Let's create<br>your <em>profile</em></h2>
+
+            <p class="field-label">Username</p>
+            <label class="field field--plain"><input placeholder="@username" id="username"></label>
+
+            <p class="field-label">Your name</p>
+            <label class="field field--plain"><input placeholder="Your name" id="fullname"></label>
+
+            <p class="field-label">Nationality</p>
+            <button class="field field--select" id="countryRow" type="button">
+              <span class="flag" id="countryFlag">🇮🇩</span>
+              <span class="value" id="countryValue">Indonesia</span>
+              <img class="caret" src="assets/icons/IconChevron.svg" alt="">
+            </button>
+
+            <p class="field-label">Current location</p>
+            <button class="field field--select" id="locationRow" type="button">
+              <span class="flag" id="locationFlag">🇮🇩</span>
+              <span class="value" id="locationValue">Bali, Indonesia</span>
+              <img class="caret" src="assets/icons/IconChevron.svg" alt="">
+            </button>
+          </div>
+
+          <div class="bottom-bar">
+            <button class="btn btn--primary" data-go="setup2">
+              <span>Next step</span>
+              <svg class="chevron" viewBox="0 0 10 16"><path d="M1.5 1.5 8 8l-6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+        </section>
+
+        <!-- ───────────────────────── Профиль, шаг 2 ───────────────────────── -->
+        <section class="screen-page" data-screen="setup2">
+          <div class="setup-head">
+            <button class="pill-back" data-back="setup1">
+              <img src="assets/icons/IconChevron.svg" alt=""><span>Back</span>
+            </button>
+            <div class="pager-dots"><i></i><i class="is-active"></i></div>
+          </div>
+
+          <div class="page-body setup-body">
+            <h2 class="display-36">Something<br>about <em>you</em></h2>
+
+            <div class="row-between profile-images__head">
+              <p class="field-label">Profile images</p>
+              <p class="field-label counter"><span id="profileImageCount">0</span> / 10</p>
+            </div>
+            <div class="profile-images" id="profileImages">
+              <button class="profile-images__empty" id="profileImagesEmpty" type="button">
+                <span aria-hidden="true">+</span>
+                <b>Add image</b>
+              </button>
+              <div class="profile-images__strip" id="profileImagesStrip" hidden></div>
+              <input id="profileImagesInput" type="file" accept="image/*" multiple hidden>
+            </div>
+            <p class="profile-images__limit" id="profileImagesLimit" hidden>Максимум 10 фотографий</p>
+
+            <div class="row-between">
+              <p class="field-label">Describe yourself</p>
+              <p class="field-label counter"><span id="bioCount">0</span> / 300</p>
+            </div>
+            <textarea class="bio" id="bio" maxlength="300" placeholder="Describe yourself…"></textarea>
+
+            <p class="field-label">Social media</p>
+            <div class="social-list">
+              <button class="social-row" data-social="telegram" data-fallback="ugc-model228" type="button">
+                <span class="badge badge--tg"><img src="assets/icons/SocialTelegram.svg" alt=""></span>
+                <span>Telegram</span><em class="social-row__value">Connect</em><span class="social-row__action" aria-hidden="true"></span>
+              </button>
+              <button class="social-row" data-social="whatsapp" data-fallback="milka.creator" type="button">
+                <span class="badge badge--wa"><img src="assets/icons/SocialWhatsApp.svg" alt=""></span>
+                <span>WhatsApp</span><em class="social-row__value">Connect</em><span class="social-row__action" aria-hidden="true"></span>
+              </button>
+              <button class="social-row" data-social="instagram" data-fallback="lisa_ugc" type="button">
+                <span class="badge badge--ig"><img src="assets/icons/SocialInstagram.svg" alt=""></span>
+                <span>Instagram</span><em class="social-row__value">Connect</em><span class="social-row__action" aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
+
+          <div class="bottom-bar bottom-bar--two">
+            <button class="btn btn--ghost btn--skip" data-go="profile">Skip</button>
+            <button class="btn btn--primary" data-go="profile">Let's collabs</button>
+          </div>
+        </section>
+
+        <!-- ───────────────────────── Проекты ───────────────────────── -->
+        <section class="screen-page" data-screen="projects">
+          <header class="projects-head">
+            <button class="projects-head__button glass" id="newProjectButton" type="button" aria-label="Create project">+</button>
+            <img class="projects-head__logo" src="assets/logo.svg" alt="kolaba">
+            <button class="projects-head__button glass projects-search-button" id="projectsSearchButton" type="button" aria-label="Search projects">
+              <img src="assets/icons/SearchBold.svg" alt=""><span>2</span>
+            </button>
+          </header>
+
+          <div class="projects-tabs" id="projectsTabs" role="tablist">
+            <button class="is-active" type="button" data-project-tab="all"><img src="assets/icons/IconBriefcase.svg" alt=""><span>All projects</span></button>
+            <button type="button" data-project-tab="mine"><img src="assets/icons/IconBriefcase.svg" alt=""><span>My projects</span></button>
+            <button type="button" data-project-tab="saved"><img src="assets/icons/ProjectBookmarkFilled.svg" alt=""><span>Saved</span></button>
+            <i id="projectsTabsLine"></i>
+          </div>
+
+          <div class="projects-search" id="projectsSearch" hidden>
+            <img src="assets/icons/SearchBold.svg" alt="">
+            <input id="projectsSearchInput" type="search" placeholder="Search projects" autocomplete="off">
+            <button id="projectsSearchClose" type="button" aria-label="Close search">×</button>
+          </div>
+
+          <div class="projects-refresh" id="projectsRefresh" aria-hidden="true"><i></i><span>Pull to refresh</span></div>
+          <div class="projects-pager" id="projectsPager">
+            <div class="projects-page is-active" data-project-page="all"><div class="projects-list" id="projectsAll"></div></div>
+            <div class="projects-page" data-project-page="mine"><div class="projects-list" id="projectsMine"></div></div>
+            <div class="projects-page" data-project-page="saved"><div class="projects-list" id="projectsSaved"></div></div>
+          </div>
+
+          <nav class="tabbar tabbar--projects">
+            <button class="is-active" data-go="projects"><img src="assets/icons/IconBriefcase.svg" alt=""><i></i></button>
+            <button><img src="assets/icons/IconMail.svg" alt=""><i></i></button>
+            <button data-go="feed"><img src="assets/icons/IconApps.svg" alt=""><i></i></button>
+            <button><img src="assets/icons/IconBell.svg" alt=""><i></i></button>
+            <button data-go="profile"><span class="tabbar__avatar"><img src="assets/photos/photo-4.png" alt=""></span><i></i></button>
+          </nav>
+
+          <div class="projects-overlay" id="projectsOverlay" aria-hidden="true">
+            <button class="projects-overlay__backdrop" type="button" data-project-overlay-close aria-label="Close"></button>
+            <div class="projects-sheet" id="projectsSheet" role="dialog" aria-modal="true"></div>
+          </div>
+
+          <div class="project-detail" id="projectDetail" aria-hidden="true">
+            <button class="project-detail__back" id="projectDetailBack" type="button"><span>‹</span> Back</button>
+            <img src="assets/logo.svg" alt="kolaba">
+            <div><h2>Project details</h2><p>Full project page coming soon</p></div>
+          </div>
+        </section>
+
+        <!-- ───────────────────────── Лента видео ───────────────────────── -->
+        <section class="screen-page" data-screen="feed">
+          <div class="feed" id="feed" aria-label="Video feed"></div>
+
+          <header class="feed-head">
+            <span class="feed-head__spacer" aria-hidden="true"></span>
+            <div class="feed-head__center">
+              <img class="feed-head__logo" src="assets/logo.svg" alt="kolaba">
+              <div class="feed-position" id="feedPosition" aria-label="Feed position"></div>
+            </div>
+            <button class="feed-head__button glass" type="button" aria-label="Search">
+              <img class="feed-search-icon" src="assets/icons/SearchBold.svg" alt="">
+            </button>
+          </header>
+
+          <nav class="tabbar tabbar--feed">
+            <button data-go="projects"><img src="assets/icons/IconBriefcase.svg" alt=""><i></i></button>
+            <button><img src="assets/icons/IconMail.svg" alt=""><i></i></button>
+            <button class="is-active" data-go="feed"><img src="assets/icons/IconApps.svg" alt=""><i></i></button>
+            <button class="has-badge"><img src="assets/icons/IconBell.svg" alt=""><span class="badge-count">2</span><i></i></button>
+            <button data-go="profile"><span class="tabbar__avatar"><img src="assets/photos/photo-4.png" alt=""></span><i></i></button>
+          </nav>
+
+          <div class="feed-menu" id="feedMenu" aria-hidden="true">
+            <button class="feed-menu__backdrop" type="button" data-feed-menu-close aria-label="Close menu"></button>
+            <div class="feed-menu__sheet" role="dialog" aria-modal="true" aria-label="Video actions">
+              <button type="button">Share</button>
+              <button type="button">Report</button>
+              <button type="button">Not interested</button>
+              <button class="feed-menu__cancel" type="button" data-feed-menu-close>Cancel</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ─────────────────── Ролики одного профиля ─────────────────── -->
+        <section class="screen-page" data-screen="profileReels">
+          <article class="profile-reel-stage" id="profileReelStage">
+            <div class="profile-reel-clips" id="profileReelClips" aria-label="Profile videos"></div>
+            <span class="feed-play-indicator" id="profileReelPlay" aria-hidden="true"></span>
+            <span class="feed-heart-burst" id="profileReelHeart" aria-hidden="true"></span>
+            <div class="feed-progress" aria-hidden="true"><i id="profileReelProgress"></i></div>
+
+            <div class="feed-content">
+              <div class="feed-author-row">
+                <button class="feed-avatar-button" type="button" data-profile-reels-close aria-label="Back to profile">
+                  <img class="feed-avatar" id="profileReelAvatar" src="assets/photos/photo-4.png" alt="">
+                </button>
+                <div class="feed-author">
+                  <b id="profileReelName">Milka Lisa | UGC Bali</b>
+                  <span class="feed-place"><span class="feed-flag" id="profileReelFlag">🇮🇩</span><span class="feed-city" id="profileReelLocation">Bali, Indonesia</span></span>
+                </div>
+                <div class="feed-actions">
+                  <button class="feed-like glass" id="profileReelLike" type="button" aria-label="Like"><span class="feed-like__icon"></span><b>0</b></button>
+                  <button class="feed-follow" id="profileReelFollow" type="button" aria-label="Follow"><img src="assets/icons/FeedPlus.svg" alt=""><span class="feed-follow__check">✓</span></button>
+                </div>
+              </div>
+              <p class="feed-caption" id="profileReelCaption">UGC creator crafting authentic, high-converting content for modern brands ✨</p>
+              <div class="feed-bottom-row">
+                <button class="feed-views glass" type="button" aria-label="Views"><img src="assets/icons/FeedEye.svg" alt=""><span id="profileReelViews">0</span></button>
+                <button class="feed-more glass" id="profileReelMore" type="button" aria-label="More actions"><img src="assets/icons/ThreeDots.svg" alt=""></button>
+              </div>
+            </div>
+          </article>
+
+          <header class="feed-head">
+            <button class="feed-head__button glass" type="button" data-profile-reels-close aria-label="Back to profile">
+              <img src="assets/icons/IconChevron.svg" alt="">
+            </button>
+            <div class="feed-head__center">
+              <img class="feed-head__logo" src="assets/logo.svg" alt="kolaba">
+              <div class="feed-position" id="profileReelPosition" aria-label="Video position"></div>
+            </div>
+            <button class="feed-head__button glass" type="button" aria-label="Search">
+              <img class="feed-search-icon" src="assets/icons/SearchBold.svg" alt="">
+            </button>
+          </header>
+
+          <nav class="tabbar tabbar--feed">
+            <button data-go="projects"><img src="assets/icons/IconBriefcase.svg" alt=""><i></i></button>
+            <button><img src="assets/icons/IconMail.svg" alt=""><i></i></button>
+            <button data-go="feed"><img src="assets/icons/IconApps.svg" alt=""><i></i></button>
+            <button class="has-badge"><img src="assets/icons/IconBell.svg" alt=""><span class="badge-count">2</span><i></i></button>
+            <button class="is-active" data-profile-reels-close><span class="tabbar__avatar"><img src="assets/photos/photo-4.png" alt=""></span><i></i></button>
+          </nav>
+
+          <div class="feed-menu" id="profileReelMenu" aria-hidden="true">
+            <button class="feed-menu__backdrop" type="button" data-profile-reel-menu-close aria-label="Close menu"></button>
+            <div class="feed-menu__sheet" role="dialog" aria-modal="true" aria-label="Video actions">
+              <button type="button">Share</button>
+              <button type="button">Report</button>
+              <button type="button">Not interested</button>
+              <button class="feed-menu__cancel" type="button" data-profile-reel-menu-close>Cancel</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ───────────────────────── Мой профиль ───────────────────────── -->
+        <section class="screen-page" data-screen="profile">
+          <div class="profile-scroll" id="profileScroll">
+            <div class="profile-head">
+              <div class="profile-top">
+                <span class="handle" id="handleOut">_devochka228</span>
+                <button class="round-btn"><img src="assets/icons/IconShare.svg" alt=""></button>
+              </div>
+
+              <div class="avatar"><img src="assets/photos/photo-4.png" alt=""></div>
+
+              <h3 class="display-26" id="nameOut">Milka Lisa | UGC Bali</h3>
+              <p class="place"><span class="profile-location-flag" id="locationOutFlag" aria-hidden="true">🇮🇩</span><span id="locationOut">Bali, Indonesia</span></p>
+
+              <div class="stats">
+                <div><b>64</b><span>Profile views</span></div>
+                <i></i>
+                <div><b>256</b><span>Followers</span></div>
+                <i></i>
+                <div><b>256</b><span>Following</span></div>
+              </div>
+
+              <p class="bio-out" id="bioOut">UGC creator crafting authentic, high-converting content for modern brands ✨ Open to collaborations worldwide 🌍</p>
+
+              <div class="profile-actions">
+                <button class="btn btn--ghost">Follow <img src="assets/icons/IconPlus.svg" alt=""></button>
+                <button class="btn btn--primary">Message <img src="assets/icons/IconEnvelope.svg" alt=""></button>
+              </div>
+
+              <div class="profile-socials">
+                <img src="assets/icons/SocialWhatsApp.svg" alt="">
+                <img src="assets/icons/SocialInstagram.svg" alt="">
+                <img src="assets/icons/SocialTelegram.svg" alt="">
+                <img src="assets/icons/SocialWebsite.svg" alt="">
+              </div>
+            </div>
+
+            <div class="tabs" id="tabs">
+              <button class="tabs__item is-active" data-tab="video">
+                <img src="assets/icons/IconBriefcase.svg" alt=""><span>Video</span><em>5</em>
+              </button>
+              <button class="tabs__item" data-tab="photos">
+                <img src="assets/icons/IconPicture.svg" alt=""><span>Photos</span><em>20</em>
+              </button>
+              <span class="tabs__line" id="tabsLine"></span>
+            </div>
+
+            <div class="pager" id="pager">
+              <div class="pager__page is-active" data-page="video">
+                <div class="grid grid--video" id="videoGrid"></div>
+              </div>
+              <div class="pager__page" data-page="photos">
+                <div class="grid" id="grid"></div>
+              </div>
+            </div>
+          </div>
+
+          <button class="btn btn--primary upload-more">Upload more</button>
+
+          <nav class="tabbar">
+            <button data-go="projects"><img src="assets/icons/IconBriefcase.svg" alt=""><i></i></button>
+            <button><img src="assets/icons/IconMail.svg" alt=""><i></i></button>
+            <button data-go="feed"><img src="assets/icons/IconApps.svg" alt=""><i></i></button>
+            <button class="has-badge"><img src="assets/icons/IconBell.svg" alt=""><span class="badge-count">2</span><i></i></button>
+            <button class="is-active" data-go="profile"><span class="tabbar__avatar"><img src="assets/photos/photo-4.png" alt=""></span><i></i></button>
+          </nav>
+        </section>
+
+        <!-- Селектор страны / текущего местоположения -->
+        <div class="picker" id="profilePicker" aria-hidden="true">
+          <button class="picker__backdrop" type="button" aria-label="Close selector" data-picker-close></button>
+          <section class="picker__sheet" role="dialog" aria-modal="true" aria-labelledby="pickerTitle">
+            <div class="picker__grabber"></div>
+            <div class="picker__head">
+              <h3 id="pickerTitle">Select nationality</h3>
+              <button class="picker__close" type="button" aria-label="Close selector" data-picker-close>×</button>
+            </div>
+
+            <label class="picker__search">
+              <span aria-hidden="true">⌕</span>
+              <input id="pickerSearch" type="search" placeholder="Search country" autocomplete="off" spellcheck="false">
+            </label>
+
+            <button class="picker__geolocate" id="useDeviceLocation" type="button" hidden>
+              <span class="picker__geo-icon" aria-hidden="true">◎</span>
+              <span><b>Use my current location</b><em id="geoStatus">Location permission required</em></span>
+              <span class="picker__geo-arrow" aria-hidden="true">›</span>
+            </button>
+
+            <p class="picker__label" id="pickerLabel">All countries</p>
+            <div class="picker__list" id="pickerList" role="listbox"></div>
+            <p class="picker__attribution" id="pickerAttribution" hidden>Location data © OpenStreetMap contributors</p>
+          </section>
+        </div>
+
+        <!-- Полноэкранный просмотр фотографии -->
+        <div class="media-viewer" id="mediaViewer" role="dialog" aria-modal="true" aria-label="Photo viewer" aria-hidden="true">
+          <button class="media-viewer__backdrop" id="mediaViewerBackdrop" type="button" aria-label="Close photo"></button>
+          <img class="media-viewer__image" id="mediaViewerImage" src="" alt="">
+        </div>
+
+      </div>
+    </div>
+    <img class="frame" src="assets/iphone.png" alt="">
+  </div>
+</main>
+
+<footer class="page-foot">
+  <button class="page-btn" id="goStart">Go to Main page</button>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
