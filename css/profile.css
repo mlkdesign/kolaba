@@ -72,7 +72,7 @@
   position: relative; width: 100%; min-height: 1px;
   display: flex; flex-wrap: nowrap; align-items: flex-start;
   overflow-x: auto; overflow-y: hidden;
-  scroll-snap-type: x mandatory; scroll-behavior: smooth;
+  scroll-snap-type: x mandatory;
   overscroll-behavior-x: contain; overscroll-behavior-y: auto; scrollbar-width: none;
   transition: height .32s cubic-bezier(.22,.78,.22,1);
 }

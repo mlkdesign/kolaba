@@ -46,7 +46,8 @@
   flex: none;
   width: 434px;
   height: 887px;
-  transform: scale(var(--mockup-scale, 1));
+  /* --reveal-scale добавляет прелоадер на время появления лендинга */
+  transform: scale(calc(var(--mockup-scale, 1) * var(--reveal-scale, 1)));
   transform-origin: top center;
   /* съедаем место, которое коробка занимает до масштабирования */
   margin-bottom: calc((var(--mockup-scale, 1) - 1) * 887px);

@@ -38,23 +38,44 @@ function layoutTabs(progress = profileTabNames.indexOf(activeProfileTab)) {
   tabsLine.style.transform = `translateX(${lower.offsetLeft + (upper.offsetLeft - lower.offsetLeft) * amount}px)`;
 }
 
-/* Высота пейджера равна высоте видимой страницы: страницы разной длины,
-   а вокруг них вертикальный скролл профиля. */
-function layoutProfilePages(progress = profileTabNames.indexOf(activeProfileTab), animated = true) {
-  const pages = [...pager.querySelectorAll('.pager__page')];
-  const targetIndex = Math.max(0, Math.min(pages.length - 1, Math.round(progress)));
-  const targetPage = pages[targetIndex];
-  if (!targetPage) return;
+const pagerPages = () => [...pager.querySelectorAll('.pager__page')];
+
+function setPagerHeight(height, animated) {
   pager.style.transition = animated ? '' : 'none';
-  pager.style.height = `${targetPage.scrollHeight}px`;
+  pager.style.height = `${height}px`;
   if (!animated) {
     // сбрасываем подавление анимации на следующем кадре
     window.requestAnimationFrame(() => { pager.style.transition = ''; });
   }
 }
 
+/* Пока палец ведёт страницу, высоту отдаём флексу: он держит её по самой длинной
+   странице и не отстаёт, когда догружаются ленивые картинки. Если держать высоту
+   активной страницы, соседняя оказывается срезанной — со стороны это выглядит
+   как наложение страниц. */
+function expandPagerForSwipe() {
+  pager.style.transition = 'none';
+  pager.style.height = 'auto';
+}
+
+/* Высота в покое равна высоте видимой страницы. */
+function layoutProfilePages(progress = profileTabNames.indexOf(activeProfileTab), animated = true) {
+  const pages = pagerPages();
+  const targetIndex = Math.max(0, Math.min(pages.length - 1, Math.round(progress)));
+  const targetPage = pages[targetIndex];
+  if (!targetPage) return;
+  setPagerHeight(targetPage.scrollHeight, animated);
+}
+
+/* Программная прокрутка не должна выглядеть как жест: иначе высота сначала
+   раскрывается до максимума, а потом схлопывается — видимый рывок. */
+let programmaticUntil = 0;
+
 function scrollToTab(index, behavior = 'smooth') {
-  pager.scrollTo({ left: index * pagerWidth(), behavior });
+  // ширину берём живую: кэш может отстать и страница встанет не по сетке
+  const width = pager.clientWidth || pagerWidth();
+  programmaticUntil = performance.now() + (behavior === 'smooth' ? 420 : 80);
+  pager.scrollTo({ left: index * width, behavior });
 }
 
 function setProfileTab(tab, { scroll = true } = {}) {
@@ -78,23 +99,43 @@ tabs.addEventListener('click', event => {
 
 /* Полоска и активная вкладка едут за пальцем — по событию scroll пейджера. */
 let scrollSettleTimer = 0;
+let pagerSwiping = false;
+
+function settleProfilePager() {
+  window.clearTimeout(scrollSettleTimer);
+  pagerSwiping = false;
+  const progress = pager.scrollLeft / (pager.clientWidth || 1);
+  const index = Math.max(0, Math.min(profileTabNames.length - 1, Math.round(progress)));
+  const tab = profileTabNames[index];
+  tabsLine.style.transition = '';
+  if (tab !== activeProfileTab) setProfileTab(tab, { scroll: false });
+  else layoutProfilePages(index, true);
+}
+
 pager.addEventListener('scroll', () => {
-  const progress = pager.scrollLeft / (pagerWidth() || 1);
+  const progress = pager.scrollLeft / (pager.clientWidth || 1);
+  if (!pagerSwiping && performance.now() > programmaticUntil) {
+    pagerSwiping = true;
+    expandPagerForSwipe();
+  }
   tabsLine.style.transition = 'none';
   layoutTabs(progress);
 
   window.clearTimeout(scrollSettleTimer);
-  scrollSettleTimer = window.setTimeout(() => {
-    const index = Math.max(0, Math.min(profileTabNames.length - 1, Math.round(progress)));
-    const tab = profileTabNames[index];
-    tabsLine.style.transition = '';
-    if (tab !== activeProfileTab) setProfileTab(tab, { scroll: false });
-    else layoutProfilePages(index, true);
-  }, 90);
+  scrollSettleTimer = window.setTimeout(settleProfilePager, 70);
 }, { passive: true });
 
+/* scrollend приходит сразу после прилипания — не ждём таймаут, где он есть */
+if ('onscrollend' in window) pager.addEventListener('scrollend', settleProfilePager);
+
+/* Наблюдаем только за шириной: layoutProfilePages сам меняет высоту пейджера,
+   и реакция на это зацикливала наблюдателя — отсюда и были лаги. */
+let observedPagerWidth = Math.round(pager.clientWidth);
 new ResizeObserver(entries => {
-  for (const entry of entries) pagerWidthValue = entry.contentRect.width;
+  const width = Math.round(entries[entries.length - 1].contentRect.width);
+  if (width === observedPagerWidth) return;
+  observedPagerWidth = width;
+  pagerWidthValue = width;
   // после смены ширины страница должна остаться той же
   scrollToTab(profileTabNames.indexOf(activeProfileTab), 'auto');
   layoutTabs();

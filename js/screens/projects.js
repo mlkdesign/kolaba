@@ -165,8 +165,12 @@ const projectsPager = document.getElementById('projectsPager');
 /* Ширина страницы вкладок — фактическая ширина пейджера, пересчёт по ResizeObserver */
 let projectsPagerWidthValue = projectsPager.clientWidth || window.innerWidth;
 const projectsPagerWidth = () => projectsPagerWidthValue || projectsPager.clientWidth || window.innerWidth;
+let observedProjectsWidth = Math.round(projectsPager.clientWidth);
 new ResizeObserver(entries => {
-  for (const entry of entries) projectsPagerWidthValue = entry.contentRect.width;
+  const width = Math.round(entries[entries.length - 1].contentRect.width);
+  if (width === observedProjectsWidth) return;
+  observedProjectsWidth = width;
+  projectsPagerWidthValue = width;
 }).observe(projectsPager);
 const projectsSearch = document.getElementById('projectsSearch');
 const projectsSearchInput = document.getElementById('projectsSearchInput');
@@ -196,18 +200,43 @@ function layoutProjectsTabs(progress = projectTabNames.indexOf(activeProjectTab)
 
 /* Высота пейджера равна высоте видимой страницы — вкладки разной длины,
    а скроллит их сам документ. */
-function layoutProjectPages(progress = projectTabNames.indexOf(activeProjectTab), animated = true) {
-  const pages = [...projectsPager.querySelectorAll('[data-project-page]')];
-  const index = Math.max(0, Math.min(pages.length - 1, Math.round(progress)));
-  const page = pages[index];
-  if (!page) return;
+const projectPages = () => [...projectsPager.querySelectorAll('[data-project-page]')];
+
+function setProjectsPagerHeight(height, animated) {
+  // box-sizing: border-box, а у пейджера есть верхний отступ под шапку —
+  // без его учёта высота съедала низ страницы ровно на этот отступ
+  const styles = getComputedStyle(projectsPager);
+  const padding = (parseFloat(styles.paddingTop) || 0) + (parseFloat(styles.paddingBottom) || 0);
   projectsPager.style.transition = animated ? '' : 'none';
-  projectsPager.style.height = `${page.scrollHeight}px`;
+  projectsPager.style.height = `${height + padding}px`;
   if (!animated) window.requestAnimationFrame(() => { projectsPager.style.transition = ''; });
 }
 
+/* Пока палец ведёт страницу, высоту отдаём флексу — он держит её по самой длинной
+   вкладке и не отстаёт от догружающихся картинок. Иначе соседняя страница
+   обрезается и кажется, что вкладки наезжают друг на друга. */
+function expandProjectsPagerForSwipe() {
+  projectsPager.style.transition = 'none';
+  projectsPager.style.height = 'auto';
+}
+
+function layoutProjectPages(progress = projectTabNames.indexOf(activeProjectTab), animated = true) {
+  const pages = projectPages();
+  const index = Math.max(0, Math.min(pages.length - 1, Math.round(progress)));
+  const page = pages[index];
+  if (!page) return;
+  setProjectsPagerHeight(page.scrollHeight, animated);
+}
+
+/* Программная прокрутка не должна выглядеть как жест — иначе высота сначала
+   раскрывается до максимума, а потом схлопывается. */
+let projectsProgrammaticUntil = 0;
+
 function scrollToProjectTab(index, behavior = 'smooth') {
-  projectsPager.scrollTo({ left: index * projectsPagerWidth(), behavior });
+  // ширину берём живую: кэш может отстать и страница встанет не по сетке
+  const width = projectsPager.clientWidth || projectsPagerWidth();
+  projectsProgrammaticUntil = performance.now() + (behavior === 'smooth' ? 420 : 80);
+  projectsPager.scrollTo({ left: index * width, behavior });
 }
 
 function projectCardMarkup(project, tab, isLocked = false) {
@@ -322,18 +351,31 @@ function setProjectsTab(tab, { scroll = true } = {}) {
 
 /* Полоска вкладок едет за пальцем, активная вкладка — по позиции прилипания */
 let projectsSettleTimer = 0;
+let projectsSwiping = false;
+
+function settleProjectsPager() {
+  window.clearTimeout(projectsSettleTimer);
+  projectsSwiping = false;
+  const progress = projectsPager.scrollLeft / (projectsPager.clientWidth || 1);
+  const index = Math.max(0, Math.min(projectTabNames.length - 1, Math.round(progress)));
+  projectsTabsLine.style.transition = '';
+  if (projectTabNames[index] !== activeProjectTab) setProjectsTab(projectTabNames[index], { scroll: false });
+  else layoutProjectPages(index, true);
+}
+
 projectsPager.addEventListener('scroll', () => {
-  const progress = projectsPager.scrollLeft / (projectsPagerWidth() || 1);
+  const progress = projectsPager.scrollLeft / (projectsPager.clientWidth || 1);
+  if (!projectsSwiping && performance.now() > projectsProgrammaticUntil) {
+    projectsSwiping = true;
+    expandProjectsPagerForSwipe();
+  }
   projectsTabsLine.style.transition = 'none';
   layoutProjectsTabs(progress);
   window.clearTimeout(projectsSettleTimer);
-  projectsSettleTimer = window.setTimeout(() => {
-    const index = Math.max(0, Math.min(projectTabNames.length - 1, Math.round(progress)));
-    projectsTabsLine.style.transition = '';
-    if (projectTabNames[index] !== activeProjectTab) setProjectsTab(projectTabNames[index], { scroll: false });
-    else layoutProjectPages(index, true);
-  }, 90);
+  projectsSettleTimer = window.setTimeout(settleProjectsPager, 70);
 }, { passive: true });
+
+if ('onscrollend' in window) projectsPager.addEventListener('scrollend', settleProjectsPager);
 
 projectsTabs.addEventListener('click', event => {
   const button = event.target.closest('[data-project-tab]');

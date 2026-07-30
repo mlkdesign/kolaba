@@ -1,10 +1,89 @@
 <!DOCTYPE html>
-<html lang="ru" class="is-mockup">
+<html lang="ru" class="is-mockup is-preloading">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#000000">
 <title>kolaba — прототип</title>
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="kolaba">
+<meta property="og:title" content="kolaba">
+<meta property="og:description" content="Where creators meet opportunity — прототип приложения kolaba.">
+<meta property="og:image" content="assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="kolaba">
+<meta name="twitter:description" content="Where creators meet opportunity — прототип приложения kolaba.">
+<meta name="twitter:image" content="assets/og-image.png">
+
+<!-- Критические стили прелоадера: он должен появиться до загрузки styles.css -->
+<style>
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  src: url("assets/fonts/PlusJakartaSans-ExtraBold.woff2") format("woff2");
+  font-weight: 800; font-style: normal;
+  /* block — пока шрифт не пришёл, текст не показываем, иначе подменится начертание */
+  font-display: block;
+}
+
+html.is-preloading, html.is-preloading body { overflow: hidden; }
+
+#preloader {
+  position: fixed; inset: 0; z-index: 2147483647;
+  display: grid; place-items: center;
+  /* чёрная подложка на случай медленной картинки; если она не пришла,
+     остаётся CSS-градиент под ней */
+  /* Градиент рисуется на CSS, а не картинкой: он подстраивается под любое
+     соотношение сторон (картинка при background-size: cover обрезалась бы
+     по-разному на телефоне и десктопе) и не требует ни одного запроса,
+     поэтому фон виден в первом же кадре. Под ним чёрная подложка. */
+  background-color: #000;
+  background-image:
+    radial-gradient(150% 120% at 22% -22%, #9333EA 0%, rgba(147,51,234,.58) 32%, rgba(147,51,234,0) 74%),
+    radial-gradient(130% 110% at 90% -16%, #D6318C 0%, rgba(214,49,140,.48) 30%, rgba(214,49,140,0) 70%),
+    linear-gradient(180deg, #3A1156 0%, #1E0A2B 30%, #0A0610 62%, #000 86%);
+  background-size: cover;
+  background-position: center top;
+  background-repeat: no-repeat;
+  transition: opacity .45s ease-out, transform .45s ease-out;
+  will-change: opacity, transform;
+}
+#preloader.is-leaving { opacity: 0; transform: scale(1.04); pointer-events: none; }
+
+.preloader__line {
+  display: flex; align-items: baseline; justify-content: center;
+  padding: 0 24px;
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  font-weight: 800;
+  font-size: clamp(24px, 3.2vw, 34px);
+  /* фиксированная высота строки — текст не должен прыгать по вертикали */
+  line-height: 1.25;
+  letter-spacing: -.02em;
+  color: #fff;
+  white-space: pre;
+}
+.preloader__dot { color: #FF0077; }
+
+/* Загрузка затянулась — показываем, что страница жива */
+@keyframes preloader-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .7; } }
+#preloader.is-waiting .preloader__line { animation: preloader-pulse 1.6s ease-in-out infinite; }
+
+/* Лендинг появляется навстречу уходящему прелоадеру */
+.page-logo, .phone { transition: opacity .5s ease, transform .5s ease; }
+.page-logo { transition-delay: .12s; }
+html.is-preloading .page-logo { opacity: 0; }
+html.is-preloading .phone { opacity: 0; --reveal-scale: .96; }
+
+@media (prefers-reduced-motion: reduce) {
+  #preloader { transition: opacity .3s linear; }
+  #preloader.is-leaving { transform: none; }
+  #preloader.is-waiting .preloader__line { animation: none; }
+  .page-logo, .phone { transition: opacity .3s linear; }
+  html.is-preloading .phone { --reveal-scale: 1; }
+}
+</style>
+
 <link rel="icon" href="assets/icons/app-icon-192.png" sizes="192x192" type="image/png">
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/start.css">
@@ -20,6 +99,10 @@
 <link rel="stylesheet" href="css/mockup.css">
 </head>
 <body>
+
+<div id="preloader" role="status" aria-live="polite" aria-label="Загрузка">
+  <div class="preloader__line"><span class="preloader__word" id="preloaderWord"></span><span class="preloader__dot">.</span></div>
+</div>
 
 <header class="page-logo"><img src="assets/logo.svg" alt="kolaba"></header>
 
@@ -652,9 +735,132 @@
   </div>
 </main>
 
-<footer class="page-foot">
-  <button class="page-btn" id="goStart">Go to Main page</button>
-</footer>
+
+<script>
+/* Прелоадер: печатает слова, ждёт реальную загрузку и уступает место лендингу.
+   Без модулей и зависимостей — запускается раньше js/app.js. */
+(function () {
+  var root = document.documentElement;
+  var preloader = document.getElementById('preloader');
+  var wordEl = document.getElementById('preloaderWord');
+  if (!preloader || !wordEl) { root.classList.remove('is-preloading'); return; }
+
+  var WORDS = ['create', 'inspire', 'collab', 'kolaba'];
+  var TYPE_MS = 65;      /* печать символа */
+  var ERASE_MS = 35;     /* стирание символа */
+  var HOLD_MS = 700;     /* пауза на собранном слове */
+  var GAP_MS = 150;      /* пауза между словами */
+  var REPEAT_MS = 600;   /* сокращённый показ при повторном заходе */
+  var HARD_TIMEOUT_MS = 8000;
+  var SESSION_KEY = 'kolaba:preloader-shown';
+
+  var reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var seenThisSession = false;
+  try { seenThisSession = sessionStorage.getItem(SESSION_KEY) === '1'; } catch (error) { /* приватный режим */ }
+
+  var finished = false;
+  var animationDone = false;
+  var assetsReady = false;
+  var timers = [];
+
+  function later(fn, ms) { var id = window.setTimeout(fn, ms); timers.push(id); return id; }
+  function clearTimers() { timers.forEach(window.clearTimeout); timers = []; }
+
+  /* Ждём страницу, шрифты и картинку мокапа — её тянем заранее */
+  function whenLoaded() {
+    return new Promise(function (resolve) {
+      if (document.readyState === 'complete') resolve();
+      else window.addEventListener('load', resolve, { once: true });
+    });
+  }
+  function whenImage(src) {
+    return new Promise(function (resolve) {
+      var image = new Image();
+      image.onload = image.onerror = resolve;
+      image.src = src;
+    });
+  }
+
+  Promise.all([
+    whenLoaded(),
+    document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve(),
+    whenImage('assets/iphone.png')
+  ]).then(function () { assetsReady = true; maybeFinish(); });
+
+  /* Предохранитель: не держим заставку дольше восьми секунд */
+  later(function () { assetsReady = true; animationDone = true; maybeFinish(); }, HARD_TIMEOUT_MS);
+
+  function maybeFinish() {
+    if (finished) return;
+    if (!animationDone) return;
+    if (!assetsReady) { preloader.classList.add('is-waiting'); return; }
+    finish();
+  }
+
+  function finish() {
+    if (finished) return;
+    finished = true;
+    clearTimers();
+    try { sessionStorage.setItem(SESSION_KEY, '1'); } catch (error) { /* приватный режим */ }
+    preloader.classList.remove('is-waiting');
+    preloader.classList.add('is-leaving');
+    root.classList.remove('is-preloading');
+
+    var removed = false;
+    function remove() {
+      if (removed) return;
+      removed = true;
+      if (preloader.parentNode) preloader.parentNode.removeChild(preloader);
+    }
+    preloader.addEventListener('transitionend', remove, { once: true });
+    window.setTimeout(remove, 700);
+  }
+
+  /* Тап, клик или Esc обрывают анимацию и запускают переход сразу */
+  function skip() {
+    if (finished) return;
+    clearTimers();
+    wordEl.textContent = 'kolaba';
+    animationDone = true;
+    assetsReady = true;
+    finish();
+  }
+  preloader.addEventListener('click', skip);
+  preloader.addEventListener('touchend', skip);
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' || event.key === 'Esc') skip();
+  });
+
+  function typeWords(index) {
+    var word = WORDS[index];
+    var shown = 0;
+    (function type() {
+      wordEl.textContent = word.slice(0, ++shown);
+      if (shown < word.length) { later(type, TYPE_MS); return; }
+      later(function () {
+        /* последнее слово не стирается и остаётся на экране */
+        if (index === WORDS.length - 1) { animationDone = true; maybeFinish(); return; }
+        (function erase() {
+          wordEl.textContent = word.slice(0, --shown);
+          if (shown > 0) later(erase, ERASE_MS);
+          else later(function () { typeWords(index + 1); }, GAP_MS);
+        })();
+      }, HOLD_MS);
+    })();
+  }
+
+  if (reducedMotion) {
+    wordEl.textContent = 'kolaba';
+    animationDone = true;
+    maybeFinish();
+  } else if (seenThisSession) {
+    wordEl.textContent = 'kolaba';
+    later(function () { animationDone = true; maybeFinish(); }, REPEAT_MS);
+  } else {
+    typeWords(0);
+  }
+})();
+</script>
 
 <script type="module" src="js/app.js"></script>
 </body>
