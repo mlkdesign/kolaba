@@ -17,6 +17,14 @@
   --app-h: 100%;
   /* колонка равна экрану телефона, боковых полей нет */
   --col-inset: 0px;
+
+  /* Замерено по прозрачной области assets/iphone.png (434×887). Рамка
+     масштабируется трансформом, поэтому значения в px стабильны. */
+  --screen-left: 24px;          /* левый край дисплея от края рамки */
+  --screen-top: 23px;           /* верхний край дисплея */
+  --island-left: 157px;         /* левая кромка Dynamic Island */
+  --island-right: 277px;        /* правая кромка Dynamic Island */
+  --island-center-y: 52.5px;    /* центр Dynamic Island по вертикали */
 }
 
 .is-mockup,
@@ -62,11 +70,16 @@
 .screen {
   /* экран внутри мокапа — замерено по прозрачной области PNG */
   position: absolute;
-  left: 5.53%; top: 2.593%;
+  left: var(--screen-left); top: var(--screen-top);
   width: 88.94%; height: 95%;
   overflow: hidden;
   background: var(--app-bg);
   border-radius: 58px;
+  /* Свой контекст наложения: без него слои приложения с z-index больше 3
+     (таб-бар, шапки, блюр) всплывали над рамкой телефона и закрывали
+     Dynamic Island. */
+  isolation: isolate;
+  z-index: 0;
 }
 
 .page-btn {
@@ -78,19 +91,36 @@
 .page-btn:active { transform: scale(.97); }
 
 /* ─── фейковый статус-бар: неподвижный слой поверх всех экранов ─── */
+
+/* Всё выстроено по Dynamic Island: время центрируется в зоне между левым краем
+   дисплея и островом, правая группа прижата к краю, а по вертикали и то и то
+   стоит на линии центра острова. */
 .ios-statusbar {
-  position: absolute; left: 29px; right: 28px; top: 20px; z-index: 120;
-  height: 13px;
-  display: flex; align-items: center; justify-content: space-between;
+  position: absolute;
+  left: 0; right: 0;
+  top: calc(var(--island-center-y) - var(--screen-top));
+  height: 0;
+  z-index: 120;
   pointer-events: none;
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .38));
 }
-.ios-statusbar__time { width: 34px; height: 13px; display: block; }
-.ios-statusbar__signals { display: flex; align-items: center; gap: 8px; height: 13px; }
-.ios-statusbar__signals img { display: block; flex: none; }
-.ios-statusbar__signals img:nth-child(1) { width: 20px; height: 13px; }
-.ios-statusbar__signals img:nth-child(2) { width: 18px; height: 13px; }
-.ios-statusbar__signals img:nth-child(3) { width: 28px; height: 13px; }
+.ios-statusbar__time {
+  position: absolute;
+  left: calc((var(--island-left) - var(--screen-left)) / 2);
+  top: 0;
+  transform: translate(-50%, -50%);
+  display: block;
+  width: 34px; height: 13px;
+}
+.ios-statusbar__signals {
+  position: absolute;
+  right: 24px;
+  top: 0;
+  transform: translateY(-50%);
+  display: flex; align-items: center; gap: 6px;
+  height: 13px;
+}
+.ios-statusbar svg { display: block; flex: none; }
 
 /* ─── приложение занимает экран телефона ─── */
 .is-mockup #app,
