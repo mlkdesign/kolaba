@@ -1,0 +1,273 @@
+/* ─────────────── Лента видео и ролики автора ─────────────── */
+
+/* ─────────────── Полноэкранная лента видео ─────────────── */
+.feed {
+  position: absolute; inset: 0;
+  padding-bottom: var(--tabbar-height);
+  overflow-x: hidden; overflow-y: auto;
+  scroll-snap-type: y mandatory;
+  overscroll-behavior-y: none;
+  scrollbar-width: none;
+  background: var(--app-bg);
+}
+.feed.is-dragging { scroll-snap-type: none; scroll-behavior: auto; }
+.feed::-webkit-scrollbar { display: none; }
+.feed-top-blur {
+  position: absolute; left: 0; right: 0; top: 0; z-index: 6;
+  height: 150px; pointer-events: none;
+  -webkit-backdrop-filter: blur(32px);
+  backdrop-filter: blur(32px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0,0,0,.88) 28%, rgba(0,0,0,.48) 64%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, rgba(0,0,0,.88) 28%, rgba(0,0,0,.48) 64%, transparent 100%);
+}
+.feed-card {
+  position: relative; width: 100%; height: 100%;
+  overflow: hidden; scroll-snap-align: start; scroll-snap-stop: always;
+  background: var(--app-bg); -webkit-touch-callout: none; user-select: none;
+}
+.feed.is-dragging .feed-card,
+.feed-clips.is-dragging { cursor: grabbing; }
+.feed-card::before,
+.feed-card::after {
+  content: ''; position: absolute; left: 0; right: 0; z-index: 1;
+  pointer-events: none;
+}
+.feed-card::before {
+  top: 0; height: 170px;
+  background: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
+}
+.feed-card::after {
+  bottom: 0; height: 340px;
+  background: linear-gradient(to bottom, transparent, rgba(0,0,0,.78));
+}
+.feed-clips {
+  position: absolute; inset: 0;
+  display: flex;
+  overflow-x: auto; overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: none;
+  scrollbar-width: none;
+  /* по горизонтали листает сам скроллер, по вертикали — лента снаружи */
+  touch-action: pan-x pan-y;
+  overscroll-behavior-x: contain; overscroll-behavior-y: auto;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+.feed-clips::-webkit-scrollbar { display: none; }
+.feed-clips.is-dragging { scroll-snap-type: none; }
+.feed-clip {
+  position: relative; width: 100%; height: 100%; flex: 0 0 100%;
+  overflow: hidden;
+  scroll-snap-align: start; scroll-snap-stop: always;
+  background: var(--app-bg);
+}
+.feed-video {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%; object-fit: cover;
+  background: var(--app-bg);
+}
+.feed-loading {
+  position: absolute; left: 50%; top: 50%; z-index: 2;
+  width: 20px; height: 20px;
+  border: 2px solid rgba(255,255,255,.25); border-top-color: #fff; border-radius: 50%;
+  transform: translate(-50%, -50%);
+  animation: feed-spin .8s linear infinite;
+}
+.feed-clip.is-ready .feed-loading { display: none; }
+.feed-head {
+  position: absolute; left: var(--top-control-side); right: var(--top-control-side); top: var(--top-control-y); z-index: 8;
+  display: grid; grid-template-columns: 40px 1fr 40px; align-items: start;
+  pointer-events: none;
+}
+.feed-head__spacer { width: 40px; height: 40px; }
+.feed-head__button {
+  width: var(--top-control-size); height: var(--top-control-size); padding: 0;
+  display: grid; place-items: center;
+  border: 0; border-radius: 50%; color: #fff;
+  pointer-events: auto; cursor: pointer;
+}
+.glass {
+  background: rgba(255,255,255,.09);
+  border: 1px solid rgba(255,255,255,.20);
+  box-shadow: none;
+  backdrop-filter: blur(18px);
+}
+.feed-head__button > img { width: 20px; height: 20px; }
+.feed-head__center { display: flex; flex-direction: column; align-items: center; padding-top: 7px; }
+.feed-head__logo { width: auto; height: var(--top-logo-height); display: block; }
+.feed-position { height: 3px; margin-top: 10px; display: flex; align-items: center; gap: 5px; }
+.feed-position i {
+  width: 12px; height: 3px; border-radius: 999px;
+  background: rgba(255,255,255,.35);
+}
+.feed-position i.is-active { width: 28px; background: #fff; }
+.feed-head__button > .feed-search-icon { width: 16px; height: 16px; display: block; opacity: 1; }
+.feed-content {
+  position: absolute; left: 16px; right: 16px; z-index: 3;
+  bottom: calc(16px + var(--tabbar-height));
+  color: #fff;
+}
+.feed-card .feed-content { bottom: 16px; }
+.feed-author-row { display: flex; align-items: center; gap: 8px; }
+.feed-avatar-button {
+  width: 32px; height: 32px; flex: none; padding: 0; border: 0; border-radius: 50%;
+  background: none; cursor: pointer;
+}
+.feed-avatar {
+  width: 32px; height: 32px; display: block;
+  border-radius: 50%; object-fit: cover;
+  box-shadow: 0 0 0 1.5px rgba(255,255,255,.9);
+}
+.feed-author { flex: 1; min-width: 0; }
+.feed-author-name {
+  width: 100%; padding: 0; border: 0; background: none; color: inherit;
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: inherit; font-size: 16px; font-weight: 600; text-align: left; cursor: pointer;
+}
+.feed-place {
+  min-width: 0; margin-top: 0; display: flex; align-items: center; gap: 4px;
+  overflow: hidden; white-space: nowrap;
+  font-size: 12px; font-weight: 500; color: rgba(255,255,255,.85);
+}
+.feed-flag { flex: none; font-family: "Apple Color Emoji", "Segoe UI Emoji", sans-serif; font-size: 13px; }
+.feed-city { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-actions { display: flex; align-items: center; gap: 6px; }
+.feed-like,
+.feed-follow,
+.feed-more,
+.feed-views {
+  border: 0; color: #fff; font-family: inherit; cursor: pointer;
+}
+.feed-like {
+  height: 32px; min-width: 62px; padding: 0 10px;
+  display: flex; align-items: center; justify-content: center; gap: 5px;
+  border-radius: 999px; font-size: 13px; font-weight: 600;
+  transition: color .2s ease, background .2s ease, box-shadow .2s ease;
+}
+.feed-like__icon {
+  width: 14px; height: 14px; flex: none;
+  background: currentColor;
+  -webkit-mask: url("../assets/icons/FeedHeart.svg") center / contain no-repeat;
+  mask: url("../assets/icons/FeedHeart.svg") center / contain no-repeat;
+}
+.feed-like.is-liked {
+  color: #fff;
+  background: var(--pink);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.feed-like.is-bouncing { animation: feed-bounce .3s cubic-bezier(.25,.8,.4,1.4); }
+.feed-follow {
+  position: relative; width: 32px; height: 32px; padding: 0;
+  display: block;
+  border-radius: 50%; background: #fff;
+}
+.feed-follow img { position: absolute; left: 50%; top: 50%; object-fit: contain; transform: translate(-50%,-50%); }
+.feed-follow .feed-follow__plus { width: 12px; height: 12px; display: block; }
+.feed-follow .feed-follow__check { width: 12px; height: 12px; display: none; }
+.feed-follow.is-following { background: var(--pink); }
+.feed-follow.is-following .feed-follow__plus { display: none; }
+.feed-follow.is-following .feed-follow__check { display: block; }
+.feed-follow.is-bouncing { animation: feed-bounce .3s cubic-bezier(.25,.8,.4,1.4); }
+.feed-caption {
+  margin: 12px 0 0;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  overflow: hidden;
+  color: rgba(255,255,255,.92); font-size: 15px; font-weight: 500; line-height: 1.36;
+  cursor: pointer;
+}
+.feed-caption.is-expanded { display: block; overflow: visible; }
+.feed-bottom-row { margin-top: 14px; display: flex; align-items: center; justify-content: space-between; }
+.feed-views {
+  height: 32px; padding: 0 11px;
+  display: flex; align-items: center; gap: 5px;
+  border-radius: 999px; font-size: 13px; font-weight: 600;
+}
+.feed-views img { width: 13px; height: 13px; }
+.feed-more {
+  width: 32px; height: 32px; padding: 0;
+  display: grid; place-items: center;
+  border-radius: 50%; font-size: 0;
+}
+.feed-more img { width: 16px; height: 16px; display: block; opacity: 1; }
+.feed-heart-burst {
+  position: absolute; left: 50%; top: 50%; z-index: 4;
+  display: grid; place-items: center; pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+.feed-heart-burst {
+  width: 104px; height: 104px;
+  color: var(--pink); opacity: 0;
+  background: currentColor;
+  -webkit-mask: url("../assets/icons/FeedHeart.svg") center / contain no-repeat;
+  mask: url("../assets/icons/FeedHeart.svg") center / contain no-repeat;
+}
+.feed-heart-burst.is-visible { animation: feed-heart .6s ease-out; }
+/* ─────────────── Горизонтальная лента одного профиля ─────────────── */
+.profile-reel-stage {
+  position: absolute; inset: 0;
+  overflow: hidden; background: var(--app-bg);
+  transition: transform .24s cubic-bezier(.32,.72,0,1), opacity .24s ease;
+}
+.profile-reel-stage::before,
+.profile-reel-stage::after {
+  content: ''; position: absolute; left: 0; right: 0; z-index: 1; pointer-events: none;
+}
+.profile-reel-stage::before {
+  top: 0; height: 170px;
+  background: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
+}
+.profile-reel-stage::after {
+  bottom: var(--tabbar-height); height: 340px;
+  background: linear-gradient(to bottom, transparent, rgba(0,0,0,.78));
+}
+.profile-reel-clips {
+  position: absolute; left: 0; right: 0; top: 0; bottom: var(--tabbar-height);
+  display: flex;
+  overflow-x: auto; overflow-y: hidden;
+  scroll-snap-type: x mandatory; scroll-behavior: smooth;
+  overscroll-behavior-x: contain; overscroll-behavior-y: auto; scrollbar-width: none;
+  touch-action: pan-x;
+}
+.profile-reel-clips::-webkit-scrollbar { display: none; }
+.profile-reel-clip {
+  position: relative; width: 100%; height: 100%; flex: 0 0 100%;
+  overflow: hidden; background: var(--app-bg);
+  scroll-snap-align: start; scroll-snap-stop: always;
+}
+.profile-reel-clip.is-ready .feed-loading { display: none; }
+.feed-progress {
+  position: absolute; left: 0; right: 0; bottom: var(--tabbar-height); z-index: 6;
+  height: 2px; overflow: hidden;
+  background: rgba(255, 255, 255, .50);
+  pointer-events: none;
+}
+.feed-progress i {
+  position: absolute; inset: 0;
+  display: block; background: var(--pink);
+  transform: scaleX(0); transform-origin: left center;
+  will-change: transform;
+}
+.feed-card .feed-progress { bottom: 0; }
+.feed-menu {
+  position: absolute; inset: 0; z-index: 25;
+  visibility: hidden; opacity: 0; pointer-events: none;
+  transition: opacity .22s, visibility 0s linear .22s;
+}
+.feed-menu.is-open { visibility: visible; opacity: 1; pointer-events: auto; transition-delay: 0s; }
+.feed-menu__backdrop { position: absolute; inset: 0; width: 100%; border: 0; background: rgba(0,0,0,.58); }
+.feed-menu__sheet {
+  position: absolute; left: 18px; right: 18px; bottom: 22px;
+  padding: 8px; border-radius: 24px;
+  display: flex; flex-direction: column; gap: 2px;
+  background: rgba(28,28,28,.96); backdrop-filter: blur(24px);
+}
+.feed-menu__sheet button {
+  height: 50px; border: 0; border-radius: 16px;
+  background: none; color: #fff; font-family: inherit; font-size: 17px; font-weight: 600; cursor: pointer;
+}
+.feed-menu__sheet button:active { background: rgba(255,255,255,.08); }
+.feed-menu__sheet .feed-menu__cancel { margin-top: 6px; background: #fff; color: #000; }
+.notification-clip-stage .feed-video { z-index: 0; }
+.notification-clip-stage.is-ready .feed-loading { display: none; }
+.notification-clip-stage .feed-progress { bottom: 0; }

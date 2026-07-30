@@ -1,0 +1,311 @@
+/* ─────────────── Токены, сброс, типографика, кнопки, поля, таб-бар ─────────────── */
+
+@font-face { font-family: "Geist"; src: url("../assets/fonts/Geist-Regular.woff2")   format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Geist"; src: url("../assets/fonts/Geist-Medium.woff2")    format("woff2"); font-weight: 500; font-display: swap; }
+@font-face { font-family: "Geist"; src: url("../assets/fonts/Geist-SemiBold.woff2")  format("woff2"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Geist"; src: url("../assets/fonts/Geist-Bold.woff2")      format("woff2"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "Geist"; src: url("../assets/fonts/Geist-ExtraBold.woff2") format("woff2"); font-weight: 800; font-display: swap; }
+
+.tabbar--feed { z-index: 10; }
+:root {
+  --pink: #ff0077;
+  --purple: #9100ff;
+  --ink: #000;
+  --app-bg: #0B0B0B;
+  --hairline: rgba(255, 255, 255, .2);
+  --fill: rgba(255, 255, 255, .04);
+  --placeholder: rgba(255, 255, 255, .45);
+  /* Нижнее меню растёт на высоту home indicator, вместе с ним едут все отступы,
+     которые считаются от --tabbar-height. Поля над иконками и под ними равны. */
+  --tabbar-height: calc(67px + var(--safe-bottom));
+  --top-control-size: 40px;
+  /* Отступы сверху отсчитываются от нижнего края системной строки: на макете
+     её изображал фейковый статус-бар высотой 33px, теперь её роль играет
+     env(safe-area-inset-top). */
+  --top-control-y: calc(22px + var(--safe-top));
+  --top-control-side: 24px;
+  --top-center-y: calc(42px + var(--safe-top));
+  --top-logo-height: 26px;
+
+  /* Боковые поля контента и аватар профиля — ужимаются на узких экранах */
+  --gutter: 26px;
+  --avatar-size: 100px;
+
+  /* Высота клавиатуры, её пишет js/ui/keyboard.js */
+  --kb: 0;
+
+  /* Высота приложения. Фолбэк --vh для старых Safari пишет js/ui/viewport.js */
+  --vh: 100vh;
+  --app-h: 100dvh;
+
+  /* Безопасные зоны выреза и home indicator */
+  --safe-top: env(safe-area-inset-top, 0px);
+  /* В браузере нижний край занимает панель Safari, и её 100dvh уже вычитает.
+     Home indicator появляется только в standalone — там инсет и добавляем. */
+  --safe-bottom: 0px;
+  /* Шапки экранов */
+  --head-pad-top: calc(14px + var(--safe-top));
+  --head-height: calc(64px + var(--head-pad-top));
+}
+* { box-sizing: border-box; }
+button { color: inherit; }
+
+html, body {
+  margin: 0;
+  width: 100%;
+  background: #000;
+  color: #fff;
+  font-family: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  /* никакого pull-to-refresh и «резинки» на уровне страницы */
+  overscroll-behavior-y: none;
+}
+
+body {
+  min-height: 100%;
+  /* Интерфейс не выделяется и не подсвечивается при тапе */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* Длинные экраны скроллит сам документ: Safari сворачивает свою нижнюю панель
+   только когда двигается корневой скроллер, а не контейнер внутри страницы. */
+#app {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: var(--app-h);
+  background: var(--app-bg);
+}
+
+/* Фолбэк для старых Safari, где нет 100dvh */
+@supports not (height: 100dvh) {
+  :root { --app-h: var(--vh); }
+}
+
+@media (display-mode: standalone), (display-mode: fullscreen) {
+  :root { --safe-bottom: env(safe-area-inset-bottom, 0px); }
+}
+
+/* Узкие экраны от 320px: поля уже, аватар меньше */
+@media (max-width: 360px) {
+  :root { --gutter: 18px; --avatar-size: 84px; --top-control-side: 18px; }
+}
+
+/* Тексты и поля ввода выделять можно */
+input, textarea, .message-bubble, .feed-caption, .bio-out { user-select: text; -webkit-user-select: text; }
+
+/* Долгое нажатие на картинку интерфейса не должно открывать системное меню */
+img { -webkit-touch-callout: none; -webkit-user-drag: none; }
+
+/* Safari зумит страницу, если шрифт в поле меньше 16px */
+input, textarea, select { font-size: 16px; }
+.screen-page {
+  position: relative;
+  min-height: var(--app-h);
+  display: none;
+  background: var(--app-bg);
+}
+.screen-page.is-active { display: block; }
+
+/* Полноэкранные экраны (лента, ролики, переписка) листаются сами и занимают
+   ровно окно — на них документ блокируется. Класс ставит core/router.js. */
+html.is-locked,
+html.is-locked body { height: 100%; overflow: hidden; }
+html.is-locked #app {
+  position: fixed;
+  inset: 0;
+  left: 0; right: 0;
+  margin: 0 auto;
+  height: var(--app-h);
+  min-height: 0;
+  overflow: hidden;
+}
+html.is-locked .screen-page {
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ─────────────── Типографика ─────────────── */
+.display-36 { font-size: 36px; font-weight: 800; line-height: 1.08; margin: 0; letter-spacing: -.5px; }
+.display-26 { font-size: 26px; font-weight: 800; margin: 16px 0 0; letter-spacing: -.3px; }
+.display-36 em { color: var(--pink); font-style: normal; }
+.body-16 { font-size: 16px; font-weight: 500; line-height: 1.35; margin: 14px 0 0; }
+.muted-92 { color: rgba(255, 255, 255, .92); }
+@keyframes drift { from { transform: translateX(-56px); } to { transform: translateX(56px); } }
+.legal {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  margin-top: 20px; font-size: 14px; color: rgba(255, 255, 255, .75);
+}
+.legal i { width: 3px; height: 3px; border-radius: 50%; background: rgba(255, 255, 255, .7); }
+/* ─────────────── Кнопки ─────────────── */
+.btn {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; height: 48px; padding: 0 22px;
+  border: 0; border-radius: 999px;
+  font-family: inherit; font-size: 17px; font-weight: 600;
+  cursor: pointer; position: relative;
+  transition: transform .12s ease, filter .12s ease;
+}
+.btn:active { transform: scale(.97); }
+.btn--primary { background: #fff; color: #000; }
+.btn--primary .chevron { position: absolute; right: 24px; width: 9px; height: 15px; color: #000; }
+.btn--ghost {
+  background: rgba(255, 255, 255, .08);
+  color: #fff;
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  backdrop-filter: blur(12px);
+}
+.btn--ghost img { width: 16px; height: 16px; }
+.btn--social { justify-content: flex-start; gap: 12px; padding-left: 23px; font-weight: 500; background: transparent; }
+.btn--social img { width: 22px; height: 22px; }
+.btn--skip { width: auto; padding: 0 28px; }
+.pill-back {
+  position: absolute; left: var(--gutter); top: var(--top-control-y); z-index: 4;
+  display: flex; align-items: center; gap: 6px;
+  height: 44px; padding: 0 18px;
+  border: 0; border-radius: 999px;
+  background: rgba(255, 255, 255, .09);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12);
+  backdrop-filter: blur(18px);
+  color: #fff; font-family: inherit; font-size: 16px; font-weight: 500; cursor: pointer;
+}
+.pill-back img { width: 12px; height: 12px; }
+.round-btn {
+  width: var(--top-control-size); height: var(--top-control-size); flex: none;
+  display: grid; place-items: center;
+  border: 1px solid rgba(255, 255, 255, .20); border-radius: 50%;
+  background: rgba(255, 255, 255, .09);
+  box-shadow: none;
+  backdrop-filter: blur(18px);
+  cursor: pointer;
+}
+.round-btn img { width: 16px; }
+/* ─────────────── Общая раскладка внутренних экранов ─────────────── */
+.page-body {
+  position: absolute; inset: 0;
+  padding: calc(75px + var(--safe-top)) var(--gutter) 24px;
+  overflow-x: hidden; overflow-y: auto;
+  scrollbar-width: none;
+  overscroll-behavior: contain;
+}
+.page-body::-webkit-scrollbar { display: none; }
+/* ─────────────── Поля ─────────────── */
+.field {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; height: 56px; margin-top: 12px; padding: 0 20px;
+  border: 0; border-radius: 999px;
+  background: var(--fill); box-shadow: inset 0 0 0 1px var(--hairline);
+  text-align: left; cursor: text;
+}
+.field__icon { width: 17px; height: 17px; flex: none; }
+.field input {
+  flex: 1; min-width: 0;
+  border: 0; background: none; outline: none;
+  color: #fff; font-family: inherit; font-size: 17px; font-weight: 500;
+}
+.field input::placeholder { color: var(--placeholder); }
+.field__eye { border: 0; background: none; padding: 0 4px; cursor: pointer; }
+.field__eye img { width: 18px; height: 18px; display: block; }
+.field-label { margin: 14px 0 0; font-size: 15px; font-weight: 500; color: rgba(255, 255, 255, .65); }
+.btn--social + .btn--social { margin-top: 12px; }
+.bottom-bar { position: absolute; left: var(--gutter); right: var(--gutter); bottom: calc(34px + var(--safe-bottom)); display: flex; gap: 12px; }
+.bottom-bar--two .btn--primary { flex: 1; }
+@keyframes geo-pulse { to { opacity: .45; transform: scale(.88); } }
+@keyframes profile-image-spin { to { transform: rotate(360deg); } }
+.badge { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; }
+.badge img { width: 15px; height: 15px; }
+@keyframes feed-spin { to { transform: translate(-50%, -50%) rotate(360deg); } }
+@keyframes feed-bounce { 50% { transform: scale(1.13); } }
+@keyframes feed-heart {
+  0% { opacity: 0; transform: translate(-50%,-50%) scale(.45); }
+  32% { opacity: 1; transform: translate(-50%,-50%) scale(1.12); }
+  100% { opacity: 0; transform: translate(-50%,-50%) scale(1.35); }
+}
+.typing-bubble { width: 66px; height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; gap: 5px; }
+.typing-bubble i { width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,.72); animation: messenger-typing 1s infinite ease-in-out; }
+.typing-bubble i:nth-child(2) { animation-delay: .15s; }
+.typing-bubble i:nth-child(3) { animation-delay: .3s; }
+@keyframes messenger-typing { 0%,60%,100% { transform: translateY(0); opacity: .4; } 30% { transform: translateY(-4px); opacity: 1; } }
+#messagesMenu { z-index: 28; }
+#messagesMenu [data-chat-action="delete"],
+#messagesMenu [data-conversation-action="clear"],
+#messagesMenu [data-conversation-action="block"] { color: #ff453a; }
+/* ─────────────── Notifications ─────────────── */
+.screen-page[data-screen="notifications"] { background: var(--app-bg); }
+@keyframes notification-follow-bounce { 50% { transform: scale(1.06); } }
+#notificationsMenu [data-notification-action="clear"] { color: #ff453a; }
+.screen-page[data-screen="profile"].is-external-profile .profile-back-button { display: grid; }
+.screen-page[data-screen="profile"].is-external-profile .profile-settings-button { display: none; }
+#externalProfileFollow.is-following { background: var(--pink); color: #fff; box-shadow: none; }
+#externalProfileFollow.is-following img { width: 12px; height: 12px; }
+#externalProfileFollow:not(.is-following) img { width: 12px; height: 12px; filter: invert(1); }
+.empty { padding: 40px 14px 0; }
+/* ─────────────── Projects ─────────────── */
+.screen-page[data-screen="projects"] { background: var(--app-bg); }
+.screen-page[data-screen="projects"]::before {
+  content: ''; position: absolute; left: 0; right: 0; top: 0; z-index: 7;
+  height: calc(136px + var(--safe-top));
+  background: rgba(11,11,11,.80); backdrop-filter: blur(32px); -webkit-backdrop-filter: blur(32px);
+  pointer-events: none;
+}
+.screen-page[data-screen="projects"].is-detail-open > .tabbar { z-index: 60; }
+@keyframes proposal-sort { from { opacity: .45; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.tabbar {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 20;
+  height: var(--tabbar-height);
+  display: flex; padding: 14px 16px calc(14px + var(--safe-bottom));
+  background: rgba(11, 11, 11, .8);
+  backdrop-filter: blur(32px);
+}
+.screen-page[data-screen="feed"] > .tabbar,
+.screen-page[data-screen="profileReels"] > .tabbar {
+  background: var(--app-bg);
+  backdrop-filter: none;
+}
+.tabbar button {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px;
+  border: 0; background: none; cursor: pointer; position: relative;
+}
+.tabbar img { width: 18px; height: 18px; opacity: .55; }
+.tabbar button > img {
+  box-sizing: content-box;
+  padding: 4px;
+}
+.tabbar .is-active img { opacity: 1; }
+.tabbar i {
+  width: 5px; height: 5px; flex: 0 0 5px; transform: translateY(-2px);
+  border-radius: 50%; background: transparent;
+}
+.tabbar .is-active i { background: var(--pink); }
+.tabbar__avatar {
+  width: 26px; height: 26px; flex: none; display: block; box-sizing: border-box;
+  border: 1.5px solid var(--pink); border-radius: 50%; overflow: hidden;
+}
+.tabbar__avatar img { width: 100%; height: 100%; display: block; border-radius: 50%; object-fit: cover; opacity: 1; }
+.badge-count {
+  position: absolute; top: -6px; left: calc(50% + 4px);
+  min-width: 18px; height: 18px; padding: 0 4px;
+  display: grid; place-items: center;
+  border-radius: 999px; background: var(--pink);
+  font-size: 11px; font-weight: 700;
+}
+.badge-count[hidden] { display: none; }
+
+/* Кнопка ручного запуска: показывается, когда браузер отклонил автозапуск
+   (энергосбережение на iOS). До тапа виден постер ролика. */
+.video-play-fallback {
+  position: absolute; left: 50%; top: 50%; z-index: 4;
+  width: 68px; height: 68px; margin: -34px 0 0 -34px; padding: 0;
+  border: 0; border-radius: 50%;
+  background: rgba(0, 0, 0, .45) center / 26px 26px no-repeat;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23fff'%3E%3Cpath d='M8 5.5v13l11-6.5z'/%3E%3C/svg%3E");
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  cursor: pointer;
+}
+.video-play-fallback:active { transform: scale(.94); }

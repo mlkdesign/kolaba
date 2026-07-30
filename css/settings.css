@@ -1,0 +1,107 @@
+/* ─────────────── Настройки ─────────────── */
+
+/* ─────────────── Settings ─────────────── */
+.settings-screen { background: var(--app-bg); }
+.settings-head {
+  top: 0; z-index: 8; height: var(--head-height); padding: var(--head-pad-top) 24px 8px;
+  display: flex; align-items: center; justify-content: center; background: transparent;
+}
+.settings-head h2 { margin: 0; font-size: 18px; font-weight: 600; line-height: 56px; }
+.settings-back {
+  position: absolute; left: var(--top-control-side); top: var(--top-control-y);
+}
+.settings-back img { width: 18px; height: 18px; }
+.settings-top-blur {
+  z-index: 7;
+  background: linear-gradient(to bottom, rgba(11,11,11,.72) 0%, rgba(11,11,11,.28) 58%, transparent 100%);
+}
+.settings-scroll {
+  position: static; overflow: visible;
+  padding: var(--head-height) 0 calc(48px + var(--safe-bottom));
+  background: var(--app-bg);
+}
+.settings-scroll::-webkit-scrollbar,
+.settings-images__strip::-webkit-scrollbar { display: none; }
+.settings-section { margin: 0; }
+.settings-section + .settings-section { margin-top: 16px; }
+.settings-section__head {
+  width: 100%; height: 44px; padding: 0 20px; display: flex; align-items: center; justify-content: space-between;
+  background: rgba(255,255,255,.06); color: rgba(255,255,255,.9); font-size: 15px; font-weight: 600;
+  letter-spacing: .02em; text-transform: uppercase;
+}
+.settings-section__head em { color: rgba(255,255,255,.55); font-style: normal; font-weight: 500; letter-spacing: 0; text-transform: none; }
+.settings-rows { background: transparent; }
+.settings-row {
+  position: relative; width: 100%; min-height: 56px; padding: 0 20px; border: 0; display: flex;
+  align-items: center; background: transparent; color: #fff; text-align: left; font: inherit;
+}
+button.settings-row { cursor: pointer; }
+button.settings-row:active { background: rgba(255,255,255,.06); }
+.settings-row:not(:last-child)::after {
+  content: ''; position: absolute; left: 20px; right: 0; bottom: 0; height: 1px; background: rgba(255,255,255,.10);
+}
+.settings-row.is-tall { min-height: 72px; }
+.settings-row__copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.settings-row__label { font-size: 17px; font-weight: 500; line-height: 21px; }
+.settings-row__hint { color: rgba(255,255,255,.45); font-size: 14px; font-weight: 500; line-height: 17px; }
+.settings-row__side { min-width: 0; max-width: 47%; margin-left: 12px; display: flex; align-items: center; gap: 9px; }
+.settings-row__value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(255,255,255,.55); font-size: 17px; font-weight: 500; }
+.settings-row__chevron { width: 13px; height: 13px; flex: 0 0 13px; opacity: .45; transform: rotate(180deg); }
+.settings-row.is-danger .settings-row__label { color: #ff3b30; }
+.settings-switch { position: relative; width: 50px; height: 30px; flex: 0 0 50px; }
+.settings-switch input { position: absolute; opacity: 0; pointer-events: none; }
+.settings-switch i { position: absolute; inset: 0; border-radius: 999px; background: rgba(255,255,255,.18); transition: background .2s; }
+.settings-switch i::after { content: ''; position: absolute; width: 26px; height: 26px; left: 2px; top: 2px; border-radius: 50%; background: #fff; transition: transform .22s cubic-bezier(.22,.78,.22,1); }
+.settings-switch input:checked + i { background: var(--pink); }
+.settings-switch input:checked + i::after { transform: translateX(20px); }
+.settings-images { padding: 16px 0 16px 16px; background: transparent; overflow: hidden; }
+.settings-images__strip { display: flex; gap: 10px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;   overscroll-behavior-x: contain; overscroll-behavior-y: auto;
+}
+.settings-image-card,
+.settings-images__add { position: relative; width: 92px; height: 92px; flex: 0 0 92px; border-radius: 14px; overflow: hidden; }
+.settings-image-card { background: #1b1b1b; transition: opacity .25s cubic-bezier(.22,.78,.22,1), transform .25s cubic-bezier(.22,.78,.22,1); }
+.settings-image-card.is-removing { opacity: 0; transform: scale(.72); }
+.settings-image-card > img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.settings-image-card__remove { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 50%; background: #ff3b30; cursor: pointer; }
+.settings-image-card__remove::before,
+.settings-image-card__remove::after { content: ''; position: absolute; left: 7px; top: 11px; width: 10px; height: 2px; border-radius: 2px; background: #fff; transform: rotate(45deg); }
+.settings-image-card__remove::after { transform: rotate(-45deg); }
+.settings-image-card.is-processing::after { content: ''; position: absolute; inset: 35px; border: 2px solid rgba(255,255,255,.28); border-top-color: #fff; border-radius: 50%; animation: project-spin .7s linear infinite; }
+.settings-images__add { border: 1px dashed rgba(255,255,255,.35); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; background: transparent; color: #fff; font: 500 15px/1 "Geist"; cursor: pointer; }
+.settings-images__add span { font-size: 22px; font-weight: 400; }
+.settings-bottom { margin: 16px 0 0; padding-bottom: 74px; background: transparent; }
+.settings-bottom button { width: 100%; height: 56px; border: 0; background: transparent; color: #fff; font: 600 17px/1 "Geist"; cursor: pointer; }
+.settings-bottom button + button { border-top: 1px solid rgba(255,255,255,.10); color: #ff3b30; }
+.settings-subpage { min-height: calc(100% - 40px); padding-bottom: 40px; }
+.settings-form { padding: 24px 20px; }
+.settings-form__field { width: 100%; height: 56px; padding: 0 18px; border: 1px solid rgba(255,255,255,.20); border-radius: 999px; background: transparent; color: #fff; outline: none; font: 500 17px/1 "Geist"; }
+textarea.settings-form__field { height: 148px; padding-top: 16px; border-radius: 20px; line-height: 1.35; resize: none; }
+.settings-form__hint { margin: 10px 4px 0; color: rgba(255,255,255,.48); font-size: 14px; font-weight: 500; line-height: 1.35; }
+.settings-form__count { float: right; }
+.settings-form__save,
+.settings-form__secondary { width: 100%; height: 48px; margin-top: 22px; border: 0; border-radius: 999px; background: #fff; color: #000; font: 600 16px/1 "Geist"; cursor: pointer; }
+.settings-form__save:disabled { opacity: .35; cursor: default; }
+.settings-form__secondary { margin-top: 12px; border: 1px solid rgba(255,255,255,.20); background: transparent; color: #fff; }
+.settings-radio { width: 22px; height: 22px; margin-left: auto; border: 2px solid rgba(255,255,255,.35); border-radius: 50%; }
+.settings-row.is-selected .settings-radio { border: 6px solid var(--pink); }
+.settings-session { padding: 15px 20px; display: flex; align-items: center; gap: 12px; background: transparent; }
+.settings-session + .settings-session { border-top: 1px solid rgba(255,255,255,.10); }
+.settings-session__copy { min-width: 0; flex: 1; }
+.settings-session__copy b,
+.settings-session__copy span { display: block; }
+.settings-session__copy b { font-size: 16px; }
+.settings-session__copy span { margin-top: 3px; color: rgba(255,255,255,.5); font-size: 13px; }
+.settings-session button { padding: 7px 10px; border: 0; border-radius: 999px; background: rgba(255,59,48,.12); color: #ff3b30; font: 600 13px/1 "Geist"; }
+.settings-dialog { position: absolute; inset: 0; z-index: 40; visibility: hidden; opacity: 0; pointer-events: none; transition: opacity .18s, visibility 0s linear .18s; }
+.settings-dialog.is-open { visibility: visible; opacity: 1; pointer-events: auto; transition-delay: 0s; }
+.settings-dialog__backdrop { position: absolute; inset: 0; width: 100%; border: 0; background: rgba(0,0,0,.68); backdrop-filter: blur(5px); }
+.settings-dialog__card { position: absolute; left: 24px; right: 24px; top: 50%; padding: 22px; border: 1px solid rgba(255,255,255,.16); border-radius: 24px; background: #191919; transform: translateY(-50%); text-align: center; }
+.settings-dialog__card h3 { margin: 0; font-size: 20px; }
+.settings-dialog__card p { margin: 10px 0 0; color: rgba(255,255,255,.6); font-size: 15px; line-height: 1.35; }
+.settings-dialog__card input { width: 100%; height: 48px; margin-top: 16px; padding: 0 16px; border: 1px solid rgba(255,255,255,.2); border-radius: 14px; background: rgba(255,255,255,.05); color: #fff; outline: none; font: 500 16px/1 "Geist"; }
+.settings-dialog__actions { display: flex; gap: 10px; margin-top: 20px; }
+.settings-dialog__actions button { flex: 1; height: 44px; border: 0; border-radius: 999px; background: rgba(255,255,255,.10); color: #fff; font: 600 15px/1 "Geist"; }
+.settings-dialog__actions .is-primary { background: #fff; color: #000; }
+.settings-dialog__actions .is-danger { background: #ff3b30; color: #fff; }
+.settings-toast { position: absolute; z-index: 45; left: 50%; bottom: 34px; max-width: calc(100% - 48px); padding: 12px 18px; border-radius: 999px; background: rgba(40,40,40,.94); color: #fff; font-size: 14px; font-weight: 600; opacity: 0; transform: translate(-50%, 12px); pointer-events: none; transition: opacity .2s, transform .2s; white-space: nowrap; }
+.settings-toast.is-visible { opacity: 1; transform: translate(-50%, 0); }
