@@ -63,10 +63,10 @@
   /* экран внутри мокапа — замерено по прозрачной области PNG */
   position: absolute;
   left: 5.53%; top: 2.593%;
-  width: 88.94%; height: 94.814%;
+  width: 88.94%; height: 95%;
   overflow: hidden;
   background: var(--app-bg);
-  border-radius: 44px;
+  border-radius: 58px;
 }
 
 .page-btn {
