@@ -22,7 +22,9 @@
     "SIGNUPS_PER_DAY": "50",
     "MAX_PHOTO_MB": "10",
     "MAX_VIDEO_MB": "50",
-    "MAX_VIDEO_SECONDS": "60"
+    "MAX_VIDEO_SECONDS": "60",
+    // Resend has no verified domain yet (github.io can't be verified): codes reach only this address.
+    "SIGNUP_ALLOWED_EMAILS": "mlkdesignweb@gmail.com"
   },
   "env": {
     "local": {

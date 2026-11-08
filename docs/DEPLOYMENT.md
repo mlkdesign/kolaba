@@ -21,7 +21,7 @@ API=https://kolaba-api.mlkdesignweb.workers.dev node tests/e2e.mjs
 2. Без подтверждённого домена Resend шлёт письма только на адрес владельца аккаунта Resend — для настоящих пользователей подтвердите свой домен и поменяйте `EMAIL_FROM` в `wrangler.jsonc`.
 
 ## Переменные (`wrangler.jsonc` → vars)
-`ALLOWED_ORIGINS`, `APP_URL`, `API_URL`, `EMAIL_FROM`, `SIGNUPS_PER_DAY`, `MAX_PHOTO_MB`, `MAX_VIDEO_MB`, `MAX_VIDEO_SECONDS`. Секреты: `RESEND_API_KEY`, `MEDIA_URL_SECRET`. Веб: `web/.env.production` → `VITE_API_URL`.
+`ALLOWED_ORIGINS`, `APP_URL`, `API_URL`, `EMAIL_FROM`, `SIGNUPS_PER_DAY`, `MAX_PHOTO_MB`, `MAX_VIDEO_MB`, `MAX_VIDEO_SECONDS`, `SIGNUP_ALLOWED_EMAILS` (через запятую; пусто — регистрация для всех). Секреты: `RESEND_API_KEY`, `MEDIA_URL_SECRET`. Веб: `web/.env.production` → `VITE_API_URL`.
 
 ## GitHub Pages
 `web/scripts/publish-pages.sh` → коммит корня → `git push origin main`. Pages: ветка `main`, папка `/`. Прежняя версия — тег `backup/pre-web-mvp-01`.

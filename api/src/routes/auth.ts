@@ -76,6 +76,8 @@ auth.post('/signup', async (c) => {
   const problem = passwordProblem(password);
   if (problem) fail(422, problem);
   if (!c.env.RESEND_API_KEY) fail(503, 'registration_closed', 'Registration opens once e-mail delivery is configured.');
+  const allowed = (c.env.SIGNUP_ALLOWED_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+  if (allowed.length && !allowed.includes(email)) fail(403, 'registration_invite_only');
   // Public demo protection: a daily cap on new real accounts.
   const dayStart = Math.floor(now() / 86_400_000) * 86_400_000;
   const today = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE is_demo = 0 AND created_at >= ?`).bind(dayStart)

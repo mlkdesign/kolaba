@@ -19,6 +19,9 @@ export interface Env {
   MAX_PHOTO_MB: string;
   MAX_VIDEO_MB: string;
   MAX_VIDEO_SECONDS: string;
+  /** Comma-separated e-mails allowed to sign up (empty: anyone). Until a sending domain is verified, Resend only
+   *  delivers to its own account's address, so sign-up is limited to it. */
+  SIGNUP_ALLOWED_EMAILS?: string;
 
   /** Secrets. */
   RESEND_API_KEY?: string;
