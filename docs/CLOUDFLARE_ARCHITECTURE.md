@@ -4,9 +4,9 @@
 |---|---|---|
 | Worker | `kolaba-api` → https://kolaba-api.mlkdesignweb.workers.dev | развёрнут, observability включена |
 | D1 | `kolaba-db` (880ac093-6e95-43b9-8c39-d42a8f539316, EEUR) | миграция `0001_init.sql` применена удалённо, seed `web-mvp-01` |
-| R2 | `kolaba-media` | **не создан: R2 не включён на аккаунте** (нужно включить в Dashboard) |
+| R2 | `kolaba-media` | создан и подключён (binding `MEDIA`) |
 | Rate limiting | `RL_AUTH` 10/мин, `RL_WRITE` 60/мин (Workers Rate Limiting binding) | работает |
-| Secrets | `MEDIA_URL_SECRET` (подпись приватных ссылок); `RESEND_API_KEY` — нет | |
+| Secrets | `MEDIA_URL_SECRET` (подпись приватных ссылок); `RESEND_API_KEY` (добавлен владельцем) | |
 
 **API**: Hono, `/v1/*`, JSON-ошибки `{error:{code}}`, zod-валидация, параметризованный SQL, keyset-пагинация, CORS-allowlist (`https://mlkdesign.github.io`, без `*`), CSP/nosniff/no-store, `GET /v1/health`.
 
