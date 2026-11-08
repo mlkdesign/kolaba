@@ -6,3 +6,4 @@ api/seed/seed.sql
 api/seed/.demo-credentials.json
 web/dist/
 *.local
+api/seed/.test-account.json
