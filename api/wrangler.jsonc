@@ -1,0 +1,44 @@
+// kolaba-api — Cloudflare Worker. Secrets (never in git): wrangler secret put RESEND_API_KEY | MEDIA_URL_SECRET
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kolaba-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "kolaba-db", "database_id": "880ac093-6e95-43b9-8c39-d42a8f539316", "migrations_dir": "migrations" }
+  ],
+  // R2 kolaba-media: added once R2 is enabled on the account (see docs/DEPLOYMENT.md).
+  "ratelimits": [
+    { "name": "RL_AUTH", "namespace_id": "4101", "simple": { "limit": 10, "period": 60 } },
+    { "name": "RL_WRITE", "namespace_id": "4102", "simple": { "limit": 60, "period": 60 } }
+  ],
+  "vars": {
+    "ALLOWED_ORIGINS": "https://mlkdesign.github.io",
+    "APP_URL": "https://mlkdesign.github.io/kolaba/",
+    "API_URL": "https://kolaba-api.mlkdesignweb.workers.dev",
+    "EMAIL_FROM": "kolaba. <onboarding@resend.dev>",
+    "SIGNUPS_PER_DAY": "50",
+    "MAX_PHOTO_MB": "10",
+    "MAX_VIDEO_MB": "50",
+    "MAX_VIDEO_SECONDS": "60"
+  },
+  "env": {
+    "local": {
+      "vars": {
+        "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173",
+        "APP_URL": "http://localhost:5173/",
+        "API_URL": "http://127.0.0.1:8787",
+        "EMAIL_FROM": "kolaba. <onboarding@resend.dev>",
+        "SIGNUPS_PER_DAY": "1000",
+        "MAX_PHOTO_MB": "10",
+        "MAX_VIDEO_MB": "50",
+        "MAX_VIDEO_SECONDS": "60"
+      },
+      "d1_databases": [
+        { "binding": "DB", "database_name": "kolaba-db", "database_id": "880ac093-6e95-43b9-8c39-d42a8f539316", "migrations_dir": "migrations" }
+      ]
+    }
+  }
+}

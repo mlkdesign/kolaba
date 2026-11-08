@@ -1,0 +1,140 @@
+/* ─────────────── Режим мокапа айфона ─────────────── */
+
+/* Сохранено из прежней веб-версии (mlkdesign/kolaba до WEB MVP 01) без изменений геометрии. Возвращает
+   раскладку, в которой приложение живёт внутри картинки телефона:
+
+   — документ не скроллится, скроллером снова становится контейнер контента;
+   — оконные слои (шапки, нижнее меню, просмотры) становятся absolute, иначе
+     position: fixed привязал бы их к окну браузера, а не к экрану телефона;
+   — роль системной строки играет фейковый статус-бар, он занимает верхние
+     33px холста — ровно столько же даёт --safe-top. */
+
+:root.is-mockup {
+  --safe-top: 33px;
+  /* скруглённый низ экрана мокапа: чуть больше воздуха под иконками меню */
+  --safe-bottom: 6px;
+  /* приложение занимает экран мокапа, а не окно браузера */
+  --app-h: 100%;
+  /* колонка равна экрану телефона, боковых полей нет */
+  --col-inset: 0px;
+
+  /* Замерено по прозрачной области assets/iphone.png (434×887). Рамка
+     масштабируется трансформом, поэтому значения в px стабильны. */
+  --screen-left: 24px;          /* левый край дисплея от края рамки */
+  --screen-top: 23px;           /* верхний край дисплея */
+  --island-left: 157px;         /* левая кромка Dynamic Island */
+  --island-right: 277px;        /* правая кромка Dynamic Island */
+  --island-center-y: 52.5px;    /* центр Dynamic Island по вертикали */
+}
+
+.is-mockup,
+.is-mockup body {
+  height: 100%;
+  overflow: hidden;
+}
+
+.is-mockup body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 40px 20px 44px;
+  min-height: 100vh;
+}
+
+/* ─── обвязка страницы вокруг телефона ─── */
+.page-logo img { width: 96px; display: block; }
+.stage { display: flex; justify-content: center; flex: 1; align-items: flex-start; min-height: 0; }
+
+/* Размер настоящего телефона; под окно подгоняется трансформом, поэтому внутри
+   экрана остаются честные CSS-пиксели. --mockup-scale пишет js/ui/mockup.js. */
+.phone {
+  position: relative;
+  flex: none;
+  width: 434px;
+  height: 887px;
+  /* --reveal-scale добавляет прелоадер на время появления лендинга */
+  transform: scale(calc(var(--mockup-scale, 1) * var(--reveal-scale, 1)));
+  transform-origin: top center;
+  /* съедаем место, которое коробка занимает до масштабирования */
+  margin-bottom: calc((var(--mockup-scale, 1) - 1) * 887px);
+  margin-left: calc((var(--mockup-scale, 1) - 1) * 217px);
+  margin-right: calc((var(--mockup-scale, 1) - 1) * 217px);
+}
+.phone .frame {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  pointer-events: none; z-index: 3;
+}
+.screen {
+  /* экран внутри мокапа — замерено по прозрачной области PNG */
+  position: absolute;
+  left: var(--screen-left); top: var(--screen-top);
+  width: 88.94%; height: 95%;
+  overflow: hidden;
+  background: var(--app-bg);
+  border-radius: 58px;
+  /* Свой контекст наложения: без него слои приложения с z-index больше 3
+     (таб-бар, шапки, блюр) всплывали над рамкой телефона и закрывали
+     Dynamic Island. */
+  isolation: isolate;
+  z-index: 0;
+}
+
+.page-btn {
+  height: 44px; padding: 0 28px;
+  border: 0; border-radius: 999px; background: #fff; color: #000;
+  font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+  transition: transform .12s ease;
+}
+.page-btn:active { transform: scale(.97); }
+
+/* ─── фейковый статус-бар: неподвижный слой поверх всех экранов ─── */
+
+/* Всё выстроено по Dynamic Island: время центрируется в зоне между левым краем
+   дисплея и островом, правая группа прижата к краю, а по вертикали и то и то
+   стоит на линии центра острова. */
+.ios-statusbar {
+  position: absolute;
+  left: 0; right: 0;
+  top: calc(var(--island-center-y) - var(--screen-top));
+  height: 0;
+  z-index: 120;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .38));
+}
+.ios-statusbar__time {
+  position: absolute;
+  left: calc((var(--island-left) - var(--screen-left)) / 2);
+  top: 0;
+  transform: translate(-50%, -50%);
+  display: block;
+  width: 34px; height: 13px;
+}
+.ios-statusbar__signals {
+  position: absolute;
+  right: 24px;
+  top: 0;
+  transform: translateY(-50%);
+  display: flex; align-items: center; gap: 6px;
+  height: 13px;
+}
+.ios-statusbar svg { display: block; flex: none; }
+
+
+/* ─── приложение занимает экран телефона ─── */
+.is-mockup #app { position: absolute; inset: 0; overflow: hidden; }
+
+/* ─── телефон без мокапа: приложение на весь экран, с безопасными зонами ─── */
+:root.is-mobile {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+.is-mobile, .is-mobile body { height: 100%; margin: 0; overflow: hidden; background: #0B0B0B; }
+.is-mobile .page-logo, .is-mobile .frame, .is-mobile .ios-statusbar { display: none; }
+.is-mobile .stage, .is-mobile .phone, .is-mobile .screen {
+  position: fixed; inset: 0; width: auto; height: auto; transform: none; margin: 0; border-radius: 0;
+}
+.is-mobile #app { position: absolute; inset: 0; overflow: hidden; }
+html.is-mobile.is-preloading .phone { opacity: 1; }

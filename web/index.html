@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ru" class="is-mockup is-preloading">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#000000">
+<title>kolaba. — web</title>
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="kolaba">
+<meta property="og:title" content="kolaba">
+<meta property="og:description" content="Where creators meet opportunity — тестовая веб-версия приложения kolaba.">
+<meta property="og:image" content="assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="kolaba">
+<meta name="twitter:description" content="Where creators meet opportunity — тестовая веб-версия приложения kolaba.">
+<meta name="twitter:image" content="assets/og-image.png">
+
+<!-- Критические стили прелоадера: он должен появиться до загрузки styles.css -->
+<style>
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  src: url("fonts/PlusJakartaSans-ExtraBold.woff2") format("woff2");
+  font-weight: 800; font-style: normal;
+  /* block — пока шрифт не пришёл, текст не показываем, иначе подменится начертание */
+  font-display: block;
+}
+
+html.is-preloading, html.is-preloading body { overflow: hidden; }
+
+#preloader {
+  position: fixed; inset: 0; z-index: 2147483647;
+  display: grid; place-items: center;
+  /* чёрная подложка на случай медленной картинки; если она не пришла,
+     остаётся CSS-градиент под ней */
+  /* Градиент рисуется на CSS, а не картинкой: он подстраивается под любое
+     соотношение сторон (картинка при background-size: cover обрезалась бы
+     по-разному на телефоне и десктопе) и не требует ни одного запроса,
+     поэтому фон виден в первом же кадре. Под ним чёрная подложка. */
+  background-color: #000;
+  background-image:
+    radial-gradient(150% 120% at 22% -22%, #9333EA 0%, rgba(147,51,234,.58) 32%, rgba(147,51,234,0) 74%),
+    radial-gradient(130% 110% at 90% -16%, #D6318C 0%, rgba(214,49,140,.48) 30%, rgba(214,49,140,0) 70%),
+    linear-gradient(180deg, #3A1156 0%, #1E0A2B 30%, #0A0610 62%, #000 86%);
+  background-size: cover;
+  background-position: center top;
+  background-repeat: no-repeat;
+  transition: opacity .45s ease-out, transform .45s ease-out;
+  will-change: opacity, transform;
+}
+#preloader.is-leaving { opacity: 0; transform: scale(1.04); pointer-events: none; }
+
+.preloader__line {
+  display: flex; align-items: baseline; justify-content: center;
+  padding: 0 24px;
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  font-weight: 800;
+  font-size: clamp(24px, 3.2vw, 34px);
+  /* фиксированная высота строки — текст не должен прыгать по вертикали */
+  line-height: 1.25;
+  letter-spacing: -.02em;
+  color: #fff;
+  white-space: pre;
+}
+.preloader__dot { color: #FF0077; }
+
+/* Загрузка затянулась — показываем, что страница жива */
+@keyframes preloader-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .7; } }
+#preloader.is-waiting .preloader__line { animation: preloader-pulse 1.6s ease-in-out infinite; }
+
+/* Лендинг появляется навстречу уходящему прелоадеру */
+.page-logo, .phone { transition: opacity .5s ease, transform .5s ease; }
+.page-logo { transition-delay: .12s; }
+html.is-preloading .page-logo { opacity: 0; }
+html.is-preloading .phone { opacity: 0; --reveal-scale: .96; }
+
+@media (prefers-reduced-motion: reduce) {
+  #preloader { transition: opacity .3s linear; }
+  #preloader.is-leaving { transform: none; }
+  #preloader.is-waiting .preloader__line { animation: none; }
+  .page-logo, .phone { transition: opacity .3s linear; }
+  html.is-preloading .phone { --reveal-scale: 1; }
+}
+</style>
+
+<link rel="icon" href="assets/icons/app-icon-192.png" sizes="192x192" type="image/png">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://kolaba-api.mlkdesignweb.workers.dev https://assets.mixkit.co https://images.pexels.com; media-src 'self' blob: https://kolaba-api.mlkdesignweb.workers.dev https://assets.mixkit.co https://videos.pexels.com; connect-src 'self' https://kolaba-api.mlkdesignweb.workers.dev http://127.0.0.1:8787; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<script>if (matchMedia("(max-width: 520px), (pointer: coarse) and (max-width: 900px)").matches) { document.documentElement.classList.remove("is-mockup"); document.documentElement.classList.add("is-mobile"); }</script>
+</head>
+<body>
+
+<div id="preloader" role="status" aria-live="polite" aria-label="Загрузка">
+  <div class="preloader__line"><span class="preloader__word" id="preloaderWord"></span><span class="preloader__dot">.</span></div>
+</div>
+
+<header class="page-logo"><img src="assets/logo.svg" alt="kolaba"></header>
+
+<main class="stage">
+  <div class="phone">
+    <div class="screen">
+
+      <div class="ios-statusbar" aria-hidden="true">
+    <svg class="ios-statusbar__time" width="34" height="13" viewBox="0 0 34 13" fill="none" aria-hidden="true">
+      <path d="M4.44043 0C3.58268 0 2.81624 0.182617 2.14111 0.547852C1.47152 0.907552 0.945801 1.4056 0.563965 2.04199C0.187663 2.67285 -0.000488281 3.39502 -0.000488281 4.2085V4.2251C-0.000488281 4.9777 0.165527 5.65283 0.497559 6.25049C0.835124 6.84814 1.2972 7.31852 1.88379 7.66162C2.47038 8.00472 3.14551 8.17627 3.90918 8.17627C4.46257 8.17627 4.94401 8.09326 5.35352 7.92725C5.76855 7.76123 6.11719 7.54264 6.39941 7.27148C6.68164 7.00033 6.89469 6.70703 7.03857 6.3916H7.3291V4.18359H6.83105V4.2002C6.83105 4.64844 6.72591 5.04964 6.51562 5.40381C6.30534 5.75798 6.02035 6.03467 5.66064 6.23389C5.30094 6.43311 4.89421 6.53271 4.44043 6.53271C3.98665 6.53271 3.58268 6.43034 3.22852 6.22559C2.87435 6.02083 2.59489 5.74137 2.39014 5.38721C2.18538 5.02751 2.08301 4.61523 2.08301 4.15039V4.13379C2.08301 3.68555 2.19092 3.28158 2.40674 2.92188C2.62256 2.55664 2.91032 2.26888 3.27002 2.05859C3.62972 1.84831 4.02539 1.74316 4.45703 1.74316C4.90527 1.74316 5.30648 1.85107 5.66064 2.06689C6.02035 2.28271 6.30534 2.57601 6.51562 2.94678C6.72591 3.31755 6.83105 3.72982 6.83105 4.18359L7.20459 6.18408C7.20459 6.26156 7.20459 6.3418 7.20459 6.4248C7.20459 6.50228 7.20182 6.58252 7.19629 6.66553C7.16862 7.4292 7.05241 8.12646 6.84766 8.75732C6.64844 9.38265 6.34684 9.88346 5.94287 10.2598C5.54443 10.6305 5.02979 10.8159 4.39893 10.8159C4.05029 10.8159 3.73486 10.7606 3.45264 10.6499C3.17594 10.5337 2.93799 10.3704 2.73877 10.1602C2.54508 9.94987 2.39567 9.70638 2.29053 9.42969L2.25732 9.34668H0.157227L0.173828 9.43799C0.306641 10.0467 0.563965 10.589 0.945801 11.0649C1.33317 11.5353 1.82015 11.9061 2.40674 12.1772C2.99886 12.4429 3.66292 12.5757 4.39893 12.5757C5.40055 12.5757 6.26107 12.3211 6.98047 11.812C7.7054 11.2974 8.26156 10.5614 8.64893 9.604C9.0363 8.64665 9.22998 7.49561 9.22998 6.15088V6.13428C9.22998 5.04964 9.1027 4.12272 8.84814 3.35352C8.59359 2.57878 8.24219 1.94515 7.79395 1.45264C7.35124 0.95459 6.84212 0.589355 6.2666 0.356934C5.69108 0.118978 5.08236 0 4.44043 0ZM12.9985 10.6665C13.3804 10.6665 13.6958 10.542 13.9448 10.293C14.1938 10.0384 14.3184 9.72852 14.3184 9.36328C14.3184 8.99251 14.1938 8.68262 13.9448 8.43359C13.6958 8.17904 13.3804 8.05176 12.9985 8.05176C12.6222 8.05176 12.3068 8.17904 12.0522 8.43359C11.8032 8.68262 11.6787 8.99251 11.6787 9.36328C11.6787 9.72852 11.8032 10.0384 12.0522 10.293C12.3068 10.542 12.6222 10.6665 12.9985 10.6665ZM12.9985 4.50732C13.3804 4.50732 13.6958 4.38281 13.9448 4.13379C14.1938 3.87923 14.3184 3.56934 14.3184 3.2041C14.3184 2.83333 14.1938 2.52344 13.9448 2.27441C13.6958 2.01986 13.3804 1.89258 12.9985 1.89258C12.6222 1.89258 12.3068 2.01986 12.0522 2.27441C11.8032 2.52344 11.6787 2.83333 11.6787 3.2041C11.6787 3.56934 11.8032 3.87923 12.0522 4.13379C12.3068 4.38281 12.6222 4.50732 12.9985 4.50732ZM22.5776 12.2769H24.6196V9.97754H26.2383V8.20947H24.6196V0.298828H21.6064C21.2744 0.791341 20.9424 1.29769 20.6104 1.81787C20.2839 2.33252 19.9546 2.85547 19.6226 3.38672C19.2961 3.91243 18.9668 4.44645 18.6348 4.98877C18.3083 5.52555 17.9845 6.0651 17.6636 6.60742C17.3481 7.14974 17.0327 7.68929 16.7173 8.22607V9.97754H22.5776V12.2769ZM18.7095 8.25928V8.13477C18.9419 7.72526 19.1826 7.31299 19.4316 6.89795C19.6807 6.47738 19.9325 6.05957 20.187 5.64453C20.4416 5.22396 20.6989 4.80615 20.959 4.39111C21.2191 3.97607 21.4764 3.56934 21.731 3.1709C21.991 2.77246 22.2428 2.38509 22.4863 2.00879H22.6108V8.25928H18.7095ZM31.1938 12.2769H33.3271V0.298828H31.1938L28.0645 2.49854V4.50732L31.0444 2.40723H31.1938V12.2769Z" fill="white"/>
+    </svg>
+    <div class="ios-statusbar__signals">
+      <svg class="ios-statusbar__cellularconnection" width="20" height="13" viewBox="0 0 20 13" fill="none" aria-hidden="true">
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M19.2 1.14623C19.2 0.513183 18.7224 0 18.1333 0H17.0667C16.4776 0 16 0.513183 16 1.14623V11.0802C16 11.7132 16.4776 12.2264 17.0667 12.2264H18.1333C18.7224 12.2264 19.2 11.7132 19.2 11.0802V1.14623ZM11.7659 2.44528H12.8326C13.4217 2.44528 13.8992 2.97078 13.8992 3.61902V11.0527C13.8992 11.7009 13.4217 12.2264 12.8326 12.2264H11.7659C11.1768 12.2264 10.6992 11.7009 10.6992 11.0527V3.61902C10.6992 2.97078 11.1768 2.44528 11.7659 2.44528ZM7.43411 5.09433H6.36745C5.77834 5.09433 5.30078 5.62652 5.30078 6.28301V11.0377C5.30078 11.6942 5.77834 12.2264 6.36745 12.2264H7.43411C8.02322 12.2264 8.50078 11.6942 8.50078 11.0377V6.28301C8.50078 5.62652 8.02322 5.09433 7.43411 5.09433ZM2.13333 7.53962H1.06667C0.477563 7.53962 0 8.06421 0 8.71132V11.0547C0 11.7018 0.477563 12.2264 1.06667 12.2264H2.13333C2.72244 12.2264 3.2 11.7018 3.2 11.0547V8.71132C3.2 8.06421 2.72244 7.53962 2.13333 7.53962Z" fill="white"/>
+    </svg>
+      <svg class="ios-statusbar__wifi" width="18" height="13" viewBox="0 0 18 13" fill="none" aria-hidden="true">
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M8.5713 2.46628C11.0584 2.46639 13.4504 3.38847 15.2529 5.04195C15.3887 5.1696 15.6056 5.16799 15.7393 5.03834L17.0368 3.77487C17.1045 3.70911 17.1422 3.62004 17.1417 3.52735C17.1411 3.43467 17.1023 3.34603 17.0338 3.28104C12.3028 -1.09368 4.83907 -1.09368 0.108056 3.28104C0.039524 3.34598 0.000639766 3.4346 7.82398e-06 3.52728C-0.000624118 3.61996 0.0370483 3.70906 0.104689 3.77487L1.40255 5.03834C1.53615 5.16819 1.75327 5.1698 1.88893 5.04195C3.69167 3.38836 6.08395 2.46628 8.5713 2.46628ZM8.56795 6.68656C9.92527 6.68647 11.2341 7.19821 12.2403 8.12234C12.3763 8.2535 12.5907 8.25065 12.7234 8.11593L14.0106 6.79663C14.0784 6.72742 14.1161 6.63355 14.1151 6.536C14.1141 6.43844 14.0746 6.34536 14.0054 6.27757C10.9416 3.38672 6.19688 3.38672 3.13305 6.27757C3.06384 6.34536 3.02435 6.43849 3.02345 6.53607C3.02254 6.63366 3.06028 6.72752 3.12822 6.79663L4.41513 8.11593C4.54778 8.25065 4.76215 8.2535 4.89823 8.12234C5.90368 7.19882 7.21152 6.68713 8.56795 6.68656ZM11.0924 9.48011C11.0943 9.58546 11.0572 9.68703 10.9899 9.76084L8.81327 12.2156C8.74946 12.2877 8.66247 12.3283 8.5717 12.3283C8.48093 12.3283 8.39394 12.2877 8.33013 12.2156L6.1531 9.76084C6.08585 9.68697 6.04886 9.58537 6.05085 9.48002C6.05284 9.37467 6.09365 9.27491 6.16364 9.20429C7.55374 7.8904 9.58966 7.8904 10.9798 9.20429C11.0497 9.27497 11.0904 9.37476 11.0924 9.48011Z" fill="white"/>
+    </svg>
+      <svg class="ios-statusbar__battery" width="28" height="13" viewBox="0 0 28 13" fill="none" aria-hidden="true">
+      <rect opacity="0.35" x="0.5" y="0.5" width="24" height="12" rx="3.8" stroke="white"/>
+      <path opacity="0.4" d="M26 4.78113V8.8566C26.8047 8.51143 27.328 7.70847 27.328 6.81886C27.328 5.92926 26.8047 5.1263 26 4.78113Z" fill="white"/>
+      <rect x="2" y="2" width="21" height="9" rx="2.5" fill="white"/>
+    </svg>
+    </div>
+  </div>
+
+      <div id="app"></div>
+    </div>
+    <img class="frame" src="assets/iphone.png" alt="">
+  </div>
+</main>
+
+<script>
+/* Прелоадер: печатает слова, ждёт реальную загрузку и уступает место лендингу.
+   Без модулей и зависимостей — запускается раньше js/app.js. */
+(function () {
+  var root = document.documentElement;
+  var preloader = document.getElementById('preloader');
+  var wordEl = document.getElementById('preloaderWord');
+  if (!preloader || !wordEl) { root.classList.remove('is-preloading'); return; }
+
+  var WORDS = ['create', 'inspire', 'collab', 'kolaba'];
+  var TYPE_MS = 65;      /* печать символа */
+  var ERASE_MS = 35;     /* стирание символа */
+  var HOLD_MS = 700;     /* пауза на собранном слове */
+  var GAP_MS = 150;      /* пауза между словами */
+  var REPEAT_MS = 600;   /* сокращённый показ при повторном заходе */
+  var HARD_TIMEOUT_MS = 8000;
+  var SESSION_KEY = 'kolaba:preloader-shown';
+
+  var reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var seenThisSession = false;
+  try { seenThisSession = sessionStorage.getItem(SESSION_KEY) === '1'; } catch (error) { /* приватный режим */ }
+
+  var finished = false;
+  var animationDone = false;
+  var assetsReady = false;
+  var timers = [];
+
+  function later(fn, ms) { var id = window.setTimeout(fn, ms); timers.push(id); return id; }
+  function clearTimers() { timers.forEach(window.clearTimeout); timers = []; }
+
+  /* Ждём страницу, шрифты и картинку мокапа — её тянем заранее */
+  function whenLoaded() {
+    return new Promise(function (resolve) {
+      if (document.readyState === 'complete') resolve();
+      else window.addEventListener('load', resolve, { once: true });
+    });
+  }
+  function whenImage(src) {
+    return new Promise(function (resolve) {
+      var image = new Image();
+      image.onload = image.onerror = resolve;
+      image.src = src;
+    });
+  }
+
+  Promise.all([
+    whenLoaded(),
+    document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve(),
+    whenImage('assets/iphone.png')
+  ]).then(function () { assetsReady = true; maybeFinish(); });
+
+  /* Предохранитель: не держим заставку дольше восьми секунд */
+  later(function () { assetsReady = true; animationDone = true; maybeFinish(); }, HARD_TIMEOUT_MS);
+
+  function maybeFinish() {
+    if (finished) return;
+    if (!animationDone) return;
+    if (!assetsReady) { preloader.classList.add('is-waiting'); return; }
+    finish();
+  }
+
+  function finish() {
+    if (finished) return;
+    finished = true;
+    clearTimers();
+    try { sessionStorage.setItem(SESSION_KEY, '1'); } catch (error) { /* приватный режим */ }
+    preloader.classList.remove('is-waiting');
+    preloader.classList.add('is-leaving');
+    root.classList.remove('is-preloading');
+
+    var removed = false;
+    function remove() {
+      if (removed) return;
+      removed = true;
+      if (preloader.parentNode) preloader.parentNode.removeChild(preloader);
+    }
+    preloader.addEventListener('transitionend', remove, { once: true });
+    window.setTimeout(remove, 700);
+  }
+
+  /* Тап, клик или Esc обрывают анимацию и запускают переход сразу */
+  function skip() {
+    if (finished) return;
+    clearTimers();
+    wordEl.textContent = 'kolaba';
+    animationDone = true;
+    assetsReady = true;
+    finish();
+  }
+  preloader.addEventListener('click', skip);
+  preloader.addEventListener('touchend', skip);
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' || event.key === 'Esc') skip();
+  });
+
+  function typeWords(index) {
+    var word = WORDS[index];
+    var shown = 0;
+    (function type() {
+      wordEl.textContent = word.slice(0, ++shown);
+      if (shown < word.length) { later(type, TYPE_MS); return; }
+      later(function () {
+        /* последнее слово не стирается и остаётся на экране */
+        if (index === WORDS.length - 1) { animationDone = true; maybeFinish(); return; }
+        (function erase() {
+          wordEl.textContent = word.slice(0, --shown);
+          if (shown > 0) later(erase, ERASE_MS);
+          else later(function () { typeWords(index + 1); }, GAP_MS);
+        })();
+      }, HOLD_MS);
+    })();
+  }
+
+  if (reducedMotion) {
+    wordEl.textContent = 'kolaba';
+    animationDone = true;
+    maybeFinish();
+  } else if (seenThisSession) {
+    wordEl.textContent = 'kolaba';
+    later(function () { animationDone = true; maybeFinish(); }, REPEAT_MS);
+  } else {
+    typeWords(0);
+  }
+})();
+</script>
+
+<script type="module" src="./src/main.tsx"></script>
+</body>
+</html>
