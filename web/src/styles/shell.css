@@ -44,7 +44,11 @@
 }
 
 /* ─── обвязка страницы вокруг телефона ─── */
-.page-logo img { width: 96px; display: block; }
+.page-logo img { width: 96px; display: block; margin: 0 auto; }
+.page-logo { text-align: center; }
+.page-logo p { margin: 8px 0; font-size: 12px; color: #aaa; }
+.page-logo nav { display: flex; justify-content: center; gap: 20px; font-size: 12px; }
+.page-logo a { color: #ddd; text-underline-offset: 3px; }
 .stage { display: flex; justify-content: center; flex: 1; align-items: flex-start; min-height: 0; }
 
 /* Размер настоящего телефона; под окно подгоняется трансформом, поэтому внутри

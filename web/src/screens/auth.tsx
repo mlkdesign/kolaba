@@ -38,6 +38,7 @@ function Start({ onSignup, onLogin, onLegal }: { onSignup: () => void; onLogin: 
         <button class="btn" onClick={onSignup}>Create profile</button>
         <button class="btn secondary" style={{ marginTop: 10 }} onClick={onLogin}>Log in</button>
         <button class="muted" style={{ marginTop: 16, fontSize: 12 }} onClick={onLegal}>Test environment · Terms & Privacy</button>
+        <nav aria-label="Legal documents" style={{ marginTop: 10, fontSize: 12, display: 'flex', justifyContent: 'center', gap: 20 }}><a href={`${import.meta.env.BASE_URL}privacy.html`}>Privacy Policy</a><a href={`${import.meta.env.BASE_URL}terms.html`}>Terms of Use</a></nav>
       </div>
     </div>
   );
@@ -253,17 +254,13 @@ export function Legal({ onBack }: { onBack: () => void }) {
       <header class="topbar"><button class="glass-btn" aria-label="Back" onClick={onBack}><Icon name="IconArrowLeft" /></button>
         <div class="topbar__title">Terms & Privacy</div><span class="topbar__spacer" /></header>
       <div class="legal">
-        <h2>Test environment</h2>
-        <p>kolaba. web is a public test version. Data may be reset or deleted at any time. Do not upload anything private or anything you
-          don't have the rights to. Demo profiles (marked DEMO) are fictional; stock videos show models, not these profiles.</p>
-        <h2>What we store</h2>
-        <p>Your e-mail, a salted password hash (PBKDF2-SHA256), your profiles, the media you upload, your jobs, applications, contacts,
-          messages, reviews and notifications — on Cloudflare (D1 database, R2 storage). Messages are visible only to their participants.</p>
-        <h2>Your rights</h2>
-        <p>Ask for your test data to be deleted at any time; accounts and content that break the rules (spam, scams, harassment) are removed.
-          Report content from any profile's menu.</p>
-        <h2>No payments</h2>
-        <p>PRO features are test entitlements. Nothing is charged.</p>
+        <h2>KOLABA web test version</h2>
+        <p>KOLABA connects creators and businesses. Demo profiles are fictional and the test may be reset. No payments are charged.</p>
+        <h2>Legal documents</h2>
+        <p><a href={`${import.meta.env.BASE_URL}privacy.html`}>Read the Privacy Policy</a></p>
+        <p><a href={`${import.meta.env.BASE_URL}terms.html`}>Read the Terms of Use</a></p>
+        <h2>Operator and contact</h2>
+        <p>Milka Yevhenii, Ukraine · <a href="mailto:mlkdesignweb@gmail.com">mlkdesignweb@gmail.com</a></p>
       </div>
     </div>
   );
