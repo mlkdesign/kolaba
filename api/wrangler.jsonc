@@ -30,6 +30,8 @@
     "TEST_CODE_INBOX": "mlkdesignweb@gmail.com",
     // Accounts allowed to switch their own PRO on and off for testing (Settings). Nobody else can.
     "PRO_TEST_EMAILS": "mlkdesignweb@gmail.com",
+    // Sign in with Google: the Web client id (public — the audience of the ID tokens; no client secret is used).
+    "GOOGLE_CLIENT_ID": "888396863806-et1d0p9h08gaptueupl1c9lhg9dlivqa.apps.googleusercontent.com",
     // Admin panel (/v1/admin): the only administrator, and the only origin that may call the admin API. The first
     // password comes from the secret ADMIN_INITIAL_PASSWORD (wrangler secret put) and must be changed at first sign-in.
     "ADMIN_EMAILS": "milka19051995@gmail.com",
@@ -47,7 +49,8 @@
         "MAX_VIDEO_MB": "50",
         "MAX_VIDEO_SECONDS": "60",
         "ADMIN_EMAILS": "milka19051995@gmail.com",
-        "ADMIN_ORIGINS": "http://localhost:5174,http://127.0.0.1:5174"
+        "ADMIN_ORIGINS": "http://localhost:5174,http://127.0.0.1:5174",
+        "GOOGLE_CLIENT_ID": "888396863806-et1d0p9h08gaptueupl1c9lhg9dlivqa.apps.googleusercontent.com"
       },
       "d1_databases": [
         { "binding": "DB", "database_name": "kolaba-db", "database_id": "880ac093-6e95-43b9-8c39-d42a8f539316", "migrations_dir": "migrations" }

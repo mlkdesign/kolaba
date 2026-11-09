@@ -6,6 +6,7 @@ import { clientIP, createSession, currentUser, rateLimit, requireAuth } from '..
 import { hashPassword, passwordProblem, verifyPassword } from '../lib/password';
 import { fail, newId, now, sha256Hex, timingSafeEqual } from '../lib/util';
 import { profilesOf } from './profiles';
+import { GoogleTokenError, verifyGoogleIdToken } from '../lib/google';
 
 const auth = new Hono<AppEnv>();
 
@@ -169,6 +170,94 @@ auth.post('/login', async (c) => {
   await c.env.DB.prepare(`UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(user!.id).run();
   const token = await createSession(c.env.DB, user!.id, c.req.header('User-Agent'));
   return c.json(await sessionPayload(c.env, user!.id, token));
+});
+
+// POST /v1/auth/google {credential, password?} — Sign in with Google (an ID token from Google Identity Services).
+// The token is verified here (signature, issuer, audience = our Web client id, expiry, verified e-mail); its `sub`
+// is the Google account. 1) A linked Google account signs in. 2) An address that already has a KOLABA account is
+// never merged by e-mail alone: the person proves the account with its password (`password`), then Google is linked
+// to it — profiles, posts, contacts, messages and PRO stay as they are. (An address that was only started with a
+// password and never verified, with no profile, belongs to whoever proves the address: Google's verified e-mail does,
+// and that empty sign-up is taken over.) 3) A new address creates a KOLABA user — no OTP, Google has verified it —
+// who continues to the usual onboarding (no profile yet).
+auth.post('/google', async (c) => {
+  await rateLimit(c, 'RL_AUTH', `google:${clientIP(c)}`);
+  const clientId = c.env.GOOGLE_CLIENT_ID?.trim();
+  if (!clientId) fail(503, 'google_unavailable', 'Google sign-in is not configured.');
+  const body = z.object({ credential: z.string().min(20).max(8192), password: z.string().min(1).max(200).optional() }).parse(await c.req.json());
+  let claims;
+  try { claims = await verifyGoogleIdToken(body.credential, clientId!, c.env.GOOGLE_JWKS_URL || undefined); }
+  catch (e) { fail(401, 'google_token_invalid', e instanceof GoogleTokenError ? e.message : 'invalid'); }
+  const { sub, email } = claims!;
+  const ua = c.req.header('User-Agent');
+  const signIn = async (userId: string, isNew: boolean) => {
+    const token = await createSession(c.env.DB, userId, ua);
+    return c.json({ ...(await sessionPayload(c.env, userId, token)), isNew });
+  };
+
+  // 1) Already linked.
+  const linked = await c.env.DB.prepare(`SELECT u.id, u.status FROM auth_identities i JOIN users u ON u.id = i.user_id
+      WHERE i.provider = 'google' AND i.provider_user_id = ?`).bind(sub).first<{ id: string; status: string }>();
+  if (linked) {
+    if (linked.status !== 'active') fail(403, 'account_suspended');
+    return signIn(linked.id, false);
+  }
+
+  const addIdentity = (userId: string) => c.env.DB.prepare(`INSERT INTO auth_identities (id, user_id, provider, provider_user_id, email, created_at)
+      VALUES (?, ?, 'google', ?, ?, ?)`).bind(newId('aid'), userId, sub, email, now()).run();
+
+  // 2) The address already has an account.
+  const existing = await c.env.DB.prepare(`SELECT id, password_hash, password_salt, password_scheme, email_verified_at, status, is_demo,
+      failed_logins, locked_until, (SELECT COUNT(*) FROM profiles p WHERE p.owner_user_id = users.id) AS profiles
+      FROM users WHERE email = ?`).bind(email)
+    .first<{ id: string; password_hash: string | null; password_salt: string | null; password_scheme: string | null; email_verified_at: number | null;
+             status: string; is_demo: number; failed_logins: number; locked_until: number | null; profiles: number }>();
+  if (existing) {
+    if (existing.status !== 'active') fail(403, 'account_suspended');
+    const other = await c.env.DB.prepare(`SELECT 1 AS ok FROM auth_identities WHERE user_id = ? AND provider = 'google'`).bind(existing.id).first();
+    if (other) fail(409, 'google_other_account_linked', 'This KOLABA account is linked to a different Google account.');
+    if (!existing.email_verified_at && !existing.profiles && !existing.is_demo) {
+      // An unfinished password sign-up: the verified Google owner of the address takes it (nothing in it to merge).
+      await c.env.DB.prepare(`UPDATE users SET password_hash = NULL, password_salt = NULL, password_scheme = NULL, email_verified_at = ?,
+          email_verification = 'google', failed_logins = 0, locked_until = NULL, updated_at = ? WHERE id = ?`).bind(now(), now(), existing.id).run();
+      await c.env.DB.prepare(`UPDATE email_codes SET consumed_at = ? WHERE user_id = ? AND consumed_at IS NULL`).bind(now(), existing.id).run();
+      await addIdentity(existing.id);
+      return signIn(existing.id, true);
+    }
+    if (existing.is_demo) fail(403, 'demo_account');
+    if (!body.password) return c.json({ error: { code: 'google_link_required', message: 'Sign in with your password to link Google.' }, email }, 409);
+    await rateLimit(c, 'RL_AUTH', `login:${email}`);
+    if (existing.locked_until && existing.locked_until > now()) fail(429, 'account_locked');
+    const ok = existing.password_hash && existing.password_salt && existing.password_scheme
+      ? await verifyPassword(body.password!, existing.password_hash, existing.password_salt, existing.password_scheme) : false;
+    if (!ok) {
+      const failed = existing.failed_logins + 1;
+      await c.env.DB.prepare(`UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?`)
+        .bind(failed >= MAX_FAILED_LOGINS ? 0 : failed, failed >= MAX_FAILED_LOGINS ? now() + LOCK_MS : null, existing.id).run();
+      fail(401, 'invalid_credentials');
+    }
+    // The password proves the account, Google proves the address: link, and the address counts as verified.
+    await c.env.DB.prepare(`UPDATE users SET failed_logins = 0, locked_until = NULL, email_verified_at = COALESCE(email_verified_at, ?),
+        email_verification = CASE WHEN email_verification IS NULL OR email_verification = 'test_inbox' THEN 'google' ELSE email_verification END,
+        updated_at = ? WHERE id = ?`).bind(now(), now(), existing.id).run();
+    await addIdentity(existing.id);
+    return signIn(existing.id, false);
+  }
+
+  // 3) A new person.
+  const allowed = (c.env.SIGNUP_ALLOWED_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+  if (!c.env.TEST_CODE_INBOX && allowed.length && !allowed.includes(email)) fail(403, 'registration_invite_only');
+  const dayStart = Math.floor(now() / 86_400_000) * 86_400_000;
+  const today = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE is_demo = 0 AND created_at >= ?`).bind(dayStart).first<{ n: number }>();
+  if ((today?.n ?? 0) >= Number(c.env.SIGNUPS_PER_DAY || 50)) fail(429, 'signups_paused');
+  const userId = newId('usr');
+  await c.env.DB.batch([
+    c.env.DB.prepare(`INSERT INTO users (id, email, email_verified_at, email_verification, created_at, updated_at) VALUES (?, ?, ?, 'google', ?, ?)`)
+      .bind(userId, email, now(), now(), now()),
+    c.env.DB.prepare(`INSERT INTO auth_identities (id, user_id, provider, provider_user_id, email, created_at) VALUES (?, ?, 'google', ?, ?, ?)`)
+      .bind(newId('aid'), userId, sub, email, now()),
+  ]);
+  return signIn(userId, true);
 });
 
 auth.post('/logout', requireAuth, async (c) => {

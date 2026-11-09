@@ -25,6 +25,10 @@ export interface Env {
   /** Closed test: every verification / reset code goes to this inbox instead of the address typed in (the address is
    *  then NOT proven — users.email_verification = 'test_inbox'). Unset: codes go to their owners (the default). */
   TEST_CODE_INBOX?: string;
+  /** Google Identity Services Web client id (public): the audience every Google ID token must carry. */
+  GOOGLE_CLIENT_ID?: string;
+  /** Tests only: another JWKS URL for Google's signing keys (never set in production). */
+  GOOGLE_JWKS_URL?: string;
   /** Comma-separated e-mails allowed to switch their own profile between Free and PRO for testing. */
   PRO_TEST_EMAILS?: string;
 

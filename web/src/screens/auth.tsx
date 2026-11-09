@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { LocationField, placeFields, type Place } from '../location';
 import { trackScreen } from '../analytics';
+import { GoogleButton } from '../google';
 import { ApiError, errorText, post, ProfileType } from '../api';
 import { applySession, profiles, reloadSession, showToast, user } from '../state';
 import { AmbientBackground, subscribe } from '../fx';
@@ -142,7 +143,7 @@ function Socials({ intent }: { intent: 'Sign Up' | 'Log in' }) {
     <>
       <div class="auth-or">Or</div>
       <div class="form-gap">
-        <button type="button" class="social-btn" onClick={() => showToast(`${intent} with Google is available in the iOS app`)}><img src={icon('IconGoogle')} alt="" />{intent} with Google</button>
+        <GoogleButton intent={intent} />
         <button type="button" class="social-btn" onClick={() => showToast(`${intent} with Apple is available in the iOS app`)}><img src={icon('IconApple')} alt="" />{intent} with Apple</button>
       </div>
     </>

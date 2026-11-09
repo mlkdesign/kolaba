@@ -237,3 +237,17 @@ API for internal logic).
   separator; Add business account → Create Business Profile; pull down to close.
 - **PRO (Testing)**: SettingsToggleRow with the crown, 15 / 12 pt text, and the iOS 26 switch (63 × 28, capsule thumb,
   pink when on); moves at once, the server decides, reverts on an error.
+
+## Sign in with Google (2026-11-09)
+- Web: Google Identity Services, the official button (popup, pill, dark) on Sign Up and Log in (`src/google.tsx`);
+  the library loads only on those screens. The ID token goes to `POST /v1/auth/google`; no client secret anywhere.
+  CSP allows `accounts.google.com/gsi/*`.
+- API (`src/lib/google.ts`, `routes/auth.ts`): RS256 signature against Google's JWKS (cached, refreshed on an unknown
+  kid), issuer, audience = `GOOGLE_CLIENT_ID` (wrangler vars, public), expiry / iat with 60 s skew, verified e-mail.
+  `sub` → `auth_identities (provider 'google')`. Linked → session. An address with a KOLABA account is linked only
+  after its password (409 `google_link_required` → the app asks for it); an unfinished, unverified, profile-less
+  password sign-up is taken over by the verified Google owner; a new address creates a user (`email_verification
+  'google'`, no OTP) who continues to Create profile. One Google account per KOLABA account.
+- Tested locally with self-signed tokens against a test JWKS (19 scenarios: first sign-up, repeat, reload, logout and
+  back, creator profile, link with / without / wrong password, second Google account refused, forged signature, wrong
+  audience / issuer, expired, unverified e-mail, unknown key; no duplicate users).
