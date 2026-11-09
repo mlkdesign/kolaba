@@ -1072,3 +1072,15 @@ img.cicon { object-fit: cover; }
 .location-field > .field { width: 100%; }
 .use-location { min-height: 36px; padding: 0 8px; font-size: 14px; color: var(--pink); }
 .use-location:disabled { opacity: .6; }
+
+/* KOLABA has contacts, not follows: the Reels contact button (pink +, Requested = clock on white 15 % — a tap withdraws,
+   In contacts = check), and Accept / Decline on a contact request's notification */
+.contact-btn { width: 40px; height: 40px; border-radius: 50%; background: var(--pink); display: grid; place-items: center; flex: none; transition: transform .2s var(--spring), background .2s; }
+.contact-btn img { width: 20px; height: 20px; }
+.contact-btn:active { transform: scale(.9); }
+.contact-btn.is-requested, .contact-btn.is-connected { background: rgba(255, 255, 255, .15); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.notif__actions { display: flex; gap: 6px; flex: none; }
+.notif-pill { height: 32px; padding: 0 12px; border-radius: 16px; font-weight: 500; font-size: 12px; color: #fff; background: rgba(255, 255, 255, .1); }
+.notif-pill.is-primary { background: var(--pink); }
+.notif__state { flex: none; font-size: 12px; color: rgba(255, 255, 255, .5); }
+.cbtn.is-large { height: 48px; border-radius: 20px; flex: 1 1 0; }

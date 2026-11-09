@@ -58,7 +58,7 @@ export function CreatorsScreen() {
   );
 }
 
-type Rel = { relation: 'none' | 'requested' | 'incoming' | 'connected'; requestId?: string };
+export type Rel = { relation: 'none' | 'requested' | 'incoming' | 'connected' | 'unavailable'; requestId?: string | null };
 
 /** Every profile's contact state for the acting profile, from the three My Contacts lists (one request each). */
 function useRelations() {
@@ -136,9 +136,11 @@ function CreatorCard({ card, rel, onRel }: { card: Card & { bio?: string }; rel:
   );
 }
 
-/** CreatorContactButton: Add to contacts → Requested (Cancel request) → In contacts ✓ (Remove contact); Accept request. */
-export function ContactButton({ card, rel, onRel }: { card: Card; rel: Rel; onRel: (r: Rel) => void }) {
+/** The contact button (CreatorContactButton): Add to contacts → Requested (a tap withdraws the request) → In contacts ✓
+ *  (a tap offers Remove contact); a request to me: Accept request. `large`: the profile's 48 pt version. */
+export function ContactButton({ card, rel, onRel, large }: { card: Pick<Card, 'id'>; rel: Rel; onRel: (r: Rel) => void; large?: boolean }) {
   const [busy, setBusy] = useState(false);
+  const size = large ? 'is-large' : '';
   const run = async (fn: () => Promise<any>, next: (res: any) => Rel, ok: string) => {
     const before = rel;
     setBusy(true);
@@ -146,14 +148,16 @@ export function ContactButton({ card, rel, onRel }: { card: Card; rel: Rel; onRe
     catch (e) { onRel(before); showToast(errorText(e), 'error'); } finally { setBusy(false); }
   };
   const add = () => run(() => post('/v1/contacts/requests', { profileId: card.id }), (r) => ({ relation: r?.relation ?? 'requested', requestId: r?.requestId }), 'Contact request sent');
-  if (rel.relation === 'none') return <button class="cbtn is-outlined" disabled={busy} onClick={add}><img src={icon('IconUserPlus')} alt="" />{busy ? 'Sending…' : 'Add to contacts'}</button>;
-  if (rel.relation === 'incoming') return <button class="cbtn is-outlined" disabled={busy} onClick={() => run(() => post(`/v1/contacts/requests/${rel.requestId}/accept`), () => ({ relation: 'connected' }), 'Contact added')}><img src={icon('IconUserPlus')} alt="" />Accept request</button>;
-  const menu = (e: MouseEvent) => openContextMenu(e.currentTarget as HTMLElement, rel.relation === 'requested'
-    ? [{ label: 'Cancel request', icon: 'IconXCircle', danger: true, run: () => void run(() => post(`/v1/contacts/requests/${rel.requestId}/cancel`), () => ({ relation: 'none' }), 'Request cancelled') }]
-    : [{ label: 'Remove contact', icon: 'IconUserMinus', danger: true, run: () => void run(() => del(`/v1/contacts/${card.id}`), () => ({ relation: 'none' }), 'Contact removed') }]);
-  return rel.relation === 'requested'
-    ? <button class="cbtn is-calm" disabled={busy} onClick={menu as any}>Requested</button>
-    : <button class="cbtn is-calm is-in" disabled={busy} onClick={menu as any}>In contacts<img src={icon('IconFollowingCheck')} alt="" style={{ width: 20, height: 20 }} /></button>;
+  if (rel.relation === 'unavailable') return null;
+  if (rel.relation === 'none') return <button class={`cbtn is-outlined ${size}`} disabled={busy} onClick={add}><img src={icon('IconUserPlus')} alt="" />{busy ? 'Sending…' : 'Add to contacts'}</button>;
+  if (rel.relation === 'incoming') return <button class={`cbtn is-outlined ${size}`} disabled={busy} onClick={() => run(() => post(`/v1/contacts/requests/${rel.requestId}/accept`), () => ({ relation: 'connected', requestId: rel.requestId }), 'Contact added')}><img src={icon('IconUserPlus')} alt="" />Accept request</button>;
+  if (rel.relation === 'requested') {
+    return <button class={`cbtn is-calm ${size}`} disabled={busy} aria-label="Requested — tap to cancel the request"
+      onClick={() => run(() => post(`/v1/contacts/requests/${rel.requestId}/cancel`), () => ({ relation: 'none' }), 'Request cancelled')}>{busy ? 'Cancelling…' : 'Requested'}</button>;
+  }
+  const menu = (e: MouseEvent) => openContextMenu(e.currentTarget as HTMLElement,
+    [{ label: 'Remove contact', icon: 'IconUserMinus', danger: true, run: () => void run(() => del(`/v1/contacts/${card.id}`), () => ({ relation: 'none' }), 'Contact removed') }]);
+  return <button class={`cbtn is-calm is-in ${size}`} disabled={busy} onClick={menu as any}>In contacts<img src={icon('IconFollowingCheck')} alt="" style={{ width: 20, height: 20 }} /></button>;
 }
 
 /** A PRO creator's latest videos, loaded once the card is near the screen. */

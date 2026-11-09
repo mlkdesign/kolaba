@@ -7,8 +7,9 @@ import { activeProfile, badges, openSheet, push, refresh, refreshTick, showToast
 import { uiScale } from '../scale';
 import { gradientFor, openContextMenu, openViewer, useLongPress, Avatar, BackButton, Dots, Empty, fmtCount, GlassButton, Header, HeaderTitle, Icon, icon, Logo, ProBadge, SheetFrame, Spinner, timeAgo, useLoad } from '../ui';
 import { InHeader } from '../ui';
+import type { Rel } from './creators';
 
-interface CreatorReels { author: Card; bio: string; isFollowing: boolean; videos: Media[] }
+interface CreatorReels { author: Card; bio: string; contact?: Rel; videos: Media[] }
 
 export function ReelsScreen() {
   const [items, setItems] = useState<CreatorReels[]>([]);
@@ -16,7 +17,7 @@ export function ReelsScreen() {
   const [active, setActive] = useState(0);
   const [videoIndex, setVideoIndex] = useState<Record<string, number>>({});
   const [muted, setMuted] = useState(true);
-  const [onlyFollowing, setOnlyFollowing] = useState(false);
+  const [onlyContacts, setOnlyContacts] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const root = useRef<HTMLDivElement>(null);
@@ -33,7 +34,7 @@ export function ReelsScreen() {
   };
   useEffect(() => { void load(false); }, [activeProfile.value?.id]);
 
-  const shown = items.filter((c) => c.author.id !== activeProfile.value?.id && (!onlyFollowing || c.isFollowing) && c.videos.length);
+  const shown = items.filter((c) => c.author.id !== activeProfile.value?.id && (!onlyContacts || c.contact?.relation === 'connected') && c.videos.length);
   useEffect(() => {
     const el = root.current;
     if (!el) return;
@@ -53,17 +54,23 @@ export function ReelsScreen() {
     try { const res = liked ? await put(`/v1/media/${m.id}/like`) : await del(`/v1/media/${m.id}/like`); apply(res.liked, res.likesCount); }
     catch (e) { apply(!!m.isLiked, m.likesCount); showToast(errorText(e), 'error'); }
   };
-  const setFollow = async (creator: CreatorReels) => {
-    const next = !creator.isFollowing;
-    patchCreator(creator.author.id, (c) => ({ ...c, isFollowing: next }));
-    try { next ? await put(`/v1/profiles/${creator.author.id}/follow`) : await del(`/v1/profiles/${creator.author.id}/follow`); refresh(); }
-    catch (e) { patchCreator(creator.author.id, (c) => ({ ...c, isFollowing: !next })); showToast(errorText(e), 'error'); }
+  // Contacts, not follows: + sends a contact request, Requested withdraws it, a request to me is accepted.
+  const setContact = async (creator: CreatorReels) => {
+    const rel = creator.contact ?? { relation: 'none' as const };
+    if (rel.relation === 'connected') { push('profile-view', { id: creator.author.id }); return; }
+    const set = (r: Rel) => patchCreator(creator.author.id, (c) => ({ ...c, contact: r }));
+    try {
+      if (rel.relation === 'none') { const r = await post('/v1/contacts/requests', { profileId: creator.author.id }); set({ relation: r?.relation ?? 'requested', requestId: r?.requestId }); showToast('Contact request sent', 'ok'); }
+      else if (rel.relation === 'requested') { await post(`/v1/contacts/requests/${rel.requestId}/cancel`); set({ relation: 'none' }); showToast('Request cancelled', 'ok'); }
+      else if (rel.relation === 'incoming') { await post(`/v1/contacts/requests/${rel.requestId}/accept`); set({ relation: 'connected', requestId: rel.requestId }); showToast('Contact added', 'ok'); }
+      refresh();
+    } catch (e) { showToast(errorText(e), 'error'); }
   };
   const filter = () => openSheet((close) => (
     <SheetFrame title="Feed" close={close}>
-      {[[false, 'All creators'], [true, 'Following']].map(([v, l]) => (
-        <button class="menu-item" onClick={() => { setOnlyFollowing(v as boolean); close(); root.current?.scrollTo({ top: 0 }); }}>
-          <span class="grow">{l}</span>{onlyFollowing === v && <Icon name="IconCheckActive" />}</button>
+      {[[false, 'All creators'], [true, 'My contacts']].map(([v, l]) => (
+        <button class="menu-item" onClick={() => { setOnlyContacts(v as boolean); close(); root.current?.scrollTo({ top: 0 }); }}>
+          <span class="grow">{l}</span>{onlyContacts === v && <Icon name="IconCheckActive" />}</button>
       ))}
     </SheetFrame>
   ));
@@ -74,11 +81,11 @@ export function ReelsScreen() {
       <div class="reels" ref={root}>
         {loading && <div style={{ paddingTop: 260 }}><Spinner /></div>}
         {!loading && error && <div style={{ paddingTop: 160 }}><Empty title="Couldn't load the feed" text={error}><button class="btn is-small is-milky" onClick={() => load(false)}>Try again</button></Empty></div>}
-        {!loading && !error && !shown.length && <div style={{ paddingTop: 160 }}><Empty title={onlyFollowing ? 'Nobody followed yet' : 'No videos yet'} text={onlyFollowing ? 'Follow creators with the pink button.' : undefined} iconName="IconPlayCircle" /></div>}
+        {!loading && !error && !shown.length && <div style={{ paddingTop: 160 }}><Empty title={onlyContacts ? 'No videos from your contacts yet' : 'No videos yet'} text={onlyContacts ? 'Add creators to your contacts with the pink button.' : undefined} iconName="IconPlayCircle" /></div>}
         {shown.map((c, i) => (
           <CreatorPage key={c.author.id} creator={c} index={i} active={visible && i === active} near={Math.abs(i - active) <= 1} muted={muted}
             onVideo={(v) => setVideoIndex((x) => ({ ...x, [c.author.id]: v }))}
-            onLike={(m) => setLike(c, m)} onFollow={() => setFollow(c)} onToggleSound={() => setMuted(!muted)} />
+            onLike={(m) => setLike(c, m)} onContact={() => setContact(c)} onToggleSound={() => setMuted(!muted)} />
         ))}
       </div>
       <div class="reel__top" />
@@ -91,9 +98,9 @@ export function ReelsScreen() {
   );
 }
 
-function CreatorPage({ creator, index, active, near, muted, onVideo, onLike, onFollow, onToggleSound }: {
+function CreatorPage({ creator, index, active, near, muted, onVideo, onLike, onContact, onToggleSound }: {
   creator: CreatorReels; index: number; active: boolean; near: boolean; muted: boolean; onVideo: (i: number) => void;
-  onLike: (m: Media) => void; onFollow: () => void; onToggleSound: () => void;
+  onLike: (m: Media) => void; onContact: () => void; onToggleSound: () => void;
 }) {
   const [v, setV] = useState(0);
   const [progress, setProgress] = useState(0);
@@ -141,9 +148,17 @@ function CreatorPage({ creator, index, active, near, muted, onVideo, onLike, onF
           <button class="glass like-pill" aria-pressed={!!media?.isLiked} aria-label={media?.isLiked ? 'Unlike' : 'Like'} onClick={() => media && onLike(media)}>
             <img src={icon(media?.isLiked ? 'IconHeartLiked' : 'IconHeartFilled')} alt="" />{fmtCount(media?.likesCount ?? 0)}
           </button>
-          <button class="follow-btn" aria-pressed={creator.isFollowing} aria-label={creator.isFollowing ? 'Unfollow' : 'Follow'} onClick={onFollow}>
-            <img src={icon(creator.isFollowing ? 'IconFollowingCheck' : 'IconPlus')} alt="" />
-          </button>
+          {(() => {
+            const r = creator.contact?.relation ?? 'none';
+            if (r === 'unavailable') return null;
+            const label = { none: 'Add to contacts', requested: 'Requested — tap to cancel', incoming: 'Accept contact request', connected: 'In contacts' }[r];
+            return (
+              <button class={`contact-btn is-${r}`} aria-label={label} title={label} onClick={onContact}>
+                {r === 'requested' ? <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="7.25" fill="none" stroke="#fff" stroke-width="1.5" /><path d="M10 6v4.2l2.6 1.6" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  : <img src={icon(r === 'connected' ? 'IconFollowingCheck' : r === 'incoming' ? 'IconUserPlus' : 'IconPlus')} alt="" />}
+              </button>
+            );
+          })()}
         </div>
         {creator.bio && <div class="reel__bio lines-3">{creator.bio}</div>}
         <div class="reel__foot">
@@ -201,7 +216,7 @@ function notificationTime(ms: number) {
   return new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
-type Note = Notification & { media?: Media | null; isFollowingActor?: boolean };
+type Note = Notification & { media?: Media | null; requestStatus?: string | null };
 
 export function NotificationsScreen() {
   const { data, loading, setData, reload } = useLoad<{ items: Note[]; unreadCount: number; nextCursor: string | null }>(
@@ -220,12 +235,16 @@ export function NotificationsScreen() {
     else if (n.type === 'liked_video' && n.media) openViewer(n.media);
     else if (n.actor) push('profile-view', { id: n.actor.id });
   };
-  const follow = async (n: Note) => {
-    const next = !n.isFollowingActor;
-    const set = (v: boolean) => setData((d) => d && ({ ...d, items: d.items.map((x) => (x.actor?.id === n.actor!.id ? { ...x, isFollowingActor: v } : x)) }));
-    set(next);
-    try { next ? await put(`/v1/profiles/${n.actor!.id}/follow`) : await del(`/v1/profiles/${n.actor!.id}/follow`); }
-    catch (e) { set(!next); showToast(errorText(e), 'error'); }
+  // A contact request answered from its row: Accept adds the contact, Decline turns it down — the server first.
+  const respond = async (n: Note, action: 'accept' | 'decline') => {
+    const set = (v: string | null) => setData((d) => d && ({ ...d, items: d.items.map((x) => (x.id === n.id ? { ...x, requestStatus: v, readAt: x.readAt ?? Date.now() } : x)) }));
+    const before = n.requestStatus ?? null;
+    set(action === 'accept' ? 'accepted' : 'declined');
+    try {
+      await post(`/v1/contacts/requests/${n.payload.requestId}/${action}`);
+      if (!n.readAt) post('/v1/notifications/read', { ids: [n.id] }).catch(() => {});
+      showToast(action === 'accept' ? 'Contact added' : 'Request declined', 'ok'); refresh();
+    } catch (e) { set(before); showToast(errorText(e), 'error'); }
   };
   const remove = async (n: Note) => {
     try { await del(`/v1/notifications/${n.id}`); setData((d) => d && ({ ...d, items: d.items.filter((x) => x.id !== n.id) })); refresh(); }
@@ -249,12 +268,12 @@ export function NotificationsScreen() {
     <>
       <div class="scroll">
         <div style={{ height: 'calc(var(--header-h) + 16px)' }} />
-        {loading && !data ? <Spinner /> : !today.length && !earlier.length ? <Empty title="No notifications yet." text="Follows, likes, messages, applications and reviews appear here." iconName="IconBell" /> : (
+        {loading && !data ? <Spinner /> : !today.length && !earlier.length ? <Empty title="No notifications yet." text="Contact requests, likes, messages, applications and reviews appear here." iconName="IconBell" /> : (
           <div class="notifs">
             {today.length > 0 && <div class="notifs__title">Today{unreadToday > 0 && <span class="badge" style={{ position: 'static' }}>{unreadToday}</span>}</div>}
-            {today.map((n) => <NotificationRow n={n} key={n.id} onOpen={open} onFollow={follow} onDelete={remove} />)}
+            {today.map((n) => <NotificationRow n={n} key={n.id} onOpen={open} onRespond={respond} onDelete={remove} />)}
             {earlier.length > 0 && <div class="notifs__title">Last 30 days</div>}
-            {earlier.map((n) => <NotificationRow n={n} key={n.id} onOpen={open} onFollow={follow} onDelete={remove} />)}
+            {earlier.map((n) => <NotificationRow n={n} key={n.id} onOpen={open} onRespond={respond} onDelete={remove} />)}
           </div>
         )}
         <div style={{ height: 40 }} />
@@ -265,11 +284,10 @@ export function NotificationsScreen() {
   );
 }
 
-function NotificationRow({ n, onOpen, onFollow, onDelete }: { n: Note; onOpen: (n: Note) => void; onFollow: (n: Note) => void; onDelete: (n: Note) => void }) {
+function NotificationRow({ n, onOpen, onRespond, onDelete }: { n: Note; onOpen: (n: Note) => void; onRespond: (n: Note, a: 'accept' | 'decline') => void; onDelete: (n: Note) => void }) {
   const press = useLongPress((el) => openContextMenu(el, [{ label: 'Delete notification', icon: 'IconTrash', danger: true, run: () => onDelete(n) }]));
   const name = n.actor?.username ?? 'kolaba';
   const job = n.type === 'application_received' || n.type === 'job_update' ? n.payload.jobTitle as string | undefined : undefined;
-  const followable = (n.type === 'followed' || n.type === 'viewed_profile') && n.actor?.type === 'creator';
   return (
     <div class={`notif ${n.readAt ? '' : 'is-unread'}`} role="button" tabIndex={0} aria-label={`${name}: ${notificationText[n.type] ?? n.type}`}
       onPointerDown={press.onPointerDown as any} onPointerMove={press.onPointerMove as any} onPointerUp={press.onPointerUp} onPointerCancel={press.onPointerCancel}
@@ -283,11 +301,13 @@ function NotificationRow({ n, onOpen, onFollow, onDelete }: { n: Note; onOpen: (
       {n.type === 'liked_video' && n.media ? (
         <img class="notif__thumb" src={(n.media.kind === 'video' ? n.media.posterUrl : n.media.url) ?? ''} alt="" style={{ background: gradientFor(n.media.id) }}
           onError={(e) => { e.currentTarget.removeAttribute('src'); }} />
-      ) : followable ? (
-        <button class={`follow-pill ${n.isFollowingActor ? 'is-on' : ''}`} aria-pressed={!!n.isFollowingActor}
-          onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); onFollow(n); }}>
-          {n.isFollowingActor ? 'Following' : <>Follow<img src={icon('IconPlusSmall')} alt="" /></>}
-        </button>
+      ) : n.type === 'contact_request' && n.payload.requestId ? (
+        n.requestStatus === 'pending' ? (
+          <div class="notif__actions" onPointerDown={(e) => e.stopPropagation()}>
+            <button class="notif-pill is-primary" onClick={(e) => { e.stopPropagation(); onRespond(n, 'accept'); }}>Accept</button>
+            <button class="notif-pill" onClick={(e) => { e.stopPropagation(); onRespond(n, 'decline'); }}>Decline</button>
+          </div>
+        ) : n.requestStatus ? <span class="notif__state">{{ accepted: 'In contacts', declined: 'Declined', cancelled: 'Withdrawn' }[n.requestStatus] ?? ''}</span> : null
       ) : null}
     </div>
   );

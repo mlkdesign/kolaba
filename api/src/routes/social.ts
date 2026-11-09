@@ -36,11 +36,18 @@ notifications.get('/', async (c) => {
   ]);
   const mediaById = new Map(mediaRows.results.map((m) => [m.id, mediaJSON(c.env, m)]));
   const followed = new Set(followRows.results.map((r) => r.id));
+  // A contact request's own state now (pending → Accept / Decline on the row; accepted / declined / cancelled after).
+  const requestIds = [...new Set(page.map((n, i) => (n.type === 'contact_request' ? payloads[i].requestId : null)).filter(Boolean))] as string[];
+  const requestRows = requestIds.length
+    ? await c.env.DB.prepare(`SELECT id, status FROM contact_requests WHERE recipient_profile_id = ? AND id IN (${requestIds.map(() => '?').join(',')})`)
+        .bind(profile.id, ...requestIds).all<{ id: string; status: string }>() : { results: [] as { id: string; status: string }[] };
+  const requestStatus = new Map(requestRows.results.map((r) => [r.id, r.status]));
   return c.json({
     items: page.map((n, i) => ({ id: n.id, type: n.type, payload: payloads[i], createdAt: n.created_at, readAt: n.read_at,
                               actor: n.actor_profile_id ? actors.get(n.actor_profile_id) ?? null : null,
                               media: payloads[i].mediaId ? mediaById.get(payloads[i].mediaId) ?? null : null,
-                              isFollowingActor: n.actor_profile_id ? followed.has(n.actor_profile_id) : false })),
+                              isFollowingActor: n.actor_profile_id ? followed.has(n.actor_profile_id) : false,
+                              requestStatus: n.type === 'contact_request' ? requestStatus.get(payloads[i].requestId) ?? null : undefined })),
     unreadCount: unread?.n ?? 0,
     nextCursor: last ? encodeCursor({ t: last.created_at, id: last.id }) : null,
   });
@@ -117,12 +124,23 @@ reels.get('/creators', requireAuth, requireProfile, async (c) => {
       .bind(profile.id, ...ids).all<{ followee_profile_id: string }>(),
     c.env.DB.prepare(`SELECT id, bio FROM profiles WHERE id IN (${marks})`).bind(...ids).all<{ id: string; bio: string }>(),
   ]);
+  // KOLABA has contacts, not follows: each creator's contact state with the viewer (the page's contact button).
+  const requests = await c.env.DB.prepare(`SELECT id, status, sender_profile_id, recipient_profile_id FROM contact_requests
+      WHERE status IN ('pending', 'accepted') AND ((sender_profile_id = ?1 AND recipient_profile_id IN (${ids.map((_, i) => `?${i + 2}`).join(',')}))
+        OR (recipient_profile_id = ?1 AND sender_profile_id IN (${ids.map((_, i) => `?${i + 2}`).join(',')})))`)
+    .bind(profile.id, ...ids).all<{ id: string; status: string; sender_profile_id: string; recipient_profile_id: string }>();
+  const contactOf = (id: string) => {
+    const r = requests.results.find((x) => x.sender_profile_id === id || x.recipient_profile_id === id);
+    if (!r) return { relation: 'none', requestId: null };
+    if (r.status === 'accepted') return { relation: 'connected', requestId: r.id };
+    return { relation: r.sender_profile_id === profile.id ? 'requested' : 'incoming', requestId: r.id };
+  };
   const followed = new Set(follows.results.map((f) => f.followee_profile_id));
   const bio = new Map(bios.results.map((b) => [b.id, b.bio]));
   const last = creators.results.length > limit ? page[page.length - 1] : null;
   return c.json({
     items: page.map((p) => ({
-      author: cards.get(p.id), bio: bio.get(p.id) ?? '', isFollowing: followed.has(p.id),
+      author: cards.get(p.id), bio: bio.get(p.id) ?? '', isFollowing: followed.has(p.id), contact: contactOf(p.id),
       videos: videos.results.filter((v) => v.owner_profile_id === p.id).slice(0, 10).map((v) => mediaJSON(c.env, v, { isLiked: v.is_liked === 1 })),
     })),
     nextCursor: last ? encodeCursor({ t: last.latest, id: last.id }) : null,

@@ -14,6 +14,7 @@ import {
   openViewer, Gallery, Dots, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, Stars, SwipePages, timeAgo, useLoad, usePullToRefresh, alertDialog, pickSheet, useCollapsingHeader, TopBlur, PinnedTabs, InHeader, Subtab, SortButton, AddButton, ActionPill,
 } from '../ui';
 import { JobCard } from './jobs';
+import { ContactButton, type Rel } from './creators';
 import { CreateProfile, Legal } from './auth';
 
 const SOCIAL_ICON: Record<string, string> = { instagram: 'SocialInstagramColor', tiktok: 'SocialTikTokColor', youtube: 'SocialYouTubeColor', pinterest: 'SocialPinterestColor' };
@@ -339,25 +340,19 @@ function OwnerActions({ p }: { p: ProfilePage }) {
   );
 }
 
+/** Someone else's profile (FEATURE 20, KOLABA has contacts, not follows): Message (pink, a business's blue) and the
+ *  contact button — Add to contacts / Requested (tap to cancel) / In contacts / Accept request. */
 function VisitorActions({ profile }: { profile: ProfilePage }) {
-  const { data: follow, setData } = useLoad<{ following: boolean }>((s) => get(`/v1/profiles/${profile.id}/follow`, s), [profile.id, activeProfile.value?.id]);
+  const { data: rel, setData: setRel } = useLoad<Rel>((s) => get(`/v1/contacts/relation/${profile.id}`, s), [profile.id, activeProfile.value?.id, refreshTick.value]);
   const same = profiles.value.some((x) => x.id === profile.id);
   const message = async () => {
     try { const { id } = await post('/v1/conversations', { profileId: profile.id }); push('conversation', { id }); }
     catch (e) { showToast(errorText(e), 'error'); }
   };
-  const toggle = async () => {
-    const next = !follow?.following;
-    setData({ following: next });
-    try { next ? await put(`/v1/profiles/${profile.id}/follow`) : await del(`/v1/profiles/${profile.id}/follow`); refresh(); }
-    catch (e) { setData({ following: !next }); showToast(errorText(e), 'error'); }
-  };
   return (
     <div class="pactions">
       <button class="pbtn is-accent" disabled={same} onClick={message}>Message</button>
-      <button class="pbtn" disabled={same || !follow} onClick={toggle} aria-pressed={!!follow?.following}>
-        <img src={icon(follow?.following ? 'IconUserMinus' : 'IconUserPlus')} alt="" />{follow?.following ? 'Unfollow' : 'Follow'}
-      </button>
+      {rel && !same ? <ContactButton card={profile} rel={rel} onRel={setRel} large /> : <button class="pbtn" disabled>…</button>}
     </div>
   );
 }
@@ -484,9 +479,6 @@ function ProfileMenu({ p, close, reload }: { p: ProfilePage; close: () => void; 
     <SheetFrame title={p.displayName} close={close}>
       {!rel ? <Spinner /> : (
         <>
-          {r === 'none' && <button class="menu-item" onClick={() => run(() => post('/v1/contacts/requests', { profileId: p.id }), 'Contact request sent')}><img src={icon('IconUserPlus')} alt="" />Add to contacts</button>}
-          {r === 'incoming' && <button class="menu-item" onClick={() => run(() => post(`/v1/contacts/requests/${rel.requestId}/accept`), 'Contact added')}><img src={icon('IconCheckCircle')} alt="" />Accept contact request</button>}
-          {r === 'requested' && <button class="menu-item" onClick={() => run(() => post(`/v1/contacts/requests/${rel.requestId}/cancel`), 'Request cancelled')}><img src={icon('IconXCircle')} alt="" />Cancel contact request</button>}
           {r === 'connected' && <button class="menu-item" onClick={() => { close(); push('review-form', { recipient: p }); }}><img src={icon('IconStarRating')} alt="" />Write a review</button>}
           {r === 'connected' && <button class="menu-item" onClick={() => { close(); confirmSheet('Remove contact?', `${p.displayName} will no longer be in your contacts.`, 'Remove', () => run(() => del(`/v1/contacts/${p.id}`), 'Contact removed'), true); }}><img src={icon('IconUserMinus')} alt="" />Remove from contacts</button>}
         </>

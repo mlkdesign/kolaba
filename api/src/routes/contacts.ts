@@ -93,6 +93,11 @@ contacts.post('/requests/:id/:action{accept|decline|cancel}', async (c) => {
   const status = action === 'accept' ? 'accepted' : action === 'decline' ? 'declined' : 'cancelled';
   await c.env.DB.prepare(`UPDATE contact_requests SET status = ?, responded_at = ? WHERE id = ?`).bind(status, now(), row!.id).run();
   if (status === 'accepted') await notify(c.env, row!.sender_profile_id, 'contact_accepted', profile.id, { requestId: row!.id });
+  // A withdrawn request disappears from the recipient's notifications (nothing left to answer).
+  if (status === 'cancelled') {
+    await c.env.DB.prepare(`DELETE FROM notifications WHERE recipient_profile_id = ? AND type = 'contact_request'
+        AND json_extract(payload, '$.requestId') = ?`).bind(row!.recipient_profile_id, row!.id).run();
+  }
   return c.json({ status });
 });
 
