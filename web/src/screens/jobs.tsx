@@ -2,9 +2,10 @@
 // (Figma 654:13119), job details (400 pt media, content 38 pt over it, the glass Apply bar), Apply, applicants, editor.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Application, del, errorText, get, Job, Page, patch, post, put } from '../api';
-import { activeProfile, back, isBusiness, openSheet, push, refresh, refreshTick, showToast } from '../state';
+import { activeProfile, back, isBusiness, openSheet, profiles, push, refresh, refreshTick, showToast } from '../state';
+import { offerRoleSwitch } from '../roles';
 import {
-  pickSheet, Avatar, BackButton, confirmSheet, Empty, Gallery, GlassButton, Header, HeaderTitle, Icon, icon, Logo, MediaTile, openViewer, PageTabs, postDate, price,
+  SortButton, pickSheet, Avatar, BackButton, confirmSheet, Empty, Gallery, GlassButton, Header, HeaderTitle, Icon, icon, Logo, MediaTile, openViewer, PageTabs, postDate, price,
   priceCaption, ProBadge, RatingInline, SheetFrame, Spinner, SwipePages, timeAgo, useDebounced, useLoad, usePullToRefresh, useCollapsingHeader,
 } from '../ui';
 
@@ -20,16 +21,17 @@ export function JobsScreen() {
   useEffect(() => { setIndex(0); }, [business]);
   const reloads = useRef<Record<string, () => Promise<unknown>>>({});
   const { scroller, Indicator } = usePullToRefresh(() => reloads.current[tabs[index][0]]?.());
-  const { root } = useCollapsingHeader({}, scroller);
+  const { root, changeTab } = useCollapsingHeader({}, scroller);
+  const pick = (i: number) => changeTab(index, i, () => setIndex(i));
   const create = () => {
     if (activeProfile.value?.entitlements.canCreateJobs) push('job-editor', {});
-    else showToast('Jobs are published from a business profile — add one in Settings.');
+    else offerRoleSwitch('createJob', () => push('job-editor', {}, 'jobs'));
   };
   return (
     <div class="collapsing" ref={root}>
       <div class="scroll" ref={scroller}>
-        <div class="tabs-pin" data-collapse-tabs><PageTabs tabs={tabs.map(([, l]) => l)} index={index} onChange={setIndex} /></div>
-        <SwipePages index={index} onChange={setIndex}>
+        <div class="tabs-pin" data-collapse-tabs><PageTabs tabs={tabs.map(([, l]) => l)} index={index} onChange={pick} /></div>
+        <SwipePages index={index} onChange={pick}>
           {tabs.map(([t]) => <JobList key={t} tab={t} q={q} register={(fn) => { reloads.current[t] = fn; }} />)}
         </SwipePages>
         <div style={{ height: 'var(--tabbar-clear)' }} />
@@ -154,7 +156,7 @@ const LANGS: Record<string, string> = { en: 'English', tr: 'Turkish', ru: 'Russi
   it: 'Italian', pl: 'Polish', th: 'Thai', ar: 'Arabic', pt: 'Portuguese', ja: 'Japanese', ko: 'Korean', zh: 'Chinese', vi: 'Vietnamese', kk: 'Kazakh' };
 const langName = (code: string) => LANGS[code.toLowerCase()] ?? code.toUpperCase();
 
-function jobMenu(job: Job) {
+function jobMenu(job: Job, actions: { onStatus?: (a: 'publish' | 'close') => void; onWithdraw?: () => void; onMessage?: () => void } = {}) {
   const mine = activeProfile.value?.id === job.ownerProfileId;
   openSheet((close) => (
     <SheetFrame title={job.title} close={close}>
@@ -164,6 +166,11 @@ function jobMenu(job: Job) {
         try { if (navigator.share) await navigator.share({ title: text, url: location.href }); else { await navigator.clipboard.writeText(text); showToast('Copied', 'ok'); } } catch { /* */ }
       }}><img src={icon('IconJobShare')} alt="" />Share</button>
       {mine && <button class="menu-item" onClick={() => { close(); push('job-editor', { job }); }}><img src={icon('IconJobEdit')} alt="" />Edit</button>}
+      {mine && actions.onStatus && (job.status === 'published'
+        ? <button class="menu-item" onClick={() => { close(); actions.onStatus!('close'); }}><img src={icon('IconLockKey')} alt="" />Close applications</button>
+        : <button class="menu-item" onClick={() => { close(); actions.onStatus!('publish'); }}><img src={icon('IconLockKeyOpen')} alt="" />{job.status === 'draft' ? 'Publish' : 'Re-open'}</button>)}
+      {!mine && actions.onMessage && <button class="menu-item" onClick={() => { close(); actions.onMessage!(); }}><img src={icon('IconChatText')} alt="" />Message {job.owner?.displayName}</button>}
+      {!mine && actions.onWithdraw && <button class="menu-item is-danger" onClick={() => { close(); actions.onWithdraw!(); }}><img src={icon('IconXCircle')} alt="" />Withdraw application</button>}
       {!mine && <button class="menu-item is-danger" onClick={async () => {
         close();
         try { await post('/v1/reports', { targetType: 'job', targetId: job.id, reason: 'inappropriate' }); showToast('Reported — thank you', 'ok'); } catch (e) { showToast(errorText(e), 'error'); }
@@ -172,14 +179,18 @@ function jobMenu(job: Job) {
   ));
 }
 
+/** ProjectDetailsView: the 400 pt gallery (sideways only — never a full-screen viewer for its photos), the author row
+ *  with the bookmark, title + price, Location · Languages, the description, Applicants for everyone (FIX 31), and
+ *  the Apply bar (ProjectApplyBar): a 48 pt pink capsule, 22 pt in, 26 pt above the bottom — not for the owner or an
+ *  applied creator (their actions are in •••); a business sees Switch account. */
 export function JobScreen({ id }: { id: string }) {
   const { data: job, error, setData, reload } = useLoad<Job>((s) => get(`/v1/jobs/${id}`, s), [id, refreshTick.value]);
   const [scrolled, setScrolled] = useState(0);
-  const [busy, setBusy] = useState(false);
   if (error) return <><Header left={<BackButton />} /><div class="section-top"><Empty title="Job not available" text={errorText(error)} /></div></>;
   if (!job) return <><Header left={<BackButton />} /><div class="jhero skeleton" style={{ borderRadius: 0 }} /><Spinner /></>;
   const me = activeProfile.value;
   const isOwner = me?.id === job.ownerProfileId;
+  const ownBusiness = !isOwner && profiles.value.some((p) => p.id === job.ownerProfileId);
   const amount = price(job);
   const apply = () => openSheet((close) => <ApplySheet job={job} close={close} onDone={() => { close(); reload(); refresh(); }} />, true);
   const withdraw = () => confirmSheet('Withdraw application?', 'The business will no longer see it. You can apply again later.', 'Withdraw', async () => {
@@ -191,9 +202,8 @@ export function JobScreen({ id }: { id: string }) {
     catch (e) { showToast(errorText(e), 'error'); }
   };
   const setStatus = async (action: 'publish' | 'close') => {
-    setBusy(true);
     try { setData(await post(`/v1/jobs/${job.id}/${action}`)); showToast(action === 'publish' ? 'Published' : 'Closed — no more applications', 'ok'); refresh(); }
-    catch (e) { showToast(errorText(e), 'error'); } finally { setBusy(false); }
+    catch (e) { showToast(errorText(e), 'error'); }
   };
   const save = async () => {
     const next = !job.isSaved;
@@ -201,14 +211,21 @@ export function JobScreen({ id }: { id: string }) {
     try { next ? await put(`/v1/jobs/${job.id}/save`) : await del(`/v1/jobs/${job.id}/save`); refresh(); }
     catch (e) { setData({ ...job, isSaved: !next }); showToast(errorText(e), 'error'); }
   };
+  const menu = () => jobMenu(job, { onStatus: isOwner ? setStatus : undefined, onWithdraw: job.myApplicationId ? withdraw : undefined, onMessage: !isOwner ? message : undefined });
+  const bar = isOwner || (job.myApplicationId && !isBusiness.value) ? null
+    : ownBusiness ? <button class="apply-btn is-white" onClick={() => offerRoleSwitch('manageJob')}>Switch account</button>
+    : isBusiness.value ? <button class="apply-btn is-white" onClick={() => offerRoleSwitch('apply')}>Switch account</button>
+    : <button class="apply-btn" disabled={!job.acceptsApplications} onClick={apply}>{job.acceptsApplications ? 'Apply now' : 'Applications closed'}
+        {job.acceptsApplications && <img src={icon('IconCaretRight')} alt="" />}</button>;
   return (
     <>
       <div class="scroll" onScroll={(e) => setScrolled(e.currentTarget.scrollTop)}>
         <div class="jhero">
-          {job.media.length ? <Gallery media={job.media} onOpen={(m) => openViewer(m)} /> : <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(160deg,#2a0f24,#0B0B0B)' }} />}
+          {job.media.length ? <Gallery media={job.media} onOpen={(m) => { if (m.kind === 'video') openViewer(m); }} />
+            : <div class="jhero__empty"><img src={icon('IconBriefcase')} alt="" /></div>}
           <div class="phero__shade" />
         </div>
-        <div class="jbody">
+        <div class="jbody" style={{ paddingBottom: bar ? 110 : 48 }}>
           <div class="row" style={{ gap: 10 }}>
             <button class="post__head" style={{ flex: 1 }} onClick={() => job.owner && push('profile-view', { id: job.owner.id })}>
               <Avatar card={job.owner} size={48} ring />
@@ -231,59 +248,34 @@ export function JobScreen({ id }: { id: string }) {
             <span>{job.flag && <span class="flag">{job.flag}</span>}{job.location}</span>
             {job.languages.length > 0 && <span><img src={icon('IconTranslate')} alt="" />{job.languages.map(langName).join(', ')}</span>}
           </div>
-          {job.deliverables.length > 0 && <div class="post__req">{job.deliverables.map((d) => <span><img src={icon('IconVideoCamera')} alt="" />{d.count} {d.kind}</span>)}</div>}
           <div class="post__desc selectable" style={{ whiteSpace: 'pre-line' }}>{job.description}</div>
-          {job.tags.length > 0 && <div class="tags">{job.tags.map((t) => <span class="tag">{t}</span>)}</div>}
-          <div class="post__req" style={{ gap: 12 }}>
-            {job.deadline && <span><img src={icon('IconFolderSimpleDashed')} alt="" />{new Date(job.deadline).toLocaleDateString('de-DE')}</span>}
-            <span><img src={icon('IconJobViews')} alt="" />{job.viewsCount}</span>
-          </div>
           <div class="rdivider" />
-          {isOwner ? <Applicants job={job} /> : (
-            <div class="rlist__head"><img src={icon('IconUser')} alt="" style={{ width: 16, height: 16, opacity: .5 }} /><span>Applicants</span><span class="ptabs__count">{job.applicationsCount}</span></div>
-          )}
+          <Applicants job={job} isOwner={isOwner} />
         </div>
       </div>
       <Header left={<BackButton />} blurOpacity={Math.min(Math.max((scrolled - 260) / 120, 0), 1)}
-        right={<GlassButton name="IconDotsThree" label="More" onClick={() => jobMenu(job)} />} />
-      <div class="apply-bar glass">
-        {amount && <div class="apply-bar__price"><span>{priceCaption(job.compensationType) || 'Budget'}</span><b>{amount}</b></div>}
-        <div class="row" style={{ gap: 8 }}>
-          {isOwner ? (
-            job.status === 'published'
-              ? <button class="btn is-milky" disabled={busy} onClick={() => setStatus('close')}>{busy ? 'Closing…' : 'Close applications'}</button>
-              : <button class="btn is-accent" disabled={busy} onClick={() => setStatus('publish')}>{busy ? 'Publishing…' : job.status === 'draft' ? 'Publish' : 'Re-open'}<img class="btn__arrow" src={icon('IconCaretRight')} alt="" style={{ transform: 'none' }} /></button>
-          ) : isBusiness.value ? (
-            <button class="btn" onClick={message}>Message</button>
-          ) : job.myApplicationId ? (
-            <><button class="btn is-milky" onClick={withdraw}>Withdraw</button><button class="btn" onClick={message}>Message</button></>
-          ) : (
-            <button class="btn is-accent" disabled={!job.acceptsApplications} onClick={apply}>{job.acceptsApplications ? 'Apply now' : 'Applications closed'}
-              {job.acceptsApplications && <img class="btn__arrow" src={icon('IconCaretRight')} alt="" style={{ transform: 'none' }} />}</button>
-          )}
-        </div>
-      </div>
+        right={<GlassButton name="IconDotsThree" label="More" onClick={menu} />} />
+      {bar && <div class="apply-bar">{bar}</div>}
     </>
   );
 }
 
-/** One's own job: the applicants under it (Figma 706:2366) — shortlist bookmark, message, profile. */
-function Applicants({ job }: { job: Job }) {
+/** The applicants (Figma 706:2366): everyone sees them; the owner also shortlists and messages. */
+function Applicants({ job, isOwner }: { job: Job; isOwner: boolean }) {
   const [sort, setSort] = useState<'newest' | 'oldest' | 'rating'>('newest');
   const { data, setData } = useLoad<{ items: Application[] }>((s) => get(`/v1/jobs/${job.id}/applications?sort=${sort}`, s), [job.id, sort, refreshTick.value]);
   return (
     <>
       <div class="rlist__head"><img src={icon('IconUser')} alt="" style={{ width: 16, height: 16, opacity: .5 }} /><span>Applicants</span>
-        <span class="ptabs__count">{data?.items.length ?? job.applicationsCount}</span><span class="grow" />
-        <button class="rsort" onClick={() => pickSheet('Sort applicants', [['newest', 'Newest'], ['oldest', 'Oldest'], ['rating', 'Top rated']], sort, setSort)}>
-          <img src={icon('IconSortAscending')} alt="" />Sort</button></div>
-      {!data ? <Spinner /> : !data.items.length ? <Empty title="No applicants yet" text="Applications appear here as creators apply." iconName="IconUser" /> :
-        data.items.map((a) => <ApplicantCard a={a} job={job} key={a.id} onShortlist={(v) => setData({ items: data.items.map((x) => (x.id === a.id ? { ...x, isShortlisted: v } : x)) })} />)}
+        <span class="ptabs__count">{data ? data.items.length : job.applicationsCount}</span><span class="grow" />
+        <SortButton onClick={() => pickSheet('Sort applicants', [['newest', 'Newest'], ['oldest', 'Oldest'], ['rating', 'Top rated']], sort, setSort)} /></div>
+      {!data ? <Spinner /> : !data.items.length ? <Empty title="No applications yet." text="Applications appear here as creators apply." /> :
+        data.items.map((a) => <ApplicantCard a={a} job={job} isOwner={isOwner} key={a.id} onShortlist={(v) => setData({ items: data.items.map((x) => (x.id === a.id ? { ...x, isShortlisted: v } : x)) })} />)}
     </>
   );
 }
 
-function ApplicantCard({ a, job, onShortlist }: { a: Application; job: Job; onShortlist: (v: boolean) => void }) {
+function ApplicantCard({ a, job, isOwner, onShortlist }: { a: Application; job: Job; isOwner: boolean; onShortlist: (v: boolean) => void }) {
   const [open, setOpen] = useState(false);
   const toggle = async () => {
     const next = !a.isShortlisted;
@@ -303,14 +295,14 @@ function ApplicantCard({ a, job, onShortlist }: { a: Application; job: Job; onSh
             <span class="muted" style={{ fontSize: 12 }}>{timeAgo(a.createdAt)} ago</span></div>
           <div class="post__date" style={{ fontSize: 14 }}>{a.applicant?.location ? `${a.applicant.flag ?? ''} ${a.applicant.location}` : `@${a.applicant?.username}`}</div>
         </div>
-        <button class="bookmark" style={{ marginTop: -10, marginRight: -10 }} aria-label={a.isShortlisted ? 'Remove from shortlist' : 'Shortlist'} aria-pressed={a.isShortlisted} onClick={toggle}>
-          <img src={icon(a.isShortlisted ? 'IconBookmarkFilled' : 'IconBookmarkSimple')} alt="" /></button>
+        {isOwner && <button class="bookmark" style={{ marginTop: -10, marginRight: -10 }} aria-label={a.isShortlisted ? 'Remove from shortlist' : 'Shortlist'} aria-pressed={a.isShortlisted} onClick={toggle}>
+          <img src={icon(a.isShortlisted ? 'IconBookmarkFilled' : 'IconBookmarkSimple')} alt="" /></button>}
       </div>
       <div class={`post__desc selectable ${open ? '' : 'lines-4'}`}>{a.message}</div>
       {a.message.length > 160 && <button class="show-more" style={{ alignSelf: 'flex-start', marginTop: -8 }} onClick={() => setOpen(!open)}>{open ? 'Show less' : 'Show more'}</button>}
       {a.media.length > 0 && <div class="applicant__media" data-hscroll>{a.media.map((m) => <MediaTile media={m} />)}</div>}
       <div class="row" style={{ gap: 8 }}>
-        <button class="btn is-small" style={{ flex: 1 }} onClick={message}><img class="btn__icon" src={icon('IconChatTeardropText')} alt="" />Message</button>
+        {isOwner && <button class="btn is-small" style={{ flex: 1 }} onClick={message}><img class="btn__icon" src={icon('IconChatTeardropText')} alt="" />Message</button>}
         <button class="btn is-small is-outline" style={{ flex: 1 }} onClick={() => a.applicant && push('profile-view', { id: a.applicant.id })}>View profile<img src={icon('IconCaretRight')} alt="" style={{ width: 14, height: 14 }} /></button>
       </div>
     </div>
@@ -452,8 +444,6 @@ export function JobEditor({ job }: { job?: Job }) {
                   {currency}<Icon name="IconCaretDown" size={14} /></button></div>
             </div>
           )}
-          <div class="row">{input('Reels', reels, (v) => setReels(v.replace(/\D/g, '')), { inputMode: 'numeric' })}{input('Photos', photos, (v) => setPhotos(v.replace(/\D/g, '')), { inputMode: 'numeric' })}</div>
-          {input('Tags (comma separated)', tags, setTags)}
           {job && <button class="btn is-danger" onClick={remove}><img class="btn__icon" src={icon('IconTrash')} alt="" />Delete job</button>}
         </div>
       </div>

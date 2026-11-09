@@ -6,13 +6,11 @@ import { App } from './app';
 // One fixed logical screen (402 × 874). With the frame, the phone is 70 % of the window's height (and never wider
 // than the window); on a phone the screen alone fills the display. The scale goes to --ui-scale (shell.css, scale.ts).
 const PHONE = { w: 452, h: 920 };
-const SCREEN = { w: 402, h: 874 };
 function fit() {
   const root = document.documentElement;
   const mobile = root.classList.contains('is-mobile');
-  const scale = mobile
-    ? Math.min(innerWidth / SCREEN.w, innerHeight / SCREEN.h)
-    : Math.min((innerHeight * 0.7) / PHONE.h, (innerWidth - 32) / PHONE.w);
+  // On a phone the app is laid out at the display's own width — nothing is scaled.
+  const scale = mobile ? 1 : Math.min((innerHeight * 0.7) / PHONE.h, (innerWidth - 32) / PHONE.w);
   root.style.setProperty('--ui-scale', String(Math.max(0.2, scale)));
 }
 fit();

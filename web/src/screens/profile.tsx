@@ -2,12 +2,14 @@
 // animated glow, name + PRO, figures, actions, social circles, Portfolio / Reviews; edit, settings, collections, the
 // review request sheet, the review form and the invite landing.
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { Card, del, errorText, get, Job, Media, patch, post, posterFrom, ProfilePage, put, Review, uploadFile } from '../api';
-import { activeProfile, back, isBusiness, openSheet, profiles, push, refresh, refreshTick, reloadSession, setActiveProfile, showToast, signOut, user } from '../state';
+import { api, Card, del, errorText, get, Job, Media, patch, post, posterFrom, ProfilePage, put, Review, uploadFile } from '../api';
+import { activeProfile, back, isBusiness, openSheet, profiles, push, refresh, refreshTick, reloadSession, setActiveProfile, showToast, signOut, signOutLocally, user } from '../state';
 import { ProfileGlow } from '../fx';
+import { openPaywall } from '../paywall';
+import { offerRoleSwitch } from '../roles';
 import {
-  Avatar, BackButton, confirmSheet, Empty, fmtCount, GlassButton, gradientFor, Header, HeaderTitle, Icon, icon, initials, MediaTile,
-  openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, Stars, SwipePages, timeAgo, useLoad, usePullToRefresh, alertDialog, pickSheet, useCollapsingHeader,
+  BASE, Avatar, BackButton, confirmSheet, Empty, fmtCount, GlassButton, gradientFor, Header, HeaderTitle, Icon, icon, initials, MediaTile,
+  openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, Stars, SwipePages, timeAgo, useLoad, usePullToRefresh, alertDialog, pickSheet, useCollapsingHeader, Subtab, SortButton, AddButton, ActionPill,
 } from '../ui';
 import { JobCard } from './jobs';
 import { CreateProfile, Legal } from './auth';
@@ -25,7 +27,8 @@ export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'rev
   const viewed = useRef(false);
   const { scroller, Indicator } = usePullToRefresh(() => reload(), [!!p]);
   // FIX 109: the profile's tabs follow the scroll freely (no snapping) and pin at 62 pt, moving in over 60 pt.
-  const { root } = useCollapsingHeader({ distance: 100000, insetTravel: 60, snap: false }, scroller, [!!p]);
+  const { root, changeTab } = useCollapsingHeader({ distance: 100000, insetTravel: 60, snap: false }, scroller, [!!p]);
+  const pick = (i: number) => changeTab(tabIndex, i, () => setTabIndex(i));
   useEffect(() => {
     if (p && !own && !viewed.current) { viewed.current = true; post(`/v1/profiles/${p.id}/view`).catch(() => {}); }
   }, [p?.id]);
@@ -62,9 +65,9 @@ export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'rev
           </>
         )}
         <div class="ptab-bar" data-collapse-tabs style={{ marginTop: 22 }}>
-          <PageTabs tabs={tabs} index={tabIndex} onChange={setTabIndex} profile counts={[undefined, p.ratings?.count || undefined]} />
+          <PageTabs tabs={tabs} index={tabIndex} onChange={pick} profile counts={[undefined, p.ratings?.count || undefined]} />
         </div>
-        <SwipePages index={tabIndex} onChange={setTabIndex}>
+        <SwipePages index={tabIndex} onChange={pick}>
           {business ? <BusinessJobs profile={p} own={own} /> : <Portfolio profile={p} own={own} onChange={reload} />}
           <Reviews profile={p} own={own} />
           {business ? <BusinessAbout p={p} own={own} /> : null}
@@ -130,14 +133,14 @@ function BusinessJobs({ profile, own }: { profile: ProfilePage; own: boolean }) 
   return (
     <>
       <div class="mfilter">
-        <button class={`bchip ${filter === 'active' ? 'is-on' : ''}`} onClick={() => setFilter('active')}>Active<span class="bchip__count">{active.length}</span></button>
-        <button class={`bchip ${filter === 'past' ? 'is-on' : ''}`} onClick={() => setFilter('past')}>Archive<span class="bchip__count">{past.length}</span></button>
+        <Subtab label="Active" count={active.length} on={filter === 'active'} onClick={() => setFilter('active')} />
+        <Subtab label="Archive" count={past.length} on={filter === 'past'} onClick={() => setFilter('past')} />
         <span class="grow" />
-        <button class="mchip is-plain" onClick={() => setNewest(!newest)}><img src={icon('IconSortAscending')} alt="" style={{ transform: newest ? undefined : 'scaleY(-1)' }} />Sort</button>
+        <SortButton flipped={!newest} onClick={() => setNewest(!newest)} />
       </div>
       {!list.length ? (
         filter === 'active'
-          ? <Empty title="No active jobs right now.">{own && <button class="btn is-small" onClick={() => push('job-editor', {}, 'jobs')}><img class="btn__icon" src={icon('IconPlus')} alt="" />Add job</button>}</Empty>
+          ? (own ? <Empty title="You haven't posted any jobs yet."><ActionPill label="Create new job" onClick={() => push('job-editor', {}, 'jobs')} /></Empty> : <Empty title="No active jobs right now." />)
           : <Empty title="No closed jobs yet." />
       ) : <div class="feed" style={{ paddingTop: 0 }}>{list.map((j, i) => <div key={j.id}>{i > 0 && <div style={{ height: 1, background: 'var(--separator)', margin: '20px 0' }} />}<JobCard job={j} /></div>)}</div>}
     </>
@@ -178,6 +181,8 @@ function Hero({ p, own }: { p: ProfilePage; own: boolean }) {
       <div class="phero__shade" />
       {intro ? (
         <button class="glass intro-pill is-tinted" onClick={() => openViewer(intro)}><span class="play"><img src={icon('IconPlay')} alt="" /></span>Intro Video</button>
+      ) : own && p.type === 'creator' && p.entitlements?.introVideo === 'locked' ? (
+        <button class="glass intro-pill" onClick={() => openPaywall('introVideo')}><span class="play"><img src={icon('IconPlay')} alt="" /></span>Add Intro Video</button>
       ) : canIntro ? (
         <>
           <button class="glass intro-pill" onClick={() => introInput.current?.click()}><span class="play"><img src={icon('IconPlay')} alt="" /></span>Add Intro Video</button>
@@ -340,6 +345,8 @@ function Portfolio({ profile, own, onChange }: { profile: ProfilePage; own: bool
     } catch (e) { showToast(errorText(e), 'error'); } finally { setProgress(null); }
   };
   const items = [...(data?.items ?? [])].sort((a, b) => (newest ? b.createdAt - a.createdAt : a.createdAt - b.createdAt));
+  const cols = useLoad<{ items: unknown[] }>((s) => get(`/v1/profiles/${profile.id}/collections`, s), [profile.id, refreshTick.value]);
+  const colCount = cols.data?.items.length;
   const [removing, setRemoving] = useState<string | null>(null);
   const [gone, setGone] = useState<string[]>([]);
   const remove = (m: Media) => alertDialog(m.kind === 'video' ? 'Delete this video?' : 'Delete this photo?',
@@ -355,18 +362,19 @@ function Portfolio({ profile, own, onChange }: { profile: ProfilePage; own: bool
   return (
     <>
       <div class="mfilter">
-        <button class={`mchip ${mode === 'all' ? 'is-on' : ''}`} onClick={() => setMode('all')}>All</button>
-        <button class={`mchip ${mode === 'collections' ? 'is-on' : ''}`} onClick={() => setMode('collections')}>Collections</button>
+        <Subtab label="All" count={data?.items.length ?? 0} on={mode === 'all'} onClick={() => setMode('all')} />
+        <Subtab label="Collections" count={colCount ?? undefined} on={mode === 'collections'} locked={own && profile.entitlements?.collections === 'locked'}
+          onClick={() => (own && profile.entitlements?.collections === 'locked' ? openPaywall('collections') : setMode('collections'))} />
         <span class="grow" />
-        {mode === 'all' && <button class="mchip is-plain" onClick={() => setNewest(!newest)} aria-label={newest ? 'Newest first' : 'Oldest first'}>
-          <img src={icon('IconSortAscending')} alt="" style={{ transform: newest ? undefined : 'scaleY(-1)' }} />Sort</button>}
-        {own && mode === 'all' && <button class="glass glass-btn" style={{ width: 40, height: 40 }} aria-label="Upload" disabled={progress !== null}
-          onClick={() => input.current?.click()}>{progress !== null ? `${Math.round(progress * 100)}%` : <img src={icon('IconPlus')} alt="" style={{ width: 20, height: 20 }} />}</button>}
+        <SortButton flipped={!newest} onClick={() => setNewest(!newest)} />
+        {own && items.length > 0 && <AddButton label="Add content" busy={progress !== null ? `${Math.round(progress * 100)}%` : null} onClick={() => input.current?.click()} />}
         <input ref={input} type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime" hidden
           onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void upload(f); e.currentTarget.value = ''; }} />
       </div>
       {mode === 'collections' ? <Collections profile={profile} own={own} /> : !data ? <Spinner /> : !items.length ? (
-        <Empty title={own ? 'Your portfolio is empty' : 'No portfolio yet'} text={own ? 'Upload photos and videos of your best work with +.' : undefined} iconName="IconImages" />
+        own ? <Empty title="Your portfolio is empty" text="Add photos and videos to showcase your work and let others discover your creativity.">
+          <ActionPill label={progress !== null ? `Uploading ${Math.round(progress * 100)}%` : 'Add content'} onClick={() => input.current?.click()} /></Empty>
+          : <Empty title="No portfolio yet." />
       ) : (
         <div class="mgrid">{items.filter((m) => !gone.includes(m.id)).map((m) => <MediaTile media={m} key={m.id} menu={menuFor(m)} removing={removing === m.id} />)}</div>
       )}
@@ -492,13 +500,17 @@ function Reviews({ profile, own }: { profile: ProfilePage; own: boolean }) {
           ))}
           {own && <button class="rrequest" onClick={() => openRequestReview()}>Request a review</button>}
         </div>
-      ) : own ? <div class="rsummary"><button class="rrequest" onClick={() => openRequestReview()}>Request a review</button></div> : null}
+      ) : null}
       {data.items.length > 0 && <div class="rdivider" />}
       {data.items.length > 0 && (
         <div class="rlist__head"><span>Reviews</span><span class="ptabs__count">{data.items.length}</span><span class="grow" />
-          <button class="rsort" onClick={sortSheet}><img src={icon('IconSortAscending')} alt="" />Sort</button></div>
+          <SortButton onClick={sortSheet} /></div>
       )}
-      {!data.items.length ? <Empty title="No reviews yet" text={own ? 'Ask your contacts for a review.' : 'Reviews come from confirmed contacts.'} iconName="IconStarRating" /> :
+      {!data.items.length ? (
+        <Empty title="No reviews yet" text={own ? 'Ask your contacts for a review — it will appear here.' : "Reviews from this profile's contacts will appear here."}>
+          {own && <button class="action-pill is-outline" onClick={() => openRequestReview()}>Request a review</button>}
+        </Empty>
+      ) :
         data.items.map((r) => <ReviewCard r={r} key={r.id} />)}
     </div>
   );
@@ -704,28 +716,39 @@ const ToggleRow = ({ title, detail, on, onChange }: { title: string; detail?: st
   </button>
 );
 
+/** SettingsView (Figma 654:18389): the account card; Notifications · Privacy & Safety · Language; Switch to Business /
+ *  Creator Account; creator.pro / business.pro (Testing) for allowed testers; Help & Support · About; Log out. ⋯: Delete
+ *  account. Every row opens its page or does its action. */
 export function SettingsScreen() {
-  const [page, setPage] = useState<'main' | 'privacy' | 'language' | 'about'>('main');
-  const [adding, setAdding] = useState<null | 'creator' | 'business'>(null);
-  const { data: me, reload } = useLoad<ProfilePage>((s) => get(`/v1/profiles/${activeProfile.value!.id}`, s), [activeProfile.value?.id]);
-  if (adding) return <CreateProfile allowed={[adding]} onCancel={() => setAdding(null)} onDone={() => setAdding(null)} />;
-  if (page === 'about') return <Legal onBack={() => setPage('main')} />;
-  const hasCreator = profiles.value.some((p) => p.type === 'creator');
-  const businessCount = profiles.value.filter((p) => p.type === 'business').length;
+  const [page, setPage] = useState<'main' | 'notifications' | 'privacy' | 'language' | 'about'>('main');
+  const { data: me, reload } = useLoad<ProfilePage>((s) => get(`/v1/profiles/${activeProfile.value!.id}`, s), [activeProfile.value?.id, refreshTick.value]);
+  const p = activeProfile.value!;
   const setting = async (key: string, value: unknown) => {
-    try { await patch(`/v1/profiles/${activeProfile.value!.id}`, { settings: { [key]: value } }); reload(); } catch (e) { showToast(errorText(e), 'error'); }
+    try { await patch(`/v1/profiles/${p.id}`, { settings: { [key]: value } }); reload(); } catch (e) { showToast(errorText(e), 'error'); }
   };
   const goBack = page === 'main' ? undefined : () => setPage('main');
+  const deleteAccount = () => alertDialog('Delete account?',
+    'Your account and all its data will be permanently deleted: profiles, media, jobs, applications, contacts and reviews. This action cannot be undone.',
+    'Delete account', async () => {
+      try { await api('DELETE', '/v1/me', { confirm: 'DELETE' }); signOutLocally(); showToast('Your account was deleted', 'ok'); }
+      catch (e) { showToast(errorText(e), 'error'); }
+    });
   const more = () => openSheet((close) => (
     <SheetFrame title="Settings" close={close}>
-      <button class="menu-item" onClick={() => { close(); window.location.href = 'mailto:mlkdesignweb@gmail.com?subject=KOLABA%20web%20problem'; }}><img src={icon('IconQuestion')} alt="" />Report a problem</button>
-      {profiles.value.length > 1 && <button class="menu-item is-danger" onClick={() => { close(); confirmSheet('Deactivate this profile?', 'It disappears for others; its open jobs close.', 'Deactivate', async () => {
-        try { await del(`/v1/profiles/${activeProfile.value!.id}`); await reloadSession(); setActiveProfile(profiles.value[0]?.id ?? null); } catch (e) { showToast(errorText(e), 'error'); }
-      }, true); }}><img src={icon('IconTrash')} alt="" />Deactivate this profile</button>}
+      <button class="menu-item is-danger" onClick={() => { close(); deleteAccount(); }}><img src={icon('IconTrash')} alt="" />Delete account</button>
     </SheetFrame>
   ));
-  const title = { main: 'Settings', privacy: 'Privacy & Safety', language: 'Language' }[page];
-  const p = activeProfile.value!;
+  const other = profiles.value.find((x) => x.type !== p.type);
+  const switchType = () => {
+    if (other) { setActiveProfile(other.id); return; }
+    push('create-profile', { type: p.type === 'creator' ? 'business' : 'creator' });
+  };
+  const togglePro = async (on: boolean) => {
+    try { await put('/v1/me/pro-test', { pro: on }); await reloadSession(); refresh(); showToast(on ? `${p.type}.pro on (testing)` : `${p.type}.pro off`, 'ok'); }
+    catch (e) { showToast(errorText(e), 'error'); }
+  };
+  const title = { main: 'Settings', notifications: 'Notifications', privacy: 'Privacy & Safety', language: 'Language', about: 'About' }[page];
+  const canTestPro = !!(user.value as any)?.canTestPro;
   return (
     <>
       <div class="scroll">
@@ -741,22 +764,18 @@ export function SettingsScreen() {
                 <button class="scard__edit" onClick={() => push('profile-edit', {}, 'profile')}>Edit profile</button>
               </div>
               <div class="sgroup">
-                <Row iconName="IconBellSmall" title="Notifications" onClick={() => push('notifications', {}, 'profile')} />
+                <Row iconName="IconBellSmall" title="Notifications" onClick={() => setPage('notifications')} />
                 <Row iconName="IconShieldWarning" title="Privacy & Safety" onClick={() => setPage('privacy')} />
                 <Row iconName="IconTranslateFilled" title="Language" value="English" onClick={() => setPage('language')} />
-                <Row iconName="IconUser" title="My Contacts" onClick={() => push('contacts', {}, 'profile')} />
               </div>
               <div class="sgroup">
-                {profiles.value.map((x) => (
-                  <button class="srow" onClick={() => x.id !== p.id && setActiveProfile(x.id)}>
-                    <Avatar card={x} size={28} />
-                    <span class="grow ellipsis">{x.displayName} <span class="srow__value">· {x.type === 'business' ? 'Business' : 'Creator'}</span></span>
-                    {x.id === p.id ? <img class="srow__caret" style={{ opacity: 1 }} src={icon('IconCheckActive')} alt="Current" /> : <img class="srow__caret" src={icon('IconCaretRight')} alt="" />}
-                  </button>
-                ))}
-                {!hasCreator && <Row iconName="IconAddAccount" title="Add creator account" onClick={() => setAdding('creator')} />}
-                {businessCount < 5 && <Row iconName="IconAddAccount" title="Add business account" value={`${businessCount}/5`} onClick={() => setAdding('business')} />}
+                <Row iconName={p.type === 'creator' ? 'IconTreasureChest' : 'IconUser'} title={p.type === 'creator' ? 'Switch to Business Account' : 'Switch to Creator Account'} onClick={switchType} />
               </div>
+              {canTestPro && (
+                <div class="sgroup">
+                  <ToggleRow title={`${p.type}.pro (Testing)`} detail="Test state for this account on the server. No purchase, no subscription." on={p.isPro} onChange={togglePro} />
+                </div>
+              )}
               <div class="sgroup">
                 <Row iconName="IconQuestion" title="Help & Support" onClick={() => { window.location.href = 'mailto:mlkdesignweb@gmail.com?subject=KOLABA%20help'; }} />
                 <Row iconName="IconInfo" title="About" onClick={() => setPage('about')} />
@@ -764,22 +783,41 @@ export function SettingsScreen() {
               <div class="sgroup is-danger">
                 <Row iconName="IconSignOut" title="Log out" danger onClick={() => confirmSheet('Log out?', 'Sign in again to see your profile, jobs and messages.', 'Log out', () => void signOut(), true)} />
               </div>
-              <div class="center muted" style={{ fontSize: 12, marginTop: 8 }}>{user.value?.email}</div>
             </>
           )}
+          {page === 'notifications' && <NotificationSettings />}
           {page === 'privacy' && (me?.settings ? (
-            <div class="sgroup">
-              <ToggleRow title="Show location" detail="Your city on your profile and cards" on={me.settings.showLocation} onChange={(v) => setting('showLocation', v)} />
-              <ToggleRow title="Show social links" on={me.settings.showLinks} onChange={(v) => setting('showLinks', v)} />
-              <Row title="Who can message me" value={{ everyone: 'Everyone', contacts: 'Contacts', nobody: 'Nobody' }[me.settings.whoCanMessage]}
-                onClick={() => pickSheet('Who can message me', [['everyone', 'Everyone'], ['contacts', 'Contacts'], ['nobody', 'Nobody']], me.settings!.whoCanMessage as any, (v) => setting('whoCanMessage', v))} />
-              {me.type === 'business' && <ToggleRow title="Hide my job posts" on={me.settings.hideJobPosts} onChange={(v) => setting('hideJobPosts', v)} />}
-            </div>
+            <>
+              <div class="sgroup">
+                <Row title="Profile visibility" value={me.visibility === 'private' ? 'Private' : 'Public'}
+                  onClick={() => pickSheet('Profile visibility', [['public', 'Public'], ['private', 'Private']], (me.visibility === 'private' ? 'private' : 'public') as any,
+                    async (v) => { try { await patch(`/v1/profiles/${p.id}`, { visibility: v }); reload(); } catch (e) { showToast(errorText(e), 'error'); } })} />
+                <ToggleRow title="Show location" on={me.settings.showLocation} onChange={(v) => setting('showLocation', v)} />
+                <Row title="Who can message me" value={{ everyone: 'Everyone', contacts: 'Contacts', nobody: 'Nobody' }[me.settings.whoCanMessage]}
+                  onClick={() => pickSheet('Who can message me', [['everyone', 'Everyone'], ['contacts', 'Contacts'], ['nobody', 'Nobody']], me.settings!.whoCanMessage as any, (v) => setting('whoCanMessage', v))} />
+                <ToggleRow title="Show social links" on={me.settings.showLinks} onChange={(v) => setting('showLinks', v)} />
+                {me.type === 'business' && <ToggleRow title="Hide my job posts" on={me.settings.hideJobPosts} onChange={(v) => setting('hideJobPosts', v)} />}
+              </div>
+              <div class="sgroup">
+                <Row title="Report a problem" onClick={() => { window.location.href = 'mailto:mlkdesignweb@gmail.com?subject=KOLABA%20problem'; }} />
+              </div>
+              <div class="muted" style={{ fontSize: 13, margin: '4px 16px' }}>These settings are saved to your profile on the server.</div>
+            </>
           ) : <Spinner />)}
           {page === 'language' && (
             <>
               <div class="sgroup"><button class="srow"><span class="grow">English</span><img class="srow__caret" style={{ opacity: 1 }} src={icon('IconCheckActive')} alt="Selected" /></button></div>
               <div class="muted" style={{ fontSize: 13, margin: '10px 16px' }}>The web version is in English for now.</div>
+            </>
+          )}
+          {page === 'about' && (
+            <>
+              <div class="about-head"><div class="logo" style={{ fontSize: 32, lineHeight: '45px' }}>kolaba<i>.</i></div><div class="muted">Web test version</div></div>
+              <div class="sgroup">
+                <Row title="Terms of Service" onClick={() => { window.open(`${BASE}terms.html`, '_blank'); }} />
+                <Row title="Privacy Policy" onClick={() => { window.open(`${BASE}privacy.html`, '_blank'); }} />
+                <button class="srow" disabled><span class="grow">Community Guidelines</span><span class="srow__value">Not available yet</span></button>
+              </div>
             </>
           )}
         </div>
@@ -788,6 +826,33 @@ export function SettingsScreen() {
       <Header left={<BackButton onClick={goBack} />} center={<HeaderTitle title={title} />}
         right={page === 'main' ? <GlassButton name="IconDotsThree" label="More" onClick={more} /> : null} />
     </>
+  );
+}
+
+/** SettingsNotificationsPage: Push and its four kinds (off with Push), E-mail — saved as switched, on the server. */
+function NotificationSettings() {
+  const { data, setData } = useLoad<{ notifications: Record<string, boolean> }>((s) => get('/v1/me/settings', s), []);
+  if (!data) return <Spinner />;
+  const n = data.notifications;
+  const set = async (key: string, v: boolean) => {
+    const next = { ...n, [key]: v };
+    setData({ notifications: next });
+    try { await put('/v1/me/settings', { notifications: next }); } catch (e) { setData({ notifications: n }); showToast(errorText(e), 'error'); }
+  };
+  const row = (key: string, title: string, sub = false) => (
+    <div style={sub && !n.push ? { opacity: .5, pointerEvents: 'none' } : undefined}><ToggleRow title={title} on={n[key]} onChange={(v) => set(key, v)} /></div>
+  );
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div class="sgroup">
+        {row('push', 'Push notifications')}
+        {row('newMessages', 'New messages', true)}
+        {row('projectUpdates', 'Job updates', true)}
+        {row('newApplications', 'New applications', true)}
+        {row('followersAndMentions', 'Followers & mentions', true)}
+      </div>
+      <div class="sgroup">{row('email', 'E-mail notifications')}</div>
+    </div>
   );
 }
 

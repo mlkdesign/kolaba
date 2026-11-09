@@ -41,8 +41,10 @@ async function issueCode(env: Env, userId: string, email: string, purpose: 'veri
     .bind(now(), userId, purpose).run();
   await env.DB.prepare(`INSERT INTO email_codes (id, user_id, purpose, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
     .bind(newId('code'), userId, purpose, await sha256Hex(`${userId}:${code}`), now() + CODE_TTL, now()).run();
-  const subject = purpose === 'verify' ? 'Your kolaba. verification code' : 'Reset your kolaba. password';
-  await sendEmail(env, email, subject,
+  const inbox = env.TEST_CODE_INBOX?.trim().toLowerCase();
+  const subject = (purpose === 'verify' ? 'Your kolaba. verification code' : 'Reset your kolaba. password')
+    + (inbox && inbox !== email ? ` — for ${email} (closed test)` : '');
+  await sendEmail(env, inbox || email, subject,
     `${purpose === 'verify' ? 'Verification' : 'Password reset'} code: ${code}\n\nIt expires in 15 minutes. ` +
     `If you didn't ask for it, ignore this e-mail.\n\nkolaba. — test environment`);
 }
@@ -61,11 +63,14 @@ async function checkCode(env: Env, userId: string, purpose: 'verify' | 'reset', 
 }
 
 async function sessionPayload(env: Env, userId: string, token: string) {
-  const user = await env.DB.prepare(`SELECT id, email, role, is_demo, email_verified_at FROM users WHERE id = ?`).bind(userId)
-    .first<{ id: string; email: string; role: string; is_demo: number; email_verified_at: number | null }>();
+  const user = await env.DB.prepare(`SELECT id, email, role, is_demo, email_verified_at, email_verification FROM users WHERE id = ?`).bind(userId)
+    .first<{ id: string; email: string; role: string; is_demo: number; email_verified_at: number | null; email_verification: string | null }>();
+  const proTesters = (env.PRO_TEST_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
   return {
     token,
-    user: { id: user!.id, email: user!.email, role: user!.role, isDemo: user!.is_demo === 1, verified: Boolean(user!.email_verified_at) },
+    user: { id: user!.id, email: user!.email, role: user!.role, isDemo: user!.is_demo === 1, verified: Boolean(user!.email_verified_at),
+            emailProof: user!.email_verification ?? (user!.email_verified_at ? 'owner' : null),
+            canTestPro: user!.role === 'admin' || proTesters.includes(user!.email.toLowerCase()) },
     profiles: await profilesOf(env, userId),
   };
 }
@@ -76,8 +81,9 @@ auth.post('/signup', async (c) => {
   const problem = passwordProblem(password);
   if (problem) fail(422, problem);
   if (!c.env.RESEND_API_KEY) fail(503, 'registration_closed', 'Registration opens once e-mail delivery is configured.');
+  // Closed test: any address may sign up — its code goes to the test inbox, so only the team can complete it.
   const allowed = (c.env.SIGNUP_ALLOWED_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
-  if (allowed.length && !allowed.includes(email)) fail(403, 'registration_invite_only');
+  if (!c.env.TEST_CODE_INBOX && allowed.length && !allowed.includes(email)) fail(403, 'registration_invite_only');
   // Public demo protection: a daily cap on new real accounts.
   const dayStart = Math.floor(now() / 86_400_000) * 86_400_000;
   const today = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE is_demo = 0 AND created_at >= ?`).bind(dayStart)
@@ -108,8 +114,11 @@ auth.post('/verify', async (c) => {
   const user = await c.env.DB.prepare(`SELECT id FROM users WHERE email = ? AND status = 'active'`).bind(email).first<{ id: string }>();
   if (!user) fail(400, 'code_invalid');
   await checkCode(c.env, user!.id, 'verify', code);
-  await c.env.DB.prepare(`UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?), updated_at = ? WHERE id = ?`)
-    .bind(now(), now(), user!.id).run();
+  // The code went to the address's owner — or, in the closed test, to the shared inbox (the address is not proven).
+  const viaInbox = Boolean(c.env.TEST_CODE_INBOX) && c.env.TEST_CODE_INBOX!.trim().toLowerCase() !== email;
+  await c.env.DB.prepare(`UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?), updated_at = ?,
+      email_verification = COALESCE(email_verification, ?) WHERE id = ?`)
+    .bind(now(), now(), viaInbox ? 'test_inbox' : 'owner', user!.id).run();
   const token = await createSession(c.env.DB, user!.id, c.req.header('User-Agent'));
   return c.json(await sessionPayload(c.env, user!.id, token));
 });

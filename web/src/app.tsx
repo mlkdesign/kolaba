@@ -36,6 +36,7 @@ function renderRoute(route: Route) {
     case 'collection': return <CollectionScreen id={p.id} own={p.own} />;
     case 'review-form': return <ReviewForm recipient={p.recipient} requestId={p.requestId} inviteId={p.inviteId} />;
     case 'invite': return <InviteScreen token={p.token} />;
+    case 'create-profile': return <CreateProfile allowed={[p.type]} onCancel={() => back()} onDone={() => { back(false); p.then?.(); }} />;
     default: return null;
   }
 }

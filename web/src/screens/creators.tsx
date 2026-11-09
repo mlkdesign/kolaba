@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { Card, del, errorText, get, Media, Page, post } from '../api';
 import { activeProfile, badges, openSheet, push, refresh, refreshTick, showToast } from '../state';
 import {
-  pickSheet, openContextMenu, useLongPress, Avatar, Empty, fmtDuration, GlassButton, Header, Icon, icon, Logo, openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, SwipePages,
+  Subtab, SortButton, pickSheet, openContextMenu, useLongPress, Avatar, Empty, fmtDuration, GlassButton, Header, Icon, icon, Logo, openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, SwipePages,
   useDebounced, useLoad, usePullToRefresh, useCollapsingHeader,
 } from '../ui';
 
@@ -19,7 +19,8 @@ export function CreatorsScreen() {
   const q = useDebounced(query.trim(), 350);
   const reloadRef = useRef<() => Promise<unknown>>();
   const { scroller, Indicator } = usePullToRefresh(() => reloadRef.current?.());
-  const { root } = useCollapsingHeader({}, scroller);
+  const { root, changeTab } = useCollapsingHeader({}, scroller);
+  const pick = (i: number) => changeTab(index, i, () => setIndex(i));
   const filter = () => openSheet((close) => (
     <SheetFrame title="Show" close={close}>
       {(['creator', 'business'] as Kind[]).map((k) => (
@@ -33,8 +34,8 @@ export function CreatorsScreen() {
   return (
     <div class="collapsing" ref={root}>
       <div class="scroll" ref={scroller}>
-        <div class="tabs-pin" data-collapse-tabs><PageTabs tabs={[kind === 'creator' ? 'Creators' : 'Businesses', `My Contacts${badges.value.contactRequests ? ` · ${badges.value.contactRequests}` : ''}`]} index={index} onChange={setIndex} /></div>
-        <SwipePages index={index} onChange={setIndex}>
+        <div class="tabs-pin" data-collapse-tabs><PageTabs tabs={[kind === 'creator' ? 'Creators' : 'Businesses', `My Contacts${badges.value.contactRequests ? ` · ${badges.value.contactRequests}` : ''}`]} index={index} onChange={pick} /></div>
+        <SwipePages index={index} onChange={pick}>
           <Catalog kind={kind} q={q} register={(fn) => { if (index === 0) reloadRef.current = fn; }} />
           <ContactsList query={q} register={(fn) => { if (index === 1) reloadRef.current = fn; }} />
         </SwipePages>
@@ -186,8 +187,12 @@ type ContactsFilter = 'all' | 'requests' | 'sent';
 
 function ContactsList({ query, initial = 'all', register }: { query: string; initial?: ContactsFilter; register?: (fn: () => Promise<unknown>) => void }) {
   const [filter, setFilter] = useState<ContactsFilter>(initial);
-  const { data, loading, reload } = useLoad<{ items: (Relation & { since: number })[]; counts: Record<string, number> }>(
-    (s) => get(`/v1/contacts?filter=${filter}`, s), [filter, refreshTick.value, activeProfile.value?.id]);
+  // The data says which tab it was loaded for: rows of the previous tab never render with this tab's buttons.
+  const { data, reload } = useLoad<{ filter: ContactsFilter; items: (Relation & { since: number })[]; counts: Record<string, number> }>(
+    async (s) => ({ ...(await get(`/v1/contacts?filter=${filter}`, s)), filter }), [filter, refreshTick.value, activeProfile.value?.id]);
+  const [counts, setCounts] = useState<Record<string, number> | null>(null);
+  useEffect(() => { if (data?.counts) setCounts(data.counts); }, [data]);
+  const ready = data?.filter === filter;
   register?.(() => reload());
   const act = async (requestId: string, action: 'accept' | 'decline' | 'cancel') => {
     try { await post(`/v1/contacts/requests/${requestId}/${action}`); showToast(action === 'accept' ? 'Contact added' : 'Done', 'ok'); reload(); refresh(); }
@@ -197,24 +202,22 @@ function ContactsList({ query, initial = 'all', register }: { query: string; ini
     try { const { id } = await post('/v1/conversations', { profileId: card.id }); push('conversation', { id }); } catch (e) { showToast(errorText(e), 'error'); }
   };
   const [sort, setSort] = useState<'recent' | 'name'>('recent');
-  const list = (data?.items ?? []).filter((i) => !query || `${i.profile.displayName} ${i.profile.username}`.toLowerCase().includes(query.toLowerCase()))
+  const list = (ready ? data!.items : []).filter((i) => !query || `${i.profile.displayName} ${i.profile.username}`.toLowerCase().includes(query.toLowerCase()))
     .sort((a, b) => (sort === 'name' ? a.profile.displayName.localeCompare(b.profile.displayName) : b.since - a.since));
   return (
     <>
       <div class="seg-chips">
         {(['all', 'requests', 'sent'] as const).map((f) => (
-          <button class={`mchip ${filter === f ? 'is-on' : ''}`} onClick={() => setFilter(f)}>
-            {{ all: 'All', requests: 'Requests', sent: 'Sent' }[f]}{data?.counts?.[f] ? ` ${data.counts[f]}` : ''}
-          </button>
+          <Subtab label={{ all: 'All', requests: 'Requests', sent: 'Sent' }[f]} count={counts?.[f] ?? 0} on={filter === f} onClick={() => setFilter(f)} />
         ))}
         <span class="grow" />
-        <button class="rsort" onClick={() => pickSheet('Sort contacts', [['recent', 'Recently added'], ['name', 'Name']], sort, setSort)}><img src={icon('IconSortAscending')} alt="" />Sort</button>
+        <SortButton onClick={() => pickSheet('Sort contacts', [['recent', 'Recently added'], ['name', 'Name']], sort, setSort)} />
       </div>
-      {loading && !data ? <Spinner /> : !list.length ? (
-        <Empty title={{ all: 'No contacts yet', requests: 'No requests', sent: 'No sent requests' }[filter]}
-          text={filter === 'all' ? 'Add creators and businesses from their cards or profiles.' : undefined} iconName="IconUserPlus" />
+      {!ready ? <Spinner /> : !list.length ? (
+        query ? <Empty title="No results" /> : <Empty title={{ all: 'No contacts yet', requests: 'No requests', sent: 'No sent requests' }[filter]}
+          text={{ all: 'Add creators to your contacts — they appear here once they accept.', requests: 'Contact requests to you appear here.', sent: 'Requests you send wait here until answered.' }[filter]} />
       ) : list.map((i) => (
-        <ContactRow key={i.requestId} i={i} filter={filter} act={act} message={message} />
+        <ContactRow key={`${filter}-${i.requestId}`} i={i} filter={filter} act={act} message={message} />
       ))}
     </>
   );

@@ -22,6 +22,11 @@ export interface Env {
   /** Comma-separated e-mails allowed to sign up (empty: anyone). Until a sending domain is verified, Resend only
    *  delivers to its own account's address, so sign-up is limited to it. */
   SIGNUP_ALLOWED_EMAILS?: string;
+  /** Closed test: every verification / reset code goes to this inbox instead of the address typed in (the address is
+   *  then NOT proven — users.email_verification = 'test_inbox'). Unset: codes go to their owners (the default). */
+  TEST_CODE_INBOX?: string;
+  /** Comma-separated e-mails allowed to switch their own profile between Free and PRO for testing. */
+  PRO_TEST_EMAILS?: string;
 
   /** Secrets. */
   RESEND_API_KEY?: string;

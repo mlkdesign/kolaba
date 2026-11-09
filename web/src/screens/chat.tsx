@@ -1,10 +1,10 @@
 // chat. — MessagesView (one list of chats, search across contacts and messages) and ChatView (bubbles with tails, the
 // time outside the bubble, day separators "Yesterday 22:06", the glass composer).
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { Card, Conversation, errorText, get, Message, post, uploadFile } from '../api';
+import { Card, Conversation, del, errorText, get, Message, post, uploadFile } from '../api';
 import { activeProfile, back, badges, chatOpen, openSheet, push, refresh, refreshTick, showToast } from '../state';
 import {
-  Icon, Avatar, BackButton, chatTime, clock, daySeparator, Empty, GlassButton, Header, HeaderTitle, icon, Logo, openViewer, ProBadge, SheetFrame, Spinner,
+  alertDialog, openContextMenu, useLongPress, Icon, Avatar, BackButton, chatTime, clock, daySeparator, Empty, GlassButton, Header, HeaderTitle, icon, Logo, openViewer, ProBadge, SheetFrame, Spinner,
   useDebounced, useLoad, usePullToRefresh, useCollapsingHeader,
 } from '../ui';
 
@@ -64,7 +64,8 @@ export function ChatListScreen() {
         )}
         {error ? <Empty title="Couldn't load chats" text={errorText(error)} /> : loading && !data ? <Spinner /> : !local.length && !q ? (
           <Empty title="No messages yet" text="Start a chat from a profile, a job or your contacts." iconName="IconChatText" />
-        ) : <div class="chats">{local.map((c) => <ChatRow c={c} key={c.id} />)}</div>}
+        ) : <div class="chats">{local.map((c) => <ChatRow c={c} key={c.id}
+          onChange={(next) => setData({ items: data!.items.flatMap((x) => (x.id !== c.id ? [x] : next ? [next] : [])) })} />)}</div>}
         <div style={{ height: 'var(--tabbar-clear)' }} />
       </div>
       <Indicator />
@@ -83,12 +84,27 @@ export function ChatListScreen() {
   );
 }
 
-function ChatRow({ c }: { c: Conversation }) {
+/** A chat row; held (500 ms) it offers the iOS menu — Mute / Unmute, Mark as read, Delete chat (for this profile only:
+ *  the other side keeps the conversation). Every action goes to the server first; the list follows its answer. */
+function ChatRow({ c, onChange }: { c: Conversation; onChange: (next: Conversation | null) => void }) {
+  const name = c.relatedJobTitle ?? c.partner?.displayName ?? 'this chat';
+  const run = async (fn: () => Promise<unknown>, next: Conversation | null, ok?: string) => {
+    try { await fn(); onChange(next); refresh(); if (ok) showToast(ok, 'ok'); } catch (e) { showToast(errorText(e), 'error'); }
+  };
+  const press = useLongPress((el) => openContextMenu(el, [
+    { label: c.muted ? 'Unmute chat' : 'Mute chat', icon: 'IconSpeakerX', run: () => void run(() => post(`/v1/conversations/${c.id}/mute`, { muted: !c.muted }), { ...c, muted: !c.muted }) },
+    ...(c.unreadCount > 0 ? [{ label: 'Mark as read', icon: 'IconCheckCircle', run: () => void run(() => post(`/v1/conversations/${c.id}/read`), { ...c, unreadCount: 0 }) }] : []),
+    { label: 'Delete chat', icon: 'IconTrash', danger: true, run: () => alertDialog(`Delete chat with ${name}?`,
+      'The chat and its messages disappear for you. The other person keeps their copy.', 'Delete chat',
+      () => run(() => del(`/v1/conversations/${c.id}`), null, 'Chat deleted')) },
+  ]));
   const last = c.lastMessage;
   const preview = last ? (last.body || (last.attachments.length ? 'Photo' : '')) : 'No messages yet';
   const job = !!c.relatedJobId;
   return (
-    <button class="chat-row" onClick={() => push('conversation', { id: c.id })}>
+    <button class="chat-row" onPointerDown={press.onPointerDown as any} onPointerMove={press.onPointerMove as any} onPointerUp={press.onPointerUp}
+      onPointerCancel={press.onPointerCancel} onPointerLeave={press.onPointerLeave} onContextMenu={press.onContextMenu}
+      onClick={press.click(() => push('conversation', { id: c.id }))}>
       <span class="chat-row__avatar">
         <Avatar card={c.partner} size={64} rounded={job} />
       </span>

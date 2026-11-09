@@ -43,7 +43,7 @@ export async function conversationList(env: Env, profileId: string, limit: numbe
         cp.muted, c.last_message_id,
         (SELECT other.profile_id FROM conversation_participants other WHERE other.conversation_id = c.id AND other.profile_id <> ?1 LIMIT 1) AS other_id,
         (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_profile_id <> ?1 AND m.deleted_at IS NULL
-           AND m.created_at > COALESCE(rs.last_read_at, 0)) AS unread_count,
+           AND m.created_at > MAX(COALESCE(rs.last_read_at, 0), COALESCE(cp.cleared_at, 0))) AS unread_count,
         (SELECT title FROM jobs WHERE id = c.related_job_id) AS job_title
       FROM conversation_participants cp JOIN conversations c ON c.id = cp.conversation_id
       LEFT JOIN conversation_read_state rs ON rs.conversation_id = c.id AND rs.profile_id = ?1
@@ -133,6 +133,7 @@ messages.get('/:id/messages', async (c) => {
   const rows = await c.env.DB.prepare(`SELECT m.*, (SELECT last_read_at FROM conversation_read_state WHERE conversation_id = m.conversation_id
         AND profile_id <> ?2 LIMIT 1) AS other_read_at FROM messages m
       WHERE m.conversation_id = ?1 AND (?3 IS NULL OR (m.created_at, m.id) < (?3, ?4)) AND m.created_at > ?5
+        AND m.created_at > COALESCE((SELECT cleared_at FROM conversation_participants WHERE conversation_id = ?1 AND profile_id = ?2), 0)
       ORDER BY m.created_at DESC, m.id DESC LIMIT ?6`)
     .bind(id, profile.id, before?.t ?? null, before?.id ?? null, after, limit + 1).all<Record<string, any>>();
   const page = rows.results.slice(0, limit);
@@ -218,11 +219,14 @@ messages.post('/:id/mute', async (c) => {
   return c.json({ muted });
 });
 
-// DELETE /v1/conversations/:id — removes it from this profile's list (back with the next message).
+// DELETE /v1/conversations/:id — "Delete chat" for this profile only: off its list and its history cleared for it
+// (cleared_at); the other participant keeps the conversation and every message. A new message brings the chat back,
+// starting from that message.
 messages.delete('/:id', async (c) => {
   const profile = actingProfile(c);
-  const res = await c.env.DB.prepare(`UPDATE conversation_participants SET hidden_at = ? WHERE conversation_id = ? AND profile_id = ?`)
-    .bind(now(), c.req.param('id'), profile.id).run();
+  const t = now();
+  const res = await c.env.DB.prepare(`UPDATE conversation_participants SET hidden_at = ?, cleared_at = ? WHERE conversation_id = ? AND profile_id = ?`)
+    .bind(t, t, c.req.param('id'), profile.id).run();
   if (!res.meta.changes) fail(404, 'conversation_not_found');
   return c.json({ status: 'hidden' });
 });

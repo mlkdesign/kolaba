@@ -46,7 +46,7 @@ async function jobsJSON(env: Env, rows: Record<string, any>[], viewer: string | 
     env.DB.prepare(`SELECT jm.job_id, ${mediaColumns} FROM job_media jm JOIN media m ON m.id = jm.media_id AND m.status = 'ready'
                     WHERE jm.job_id IN (${marks}) ORDER BY jm.position`).bind(...ids).all<MediaRow & { job_id: string }>(),
     env.DB.prepare(`SELECT j.id,
-        (SELECT COUNT(*) FROM applications a WHERE a.job_id = j.id AND a.status = 'submitted') AS applications_count,
+        (SELECT COUNT(*) FROM applications a WHERE a.job_id = j.id AND a.status = 'submitted' AND EXISTS (SELECT 1 FROM profiles cp WHERE cp.id = a.creator_profile_id AND cp.status = 'active')) AS applications_count,
         (SELECT a.id FROM applications a WHERE a.job_id = j.id AND a.creator_profile_id = ? AND a.status = 'submitted') AS my_application_id,
         EXISTS (SELECT 1 FROM saved_jobs s WHERE s.job_id = j.id AND s.profile_id = ?) AS is_saved
         FROM jobs j WHERE j.id IN (${marks})`).bind(viewer, viewer, ...ids).all<Record<string, any>>(),
@@ -300,17 +300,22 @@ jobs.post('/applications/:id/withdraw', requireAuth, requireProfile, async (c) =
 });
 
 // GET /v1/jobs/:id/applications?sort=newest|oldest|rating&shortlisted=1 — the job owner only.
+// Everyone signed in sees a published job's applicants (iOS FIX 31); the owner also gets shortlists. Counted and
+// listed by one rule: submitted applications of active profiles.
 jobs.get('/:id/applications', requireAuth, requireProfile, async (c) => {
-  const profile = actingProfile(c, 'business');
-  await ownedJob(c.env, c.req.param('id'), profile.id);
+  const profile = actingProfile(c);
+  const job = await c.env.DB.prepare(`SELECT owner_profile_id, status FROM jobs WHERE id = ?`).bind(c.req.param('id')).first<{ owner_profile_id: string; status: string }>();
+  const isOwner = job?.owner_profile_id === profile.id;
+  if (!job || (!isOwner && job.status !== 'published' && job.status !== 'closed')) fail(404, 'job_not_found');
   const sort = c.req.query('sort');
   const order = sort === 'oldest' ? 'a.created_at ASC' : sort === 'rating'
     ? `(SELECT AVG((r.quality + r.speed + r.contact) / 3.0) FROM reviews r WHERE r.recipient_profile_id = a.creator_profile_id
          AND r.status = 'published') DESC NULLS LAST, a.created_at DESC` : 'a.created_at DESC';
-  const rows = await c.env.DB.prepare(`SELECT a.* FROM applications a WHERE a.job_id = ? AND a.status = 'submitted'
+  const rows = await c.env.DB.prepare(`SELECT a.* FROM applications a WHERE a.job_id = ? AND a.status = 'submitted' AND EXISTS (SELECT 1 FROM profiles cp WHERE cp.id = a.creator_profile_id AND cp.status = 'active')
       AND (? = 0 OR a.shortlisted_at IS NOT NULL) ORDER BY ${order} LIMIT 200`)
-    .bind(c.req.param('id'), c.req.query('shortlisted') === '1' ? 1 : 0).all<Record<string, any>>();
-  return c.json({ items: await applicationsJSON(c.env, rows.results) });
+    .bind(c.req.param('id'), isOwner && c.req.query('shortlisted') === '1' ? 1 : 0).all<Record<string, any>>();
+  const items = await applicationsJSON(c.env, rows.results);
+  return c.json({ items: isOwner ? items : items.map((i: any) => ({ ...i, isShortlisted: false })), isOwner });
 });
 
 // PUT /v1/jobs/applications/:id/shortlist {shortlisted} — the job owner only.

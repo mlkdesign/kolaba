@@ -310,6 +310,33 @@ await test('K: owner deletes media → gone from portfolio and collection; other
   await call(creator, 'DELETE', `/v1/profiles/${business.profileId}/follow`);
 });
 
+await test('L: notification settings persist; PRO test switch and account deletion are refused to demo accounts; a deleted chat clears only my history; my own videos are not in my Reels', async () => {
+  const before = (await call(free, 'GET', '/v1/me/settings')).json.notifications;
+  expect(before && typeof before.push === 'boolean', 'settings shape');
+  const flipped = { ...before, newMessages: !before.newMessages };
+  expect((await call(free, 'PUT', '/v1/me/settings', { notifications: flipped })).status === 200, 'settings save');
+  expect((await call(free, 'GET', '/v1/me/settings')).json.notifications.newMessages === flipped.newMessages, 'settings not persisted');
+  await call(free, 'PUT', '/v1/me/settings', { notifications: before });
+  expectError(await call(free, 'PUT', '/v1/me/pro-test', { pro: true }), 403, 'pro_test_not_allowed');
+  expectError(await call(free, 'DELETE', '/v1/me', { confirm: 'DELETE' }), 403, 'demo_account');
+  // Delete chat: hidden and cleared for me only; the other side keeps every message; a new message brings it back empty.
+  const conv = await call(free, 'POST', '/v1/conversations', { profileId: multiBusiness.id });
+  const stamp = Date.now();
+  await call(free, 'POST', `/v1/conversations/${conv.json.id}/messages`, { body: `Before delete ${stamp}` });
+  expect((await call(free, 'DELETE', `/v1/conversations/${conv.json.id}`)).status === 200, 'delete chat');
+  expect(!(await call(free, 'GET', '/v1/conversations')).json.items.some((c) => c.id === conv.json.id), 'chat still listed');
+  const theirs = await call(multi, 'GET', `/v1/conversations/${conv.json.id}/messages`, undefined, multiBusiness.id);
+  expect(theirs.json.items.some((m) => m.body === `Before delete ${stamp}`), 'the other side lost the message');
+  await new Promise((r) => setTimeout(r, 1100));
+  await call(multi, 'POST', `/v1/conversations/${conv.json.id}/messages`, { body: `After delete ${stamp}` }, multiBusiness.id);
+  const mine = (await call(free, 'GET', `/v1/conversations/${conv.json.id}/messages`)).json.items.map((m) => m.body);
+  expect(mine.includes(`After delete ${stamp}`) && !mine.includes(`Before delete ${stamp}`), `cleared history ${JSON.stringify(mine)}`);
+  // Reels never show the viewer's own profiles.
+  const reels = await call(creator, 'GET', '/v1/reels/creators?limit=40');
+  const ownIds = new Set(creator.profiles.map((p) => p.id));
+  expect(!reels.json.items.some((i) => ownIds.has(i.author.id)), 'own profile in Reels');
+});
+
 await test('cleanup: the e2e job is deleted', async () => {
   if (jobId) expect((await call(business, 'DELETE', `/v1/jobs/${jobId}`)).json.status === 'deleted', 'delete failed');
 });

@@ -101,9 +101,9 @@ reels.get('/creators', requireAuth, requireProfile, async (c) => {
   const cursor = decodeCursor<{ t: number; id: string }>(c.req.query('cursor'));
   const creators = await c.env.DB.prepare(`SELECT p.id, MAX(m.created_at) AS latest FROM profiles p
       JOIN media m ON m.owner_profile_id = p.id AND m.kind = 'video' AND m.purpose IN ('portfolio', 'intro') AND m.status = 'ready' AND m.is_public = 1
-      WHERE p.type = 'creator' AND p.status = 'active' AND p.visibility = 'public'
+      WHERE p.type = 'creator' AND p.status = 'active' AND p.visibility = 'public' AND p.owner_user_id <> ?4
       GROUP BY p.id HAVING (?1 IS NULL OR (MAX(m.created_at), p.id) < (?1, ?2))
-      ORDER BY latest DESC, p.id DESC LIMIT ?3`).bind(cursor?.t ?? null, cursor?.id ?? null, limit + 1).all<{ id: string; latest: number }>();
+      ORDER BY latest DESC, p.id DESC LIMIT ?3`).bind(cursor?.t ?? null, cursor?.id ?? null, limit + 1, profile.ownerUserId).all<{ id: string; latest: number }>();
   const page = creators.results.slice(0, limit);
   if (!page.length) return c.json({ items: [], nextCursor: null });
   const ids = page.map((p) => p.id);

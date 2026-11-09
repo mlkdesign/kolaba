@@ -59,8 +59,8 @@ body { margin: 0; background: #000; }
 .ios-statusbar__signals { position: absolute; right: 26px; top: 0; transform: translateY(-50%); display: flex; align-items: center; gap: 6px; height: 13px; }
 .ios-statusbar svg { display: block; flex: none; }
 
-/* ─── on a phone: no frame — the same 402 × 874 screen, scaled to fit the display ─── */
+/* ─── on a phone: no frame — the app fills the display and adapts to its width (and height) ─── */
 .is-mobile .page-logo, .is-mobile .frame, .is-mobile .ios-statusbar { display: none; }
-.is-mobile .phone { width: 402px; height: 874px; }
-.is-mobile .screen { left: 0; top: 0; border-radius: 0; }
+.is-mobile .phone { position: fixed; inset: 0; width: 100%; height: 100%; transform: none; }
+.is-mobile .screen { left: 0; top: 0; width: 100%; height: 100%; border-radius: 0; }
 html.is-mobile.is-preloading .phone { opacity: 1; }

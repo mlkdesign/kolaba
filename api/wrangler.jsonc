@@ -24,7 +24,12 @@
     "MAX_VIDEO_MB": "50",
     "MAX_VIDEO_SECONDS": "60",
     // Resend has no verified domain yet (github.io can't be verified): codes reach only this address.
-    "SIGNUP_ALLOWED_EMAILS": "mlkdesignweb@gmail.com"
+    "SIGNUP_ALLOWED_EMAILS": "mlkdesignweb@gmail.com",
+    // CLOSED TEST ONLY: every sign-up / sign-in code goes to this inbox (accounts get email_verification = 'test_inbox',
+    // never 'owner'). Remove before a public launch so codes reach their owners again.
+    "TEST_CODE_INBOX": "mlkdesignweb@gmail.com",
+    // Accounts allowed to switch their own PRO on and off for testing (Settings). Nobody else can.
+    "PRO_TEST_EMAILS": "mlkdesignweb@gmail.com"
   },
   "env": {
     "local": {

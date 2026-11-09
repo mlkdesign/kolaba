@@ -12,6 +12,7 @@ import jobs from './routes/jobs';
 import contacts from './routes/contacts';
 import messages from './routes/messages';
 import reviews from './routes/reviews';
+import me from './routes/me';
 import { admin, notifications, reels, reports, search, sync } from './routes/social';
 
 const app = new Hono<AppEnv>();
@@ -57,6 +58,7 @@ app.route('/v1/jobs', jobs);
 app.route('/v1/contacts', contacts);
 app.route('/v1/conversations', messages);
 app.route('/v1/reviews', reviews);
+app.route('/v1/me', me);
 app.route('/v1/notifications', notifications);
 app.route('/v1/reels', reels);
 app.route('/v1/search', search);

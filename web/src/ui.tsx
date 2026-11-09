@@ -4,7 +4,8 @@
 import { ComponentChildren, toChildArray } from 'preact';
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { Card, Media } from './api';
-import { back, closeSheet, openSheet, sheets } from './state';
+import { activeProfile, back, closeSheet, openSheet, sheets } from './state';
+import { badgeOffers, offerFor, openPaywall } from './paywall';
 import { uiScale } from './scale';
 
 export const BASE: string = (import.meta as any).env?.BASE_URL ?? '/';
@@ -213,15 +214,25 @@ export function RatingInline({ rating, count }: { rating: number | null; count: 
 }
 
 /** ProBadge: crown + PRO in the account's colour (creator pink, business blue). */
-export function ProBadge({ card, compact }: { card: Pick<Card, 'isPro' | 'type'> | null; compact?: boolean }) {
+export function ProBadge({ card, compact }: { card: Pick<Card, 'isPro' | 'type'> & { id?: string } | null; compact?: boolean }) {
   if (!card?.isPro) return null;
-  return <span class={`pro ${card.type === 'business' ? 'is-business' : ''} ${compact ? 'is-compact' : ''}`}><img src={icon('IconCrownSimple')} alt="" />PRO</span>;
+  const cls = `pro ${card.type === 'business' ? 'is-business' : ''} ${compact ? 'is-compact' : ''}`;
+  // Someone else's badge offers a non-PRO viewer the paywall of their own type (proBadgeOffer); the tap stays here.
+  const offers = card.id !== activeProfile.value?.id && badgeOffers(card.type);
+  if (!offers) return <span class={cls}><img src={icon('IconCrownSimple')} alt="" />PRO</span>;
+  return (
+    <span class={`${cls} is-tappable`} role="button" tabIndex={0} aria-label={`PRO — see ${card.type}.pro`}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => { e.stopPropagation(); e.preventDefault(); openPaywall(offerFor(card.type)); }}
+      onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); openPaywall(offerFor(card.type)); } }}>
+      <img src={icon('IconCrownSimple')} alt="" />PRO</span>
+  );
 }
 
 
 /** KolabaEmptyState: the card fan (PortfolioCardFan — three glass cards that open with a spring, the pink +), the
  *  message (Bold 16) and its detail (Light 14), both light grey at 50 %, then an optional action. */
-export function Empty({ title, text, children, plus = true }: { title: string; text?: string; iconName?: string; children?: ComponentChildren; plus?: boolean }) {
+export function Empty({ title, text, children, plus = false }: { title: string; text?: string; iconName?: string; children?: ComponentChildren; plus?: boolean }) {
   return (
     <div class="empty" role="status">
       <div class="fan" aria-hidden="true">
@@ -238,6 +249,32 @@ export function Empty({ title, text, children, plus = true }: { title: string; t
     </div>
   );
 }
+
+/** KolabaSubtabStyle + KolabaCountBadge: 40 pt, radius 16, 16 pt in, Regular 14; chosen white with black text (its
+ *  count dark), the others white 5 % with the text at 50 % (count white 30 %). */
+export function Subtab({ label, count, on, onClick, locked }: { label: string; count?: number; on: boolean; onClick: () => void; locked?: boolean }) {
+  return (
+    <button class={`subtab ${on ? 'is-on' : ''}`} role="tab" aria-selected={on} onClick={onClick}>
+      {label}{count !== undefined && <span class="subtab__count">{count > 999 ? '999+' : count}</span>}
+      {locked && <img src={icon('IconLockKey')} alt="Locked" class="subtab__lock" />}
+    </button>
+  );
+}
+
+/** SortMenu: the sort glyph and "Sort" (Regular 14, white) — a 44 pt target. */
+export const SortButton = ({ onClick, flipped }: { onClick: () => void; flipped?: boolean }) => (
+  <button class="sort-btn" onClick={onClick}><img src={icon('IconSortAscending')} alt="" style={{ transform: flipped ? 'scaleY(-1)' : undefined }} />Sort</button>
+);
+
+/** ProfileFilterAddButton: 48 × 40, white 5 %, radius 16, the 16 pt plus. */
+export const AddButton = ({ onClick, label = 'Add', busy }: { onClick: () => void; label?: string; busy?: string | null }) => (
+  <button class="add-btn" aria-label={label} disabled={!!busy} onClick={onClick}>{busy ?? <img src={icon('IconPlus')} alt="" />}</button>
+);
+
+/** ProfileActionLabel(style: .filled, height 40): white, black Medium 12, the 16 pt icon 10 pt before it. */
+export const ActionPill = ({ label, onClick, iconName = 'IconPlus' }: { label: string; onClick: () => void; iconName?: string }) => (
+  <button class="action-pill" onClick={onClick}><img src={icon(iconName)} alt="" />{label}</button>
+);
 
 export const Spinner = () => <div class="spinner" role="status" aria-label="Loading" />;
 
@@ -534,14 +571,15 @@ export function openContextMenu(el: HTMLElement, actions: MenuAction[]) {
   const box = { x: (r.left - a.left) / k, y: (r.top - a.top) / k, w: r.width / k, h: r.height / k };
   const menuH = actions.length * 44 + 8;
   const screenH = a.height / k;
+  const screenW = a.width / k;
   const top = Math.max(70, Math.min(box.y, screenH - 40 - menuH - 12 - box.h));
   const clone = el.cloneNode(true) as HTMLElement;
   openSheet((close) => (
     <div class="ctx" onClick={close} onContextMenu={(e) => e.preventDefault()}>
       <div class="ctx__preview" style={{ left: box.x, top, width: box.w, height: box.h, ['--from' as any]: `${box.y - top}px` }}
         ref={(n) => { if (n && !n.firstChild) { clone.style.width = '100%'; clone.style.height = '100%'; n.appendChild(clone); } }} />
-      <div class={`ctx__menu glass ${box.x + box.w / 2 > 201 ? 'is-end' : ''}`} role="menu"
-        style={{ top: top + box.h + 12, ...(box.x + box.w / 2 > 201 ? { right: Math.max(16, 402 - box.x - box.w) } : { left: Math.max(16, box.x) }) }}
+      <div class={`ctx__menu glass ${box.x + box.w / 2 > screenW / 2 ? 'is-end' : ''}`} role="menu"
+        style={{ top: top + box.h + 12, ...(box.x + box.w / 2 > screenW / 2 ? { right: Math.max(16, screenW - box.x - box.w) } : { left: Math.max(16, box.x) }) }}
         onClick={(e) => e.stopPropagation()}>
         {actions.map((m) => (
           <button role="menuitem" class={`ctx__item ${m.danger ? 'is-danger' : ''}`} onClick={() => { close(); m.run(); }}>
@@ -602,6 +640,7 @@ export function useCollapsingHeader({ distance = COLLAPSE.restTop - COLLAPSE.pin
       const off = el.scrollTop;
       const shift = Math.min(off, distance);
       host.style.setProperty('--collapse-shift', `${Math.max(shift, -200)}px`);
+      host.style.setProperty('--collapse-shift-n', String(Math.round(Math.max(shift, -200))));
       host.style.setProperty('--collapse-title', String(1 - Math.min(Math.max(Math.max(shift, 0) / Math.max(fade, 1), 0), 1)));
       // The tabs' own top on the screen (they may sit lower than the section's rest, e.g. a profile's).
       const tabs = tabsEl();
@@ -611,8 +650,9 @@ export function useCollapsingHeader({ distance = COLLAPSE.restTop - COLLAPSE.pin
         // its margin) minus the offset, pinned at pinTop.
         const anchor = tabs.previousElementSibling as HTMLElement | null;
         const natural = anchor ? anchor.offsetTop + anchor.offsetHeight + parseFloat(getComputedStyle(tabs).marginTop || '0') : tabs.offsetTop;
-        const top = Math.max(natural - off, COLLAPSE.pinTop);
-        approach = Math.min(Math.max(1 - (top - COLLAPSE.pinTop) / insetTravel, 0), 1);
+        const pin = parseFloat(getComputedStyle(tabs).top) || COLLAPSE.pinTop;
+        const top = Math.max(natural - off, pin);
+        approach = Math.min(Math.max(1 - (top - pin) / insetTravel, 0), 1);
       }
       host.style.setProperty('--collapse-approach', approach.toFixed(4));
     };
@@ -642,5 +682,23 @@ export function useCollapsingHeader({ distance = COLLAPSE.restTop - COLLAPSE.pin
       ro.disconnect(); window.clearTimeout(timer);
     };
   }, [distance, insetTravel, snap, fade, ...deps]);
-  return { root, scroller };
+  // A tab change (KolabaTabScrollCoordinator.beginPaging): the header stays where it is; with the header collapsed the
+  // new tab shows at its own saved place past the pinned tabs, otherwise at its top. Never a jump to the top.
+  const saved = useRef<Record<string, number>>({});
+  const travel = () => {
+    const tabs = root.current?.querySelector<HTMLElement>('[data-collapse-tabs]');
+    if (!insetTravel || !tabs) return distance;
+    const anchor = tabs.previousElementSibling as HTMLElement | null;
+    const natural = anchor ? anchor.offsetTop + anchor.offsetHeight + parseFloat(getComputedStyle(tabs).marginTop || '0') : tabs.offsetTop;
+    return Math.max(0, natural - (parseFloat(getComputedStyle(tabs).top) || COLLAPSE.pinTop));
+  };
+  const changeTab = (from: string | number, to: string | number, apply: () => void) => {
+    const el = scroller.current;
+    if (!el) { apply(); return; }
+    const d = travel(); const off = el.scrollTop; const collapsed = off >= d - 0.5;
+    saved.current[String(from)] = collapsed ? off - d : 0;
+    apply();
+    requestAnimationFrame(() => { el.scrollTop = Math.min(off, d) + (collapsed ? saved.current[String(to)] ?? 0 : 0); });
+  };
+  return { root, scroller, changeTab };
 }
