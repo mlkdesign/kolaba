@@ -179,7 +179,7 @@ profiles.get('/', async (c) => {
   const q = (c.req.query('q') ?? '').trim().toLowerCase().slice(0, 60);
   const limit = clampLimit(c.req.query('limit'), 24);
   const cursor = decodeCursor<{ n: string; id: string }>(c.req.query('cursor'));
-  const rows = await c.env.DB.prepare(`SELECT ${cardColumns} FROM profiles p ${avatarJoin}
+  const rows = await c.env.DB.prepare(`SELECT ${cardColumns}, p.bio AS bio FROM profiles p ${avatarJoin}
       JOIN users u ON u.id = p.owner_user_id AND u.status = 'active'
       WHERE p.status = 'active' AND p.visibility = 'public'
         AND (?1 IS NULL OR p.type = ?1)
@@ -187,8 +187,8 @@ profiles.get('/', async (c) => {
              COALESCE(p.city, '') || ' ' || COALESCE(p.country, '')) LIKE '%' || ?2 || '%')
         AND (?3 IS NULL OR (lower(p.display_name), p.id) > (?3, ?4))
       ORDER BY lower(p.display_name), p.id LIMIT ?5`)
-    .bind(type === 'creator' || type === 'business' ? type : null, q, cursor?.n ?? null, cursor?.id ?? null, limit + 1).all<CardRow>();
-  const items = rows.results.slice(0, limit).map((r) => card(c.env, r));
+    .bind(type === 'creator' || type === 'business' ? type : null, q, cursor?.n ?? null, cursor?.id ?? null, limit + 1).all<CardRow & { bio: string | null }>();
+  const items = rows.results.slice(0, limit).map((r) => ({ ...card(c.env, r), bio: r.bio ?? '' }));
   const last = rows.results.length > limit ? rows.results[limit - 1] : null;
   return c.json({ items, nextCursor: last ? encodeCursor({ n: last.display_name.toLowerCase(), id: last.id }) : null });
 });
@@ -215,7 +215,9 @@ export async function profilePage(env: Env, id: string, viewerUserId: string | n
         (SELECT COUNT(*) FROM media WHERE owner_profile_id = ?1 AND purpose = 'portfolio' AND status = 'ready') AS portfolio,
         (SELECT COUNT(*) FROM jobs WHERE owner_profile_id = ?1 AND status = 'published') AS jobs,
         (SELECT COUNT(*) FROM contact_requests WHERE status = 'accepted' AND (sender_profile_id = ?1 OR recipient_profile_id = ?1)) AS contacts,
-        (SELECT COALESCE(SUM(likes_count), 0) FROM media WHERE owner_profile_id = ?1 AND status = 'ready') AS likes`)
+        (SELECT COALESCE(SUM(likes_count), 0) FROM media WHERE owner_profile_id = ?1 AND status = 'ready') AS likes,
+        (SELECT COUNT(*) FROM follows WHERE followee_profile_id = ?1) AS followers,
+        (SELECT COUNT(*) FROM follows WHERE follower_profile_id = ?1) AS following`)
       .bind(id).first(),
   ]);
   const showLocation = isOwner || p!.show_location === 1;
@@ -305,6 +307,37 @@ profiles.get('/:id/jobs', requireAuth, requireProfile, async (c) => {
       ORDER BY COALESCE(published_at, created_at) DESC LIMIT 50`).bind(id).all<Record<string, any>>();
   const { jobsJSON } = await import('./jobs');
   return c.json({ items: await jobsJSON(c.env, rows.results, viewer.id) });
+});
+
+// PUT / DELETE /v1/profiles/:id/follow — the acting profile follows / unfollows (one-directional, not contacts).
+profiles.put('/:id/follow', requireAuth, requireProfile, async (c) => {
+  const me = actingProfile(c);
+  const id = c.req.param('id');
+  const target = await c.env.DB.prepare(`SELECT owner_user_id, status FROM profiles WHERE id = ?`).bind(id)
+    .first<{ owner_user_id: string; status: string }>();
+  if (!target || target.status !== 'active') fail(404, 'profile_not_found');
+  if (target!.owner_user_id === me.ownerUserId) fail(422, 'same_account');
+  const res = await c.env.DB.prepare(`INSERT OR IGNORE INTO follows (follower_profile_id, followee_profile_id, created_at) VALUES (?, ?, ?)`)
+    .bind(me.id, id, now()).run();
+  if (res.meta.changes) {
+    await c.env.DB.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at)
+                            VALUES (?, ?, 'followed', ?, '{}', ?)`).bind(newId('ntf'), id, me.id, now()).run();
+  }
+  return c.json({ following: true });
+});
+
+profiles.delete('/:id/follow', requireAuth, requireProfile, async (c) => {
+  const me = actingProfile(c);
+  await c.env.DB.prepare(`DELETE FROM follows WHERE follower_profile_id = ? AND followee_profile_id = ?`).bind(me.id, c.req.param('id')).run();
+  return c.json({ following: false });
+});
+
+// GET /v1/profiles/:id/follow — whether the acting profile follows it.
+profiles.get('/:id/follow', requireAuth, requireProfile, async (c) => {
+  const me = actingProfile(c);
+  const row = await c.env.DB.prepare(`SELECT 1 AS ok FROM follows WHERE follower_profile_id = ? AND followee_profile_id = ?`)
+    .bind(me.id, c.req.param('id')).first();
+  return c.json({ following: Boolean(row) });
 });
 
 export default profiles;

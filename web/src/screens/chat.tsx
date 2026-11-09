@@ -1,70 +1,110 @@
-// chat. — one chat list (no All/Jobs tabs), search across contacts, names and messages, and the conversation.
-import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+// chat. — MessagesView (one list of chats, search across contacts and messages) and ChatView (bubbles with tails, the
+// time outside the bubble, day separators "Yesterday 22:06", the glass composer).
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { Card, Conversation, errorText, get, Message, post, uploadFile } from '../api';
-import { activeProfile, chatOpen, openSheet, push, refresh, refreshTick, showToast } from '../state';
-import { Avatar, clock, Empty, Icon, openViewer, SheetFrame, Spinner, timeAgo, TopBar, useDebounced, useLoad } from '../ui';
+import { activeProfile, back, badges, chatOpen, openSheet, push, refresh, refreshTick, showToast } from '../state';
+import {
+  Avatar, BackButton, chatTime, clock, daySeparator, Empty, GlassButton, Header, HeaderTitle, icon, Logo, openViewer, ProBadge, SheetFrame, Spinner,
+  useDebounced, useLoad, usePullToRefresh,
+} from '../ui';
 
 export function ChatListScreen() {
+  const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
   const q = useDebounced(query.trim(), 300);
-  const { data, error, loading } = useLoad<{ items: Conversation[] }>((s) => get('/v1/conversations?limit=50', s), [refreshTick.value, activeProfile.value?.id]);
+  const { data, error, loading, reload, setData } = useLoad<{ items: Conversation[] }>((s) => get('/v1/conversations?limit=50', s), [refreshTick.value, activeProfile.value?.id]);
   const search = useLoad<any>((s) => (q.length >= 2 ? get(`/v1/search?q=${encodeURIComponent(q)}&scope=all`, s) : Promise.resolve(null)), [q]);
+  const { scroller, Indicator } = usePullToRefresh(() => reload());
   const openWith = async (card: Card) => {
     try { const { id } = await post('/v1/conversations', { profileId: card.id }); push('conversation', { id }); }
     catch (e) { showToast(errorText(e), 'error'); }
   };
-  const local = (data?.items ?? []).filter((c) => !q || `${c.partner?.displayName} ${c.partner?.username}`.toLowerCase().includes(q.toLowerCase()));
+  const markAll = async () => {
+    const unread = (data?.items ?? []).filter((c) => c.unreadCount > 0);
+    if (!unread.length) { showToast('Everything is read'); return; }
+    await Promise.all(unread.map((c) => post(`/v1/conversations/${c.id}/read`).catch(() => {})));
+    setData({ items: data!.items.map((c) => ({ ...c, unreadCount: 0 })) });
+    badges.value = { ...badges.value, conversations: 0 };
+    refresh();
+  };
+  const menu = () => openSheet((close) => (
+    <SheetFrame title="Chats" close={close}>
+      <button class="menu-item" onClick={() => { close(); void markAll(); }}><img src={icon('IconCheckCircle')} alt="" />Mark all as read</button>
+      <button class="menu-item" onClick={() => { close(); push('contacts', {}); }}><img src={icon('IconUser')} alt="" />My Contacts</button>
+    </SheetFrame>
+  ));
+  const local = (data?.items ?? []).filter((c) => !q || `${c.partner?.displayName} ${c.partner?.username} ${c.relatedJobTitle ?? ''}`.toLowerCase().includes(q.toLowerCase()));
   return (
     <>
-      <header class="topbar"><div class="logo-word">chat<i>.</i></div></header>
-      <div class="scroll">
-        <div class="below-topbar" />
-        <div class="pad" style={{ marginBottom: 8 }}>
-          <label class="search"><img src={`${import.meta.env.BASE_URL}icons/IconMagnifyingGlass.svg`} alt="" />
-            <input placeholder="Search chats, contacts, messages" value={query} onInput={(e) => setQuery(e.currentTarget.value)} /></label>
-        </div>
+      <div class="scroll" ref={scroller}>
+        <div class="section-top" />
         {q.length >= 2 && search.data && (
           <>
-            {search.data.contacts.length > 0 && <div class="section-title">Contacts</div>}
-            {search.data.contacts.map((c: Card) => (
-              <button class="list-row" onClick={() => openWith(c)}><Avatar card={c} size={44} />
-                <div class="grow"><div class="list-row__title">{c.displayName}</div><div class="list-row__sub">{c.location ?? `@${c.username}`}</div></div></button>
-            ))}
-            {search.data.messages.length > 0 && <div class="section-title">Messages</div>}
-            {search.data.messages.map((m: any) => (
-              <button class="list-row" onClick={() => push('conversation', { id: m.conversationId })}>
-                <Avatar card={m.sender} size={44} />
-                <div class="grow"><div class="list-row__title">{m.sender?.displayName}</div><div class="list-row__sub ellipsis">{m.body}</div></div>
-                <span class="chat-row__time">{timeAgo(m.createdAt)}</span>
-              </button>
-            ))}
-            {local.length > 0 && <div class="section-title">Chats</div>}
+            {search.data.contacts.length > 0 && <div class="section-label" style={{ marginTop: 0 }}>Contacts</div>}
+            {search.data.contacts.length > 0 && (
+              <div class="socials" data-hscroll style={{ margin: 0, paddingBottom: 8 }}>
+                {search.data.contacts.map((c: Card) => (
+                  <button class="social" style={{ width: 64 }} onClick={() => openWith(c)}><Avatar card={c} size={56} /><span class="ellipsis" style={{ width: 64, textAlign: 'center', fontSize: 12 }}>{c.displayName}</span></button>
+                ))}
+              </div>
+            )}
+            {search.data.messages.length > 0 && <div class="section-label">Messages</div>}
+            <div class="chats">
+              {search.data.messages.map((m: any) => (
+                <button class="chat-row" onClick={() => push('conversation', { id: m.conversationId })}>
+                  <Avatar card={m.sender} size={48} />
+                  <div class="grow"><div class="chat-row__top"><span class="chat-row__name ellipsis">{m.sender?.displayName}</span><span class="chat-row__time">{chatTime(m.createdAt)}</span></div>
+                    <div class="chat-row__preview lines-2">{m.body}</div></div>
+                </button>
+              ))}
+            </div>
+            {local.length > 0 && <div class="section-label">Chats</div>}
           </>
         )}
         {error ? <Empty title="Couldn't load chats" text={errorText(error)} /> : loading && !data ? <Spinner /> : !local.length && !q ? (
           <Empty title="No messages yet" text="Start a chat from a profile, a job or your contacts." iconName="IconChatText" />
-        ) : local.map((c) => <ChatRow c={c} key={c.id} />)}
+        ) : <div class="chats">{local.map((c) => <ChatRow c={c} key={c.id} />)}</div>}
+        <div style={{ height: 'var(--tabbar-clear)' }} />
       </div>
+      <Indicator />
+      <Header
+        left={searching ? null : <GlassButton name="IconDotsThree" label="Chats menu" onClick={menu} />}
+        center={searching ? null : <Logo word="chat" />}
+        right={searching ? (
+          <div class="row" style={{ width: 'calc(100vw - 32px)', maxWidth: 'calc(386px - 32px)', gap: 8 }}>
+            <label class="glass search"><img src={icon('IconMagnifyingGlass')} alt="" />
+              <input autoFocus placeholder="Search chats, contacts, messages" value={query} onInput={(e) => setQuery(e.currentTarget.value)} /></label>
+            <GlassButton name="IconSheetClose" label="Close search" onClick={() => { setSearching(false); setQuery(''); }} />
+          </div>
+        ) : <GlassButton name="IconMagnifyingGlass" label="Search" onClick={() => setSearching(true)} />}
+      />
     </>
   );
 }
 
 function ChatRow({ c }: { c: Conversation }) {
   const last = c.lastMessage;
-  const preview = last ? (last.body || (last.attachments.length ? '📎 Media' : '')) : 'No messages yet';
+  const preview = last ? (last.body || (last.attachments.length ? 'Photo' : '')) : 'No messages yet';
+  const job = !!c.relatedJobId;
   return (
-    <button class="list-row" onClick={() => push('conversation', { id: c.id })}>
-      <Avatar card={c.partner} size={52} />
-      <div class="grow">
-        <div class="row" style={{ gap: 6 }}>
-          <span class="list-row__title ellipsis grow">{c.partner?.displayName ?? 'Unknown'}</span>
-          <span class="chat-row__time">{timeAgo(c.activityAt)}</span>
+    <button class="chat-row" onClick={() => push('conversation', { id: c.id })}>
+      <span class="chat-row__avatar">
+        <Avatar card={c.partner} size={64} rounded={job} />
+      </span>
+      <div class="grow" style={{ paddingTop: 2 }}>
+        <div class="chat-row__top">
+          {job && <span class="chat-row__job" style={{ position: 'static', border: 0, flex: 'none' }}><img src={icon('IconBriefcase')} alt="" /></span>}
+          <span class="chat-row__name ellipsis">{job ? c.relatedJobTitle : c.partner?.displayName ?? 'Unknown'}</span>
+          {!job && <ProBadge card={c.partner} compact />}
+          {c.muted && <img class="mute-icon" src={icon('IconSpeakerX')} alt="Muted" />}
+          <span class="chat-row__time">
+            {last?.isOutgoing && <Tick read={!!last.isReadByOther} />}
+            {chatTime(c.activityAt)}
+          </span>
         </div>
-        {c.relatedJobTitle && <div class="list-row__sub ellipsis" style={{ color: 'var(--accent)' }}>💼 {c.relatedJobTitle}</div>}
-        <div class="row" style={{ gap: 6, marginTop: 2 }}>
-          <span class={`chat-row__preview ellipsis grow ${c.unreadCount ? 'is-unread' : ''}`}>{last?.isOutgoing ? 'You: ' : ''}{preview}</span>
-          {c.unreadCount > 0 && <span class={`unread ${c.muted ? 'is-muted' : ''}`}>{c.unreadCount > 99 ? '99+' : c.unreadCount}</span>}
-          {!c.unreadCount && last?.isOutgoing && <span class="muted" style={{ fontSize: 12 }}>{last.isReadByOther ? '✓✓' : '✓'}</span>}
+        <div class="chat-row__bottom">
+          <div class={`chat-row__preview lines-2 grow ${c.unreadCount ? 'is-unread' : ''}`}>{job && c.partner ? `${c.partner.displayName}: ` : ''}{preview}</div>
+          {c.unreadCount > 0 && <span class={`unread-count ${c.muted ? 'is-muted' : ''}`}>{c.unreadCount > 99 ? '99+' : c.unreadCount}</span>}
         </div>
       </div>
     </button>
@@ -78,9 +118,10 @@ export function ConversationScreen({ id }: { id: string }) {
   const [error, setError] = useState('');
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const newest = useRef(0);
-  const list = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const field = useRef<HTMLTextAreaElement>(null);
 
   const markRead = () => post(`/v1/conversations/${id}/read`).catch(() => {});
   const loadNewer = async () => {
@@ -88,15 +129,9 @@ export function ConversationScreen({ id }: { id: string }) {
       const page = await get(`/v1/conversations/${id}/messages?after=${newest.current}&limit=100`);
       if (page.items.length) {
         newest.current = Math.max(newest.current, ...page.items.map((m: Message) => m.createdAt));
-        setMessages((prev) => {
-          const known = new Set(prev.map((m) => m.id));
-          return [...page.items.filter((m: Message) => !known.has(m.id)), ...prev];
-        });
+        setMessages((prev) => { const known = new Set(prev.map((m) => m.id)); return [...page.items.filter((m: Message) => !known.has(m.id)), ...prev]; });
         void markRead();
-      } else {
-        // Read receipts change without new messages: refresh the last outgoing state cheaply.
-        setMeta(page.conversation);
-      }
+      } else setMeta(page.conversation);
     } catch { /* next poll */ }
   };
   useEffect(() => {
@@ -106,20 +141,19 @@ export function ConversationScreen({ id }: { id: string }) {
         const page = await get(`/v1/conversations/${id}/messages?limit=40`);
         setMessages(page.items); setMeta(page.conversation); setCursor(page.nextCursor);
         newest.current = page.items[0]?.createdAt ?? 0;
-        void markRead();
-        refresh();
-      } catch (e) { setError(errorText(e)); }
+        void markRead(); refresh();
+      } catch (e) { setError(errorText(e)); } finally { setLoaded(true); }
     })();
     return () => { chatOpen.value = null; };
   }, [id]);
-  // Polling while the chat is on screen (the sync loop also runs faster then).
   useEffect(() => {
     const timer = window.setInterval(() => { if (!document.hidden) void loadNewer(); }, 4000);
     return () => window.clearInterval(timer);
   }, [id]);
   const loadOlder = async () => {
     if (!cursor) return;
-    const page = await get(`/v1/conversations/${id}/messages?limit=40&before=${cursor}`);
+    const c = cursor; setCursor(null);
+    const page = await get(`/v1/conversations/${id}/messages?limit=40&before=${c}`);
     setMessages((prev) => [...prev, ...page.items]); setCursor(page.nextCursor);
   };
   const send = async (mediaIds: string[] = []) => {
@@ -128,7 +162,9 @@ export function ConversationScreen({ id }: { id: string }) {
     setSending(true);
     try {
       const m = await post<Message>(`/v1/conversations/${id}/messages`, { body, mediaIds });
-      setMessages((prev) => [m, ...prev]); newest.current = Math.max(newest.current, m.createdAt); setText(''); refresh();
+      setMessages((prev) => [m, ...prev]); newest.current = Math.max(newest.current, m.createdAt); setText('');
+      if (field.current) field.current.style.height = '';
+      refresh();
     } catch (e) { showToast(errorText(e), 'error'); } finally { setSending(false); }
   };
   const attach = async (file: File) => {
@@ -138,68 +174,75 @@ export function ConversationScreen({ id }: { id: string }) {
   const partner = meta?.partner as Card | undefined;
   const menu = () => openSheet((close) => (
     <SheetFrame title={partner?.displayName} close={close}>
-      <button class="menu-item" onClick={() => { close(); partner && push('profile-view', { id: partner.id }); }}><img src={`${import.meta.env.BASE_URL}icons/IconUser.svg`} alt="" />Open profile</button>
+      <button class="menu-item" onClick={() => { close(); partner && push('profile-view', { id: partner.id }); }}><img src={icon('IconUser')} alt="" />Open profile</button>
+      {meta?.relatedJobId && <button class="menu-item" onClick={() => { close(); push('job', { id: meta.relatedJobId }); }}><img src={icon('IconBriefcase')} alt="" />Open job</button>}
       <button class="menu-item" onClick={async () => { close(); await post(`/v1/conversations/${id}/mute`, { muted: !meta?.muted }); setMeta({ ...meta, muted: !meta?.muted }); }}>
-        <img src={`${import.meta.env.BASE_URL}icons/IconSpeakerX.svg`} alt="" />{meta?.muted ? 'Unmute' : 'Mute'}</button>
+        <img src={icon('IconSpeakerX')} alt="" />{meta?.muted ? 'Unmute' : 'Mute'}</button>
       <button class="menu-item is-danger" onClick={async () => { close(); await post('/v1/reports', { targetType: 'profile', targetId: partner?.id, reason: 'spam' }); showToast('Reported — thank you', 'ok'); }}>
-        <img src={`${import.meta.env.BASE_URL}icons/IconShieldWarning.svg`} alt="" />Report</button>
+        <img src={icon('IconShieldWarning')} alt="" />Report</button>
     </SheetFrame>
   ));
-  if (error) return <><TopBar title="Chat" /><div class="below-topbar"><Empty title="Chat not available" text={error} /></div></>;
+  const findInChat = () => {
+    const term = window.prompt('Find in chat');
+    if (!term) return;
+    const hit = messages.find((m) => m.body.toLowerCase().includes(term.toLowerCase()));
+    if (!hit) { showToast('Nothing found'); return; }
+    const el = document.querySelector(`[data-msg="${hit.id}"]`);
+    el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+  if (error) return <><Header left={<BackButton />} /><div class="section-top"><Empty title="Chat not available" text={error} /></div></>;
+  const lastOutgoing = messages.find((m) => m.isOutgoing)?.id;
   return (
-    <>
-      <header class="topbar">
-        <button class="glass-btn" aria-label="Back" onClick={() => import('../state').then((s) => s.back())}><Icon name="IconArrowLeft" /></button>
-        <button class="row grow" style={{ justifyContent: 'center', minWidth: 0 }} onClick={() => partner && push('profile-view', { id: partner.id })}>
-          <Avatar card={partner ?? null} size={34} />
-          <div style={{ textAlign: 'left', minWidth: 0 }}>
-            <div class="ellipsis" style={{ fontWeight: 600, fontSize: 16 }}>{partner?.displayName ?? '…'}</div>
-            <div class="ellipsis muted" style={{ fontSize: 12 }}>{meta?.relatedJobTitle ? `💼 ${meta.relatedJobTitle}` : partner ? `@${partner.username}` : ''}</div>
-          </div>
-        </button>
-        <button class="glass-btn" aria-label="More" onClick={menu}><Icon name="IconDotsThree" /></button>
-      </header>
-      <div class="messages" ref={list} onScroll={(e) => {
-        const el = e.currentTarget;
-        if (el.scrollHeight + el.scrollTop - el.clientHeight < 80) void loadOlder();
-      }}>
-        {messages.length === 0 && <div class="empty" style={{ margin: 'auto' }}>Say hello 👋</div>}
+    <div class="convo">
+      <div class="messages" onScroll={(e) => { const el = e.currentTarget; if (el.scrollHeight + el.scrollTop - el.clientHeight < 120) void loadOlder(); }}>
+        {loaded && messages.length === 0 && <div class="empty" style={{ margin: 'auto' }}>Say hello 👋</div>}
+        {!loaded && <Spinner />}
         {messages.map((m, i) => {
-          const next = messages[i + 1];
-          const day = new Date(m.createdAt).toDateString();
-          const showDay = !next || new Date(next.createdAt).toDateString() !== day;
+          const older = messages[i + 1];
+          const newer = messages[i - 1];
+          const showDay = !older || m.createdAt - older.createdAt > 3_600_000 || new Date(older.createdAt).toDateString() !== new Date(m.createdAt).toDateString();
+          // The tail on the last bubble of a run from one side.
+          const tail = !newer || newer.isOutgoing !== m.isOutgoing || newer.createdAt - m.createdAt > 120_000;
           return (
-            <div key={m.id}>
-              {showDay && <div class="day-sep">{new Date(m.createdAt).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}</div>}
+            <div key={m.id} data-msg={m.id} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {showDay && <div class="day-sep">{daySeparator(m.createdAt)}</div>}
               <div class={`bubble-row ${m.isOutgoing ? 'is-out' : ''}`}>
-                <div class="bubble">
+                <div class={`bubble ${tail ? 'has-tail' : ''}`}>
                   {m.attachments.map((a) => (
-                    <button onClick={() => openViewer(a)}>{a.kind === 'video' ? <video src={a.url ?? undefined} preload="metadata" muted playsInline /> : <img src={a.url ?? ''} alt="" loading="lazy" />}</button>
+                    <button class="bubble__media" onClick={() => openViewer(a)}>{a.kind === 'video' ? <video src={a.url ?? undefined} poster={a.posterUrl ?? undefined} preload="metadata" muted playsInline /> : <img src={a.url ?? ''} alt="" loading="lazy" />}</button>
                   ))}
-                  {m.body}
-                  <span class="bubble__time">{clock(m.createdAt)}{m.isOutgoing && i === 0 ? (m.isReadByOther ? ' ✓✓' : ' ✓') : ''}</span>
+                  {m.body && <span class="bubble__text">{m.body}</span>}
                 </div>
+                <span class="bubble-time">
+                  {m.isOutgoing && <Tick read={!!m.isReadByOther || m.id !== lastOutgoing} />}
+                  {clock(m.createdAt)}
+                </span>
               </div>
             </div>
           );
         })}
       </div>
       <div class="composer">
-        <button class="glass-btn" aria-label="Attach" onClick={() => fileInput.current?.click()}><Icon name="IconPaperclip" /></button>
+        <GlassButton name="IconPaperclip" label="Attach" onClick={() => fileInput.current?.click()} />
         <input ref={fileInput} type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime" hidden
           onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void attach(f); e.currentTarget.value = ''; }} />
-        <textarea class="composer__field" rows={1} placeholder="Message" value={text} maxLength={4000}
-          onInput={(e) => { setText(e.currentTarget.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${Math.min(e.currentTarget.scrollHeight, 120)}px`; }}
+        <textarea ref={field} class="glass composer__field" rows={1} placeholder="Message" value={text} maxLength={4000} aria-label="Message"
+          onInput={(e) => { setText(e.currentTarget.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${Math.min(e.currentTarget.scrollHeight, 92)}px`; }}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) { e.preventDefault(); void send(); } }} />
-        <button class="send" aria-label="Send" disabled={!text.trim() || sending} onClick={() => send()}><Icon name="IconShareArrow" size={20} /></button>
+        <GlassButton name="IconArrowLeft" label="Send" disabled={!text.trim() || sending} onClick={() => send()} />
       </div>
-    </>
+      <Header left={<BackButton onClick={() => back()} />}
+        center={<button onClick={() => partner && push('profile-view', { id: partner.id })} style={{ textAlign: 'center' }}>
+          <HeaderTitle title={meta?.relatedJobTitle ?? partner?.displayName ?? '…'} sub={meta?.relatedJobTitle ? partner?.displayName : partner ? partner.username : undefined} /></button>}
+        right={<div class="glass glass-pill"><button aria-label="Find in chat" onClick={findInChat}><img src={icon('IconMagnifyingGlass')} alt="" /></button>
+          <button aria-label="More" onClick={menu}><img src={icon('IconDotsThree')} alt="" /></button></div>} />
+    </div>
   );
 }
 
-// Keeps a scroll position stable when content above changes (used by long lists).
-export function useKeepScroll(ref: { current: HTMLElement | null }, dep: unknown) {
-  const saved = useRef(0);
-  useLayoutEffect(() => { if (ref.current) ref.current.scrollTop = saved.current; }, [dep]);
-  return () => { if (ref.current) saved.current = ref.current.scrollTop; };
-}
+/** The sent / read check: grey while sent, pink once read. */
+const Tick = ({ read }: { read: boolean }) => (
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" role="img" aria-label={read ? 'Read' : 'Sent'}>
+    <path d="M2.5 7.5l3 3 6-7" stroke={read ? 'var(--pink)' : 'rgba(236,237,239,.5)'} stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+  </svg>
+);

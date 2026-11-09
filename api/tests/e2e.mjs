@@ -235,6 +235,55 @@ await test('E: uploads need R2 — honest 503 until it is enabled, or a full upl
   expect(!gone.json.items.some((m) => m.id === req.json.mediaId), 'deleted photo still visible');
 });
 
+await test('I: follow / unfollow → notification, counts; Reels grouped by creator; catalog has bios', async () => {
+  const target = business.profileId;
+  await call(creator, 'DELETE', `/v1/profiles/${target}/follow`);
+  const before = (await call(free, 'GET', `/v1/profiles/${target}`)).json.counts.followers;
+  const put = await call(creator, 'PUT', `/v1/profiles/${target}/follow`);
+  expect(put.status === 200 && put.json.following === true, `follow ${put.text}`);
+  expect((await call(creator, 'GET', `/v1/profiles/${target}/follow`)).json.following === true, 'follow not stored');
+  const after = (await call(free, 'GET', `/v1/profiles/${target}`)).json.counts.followers;
+  expect(after === before + 1, `followers ${before} → ${after}`);
+  const notes = (await call(business, 'GET', '/v1/notifications?limit=20')).json.items;
+  expect(notes.some((n) => n.type === 'followed' && n.actor?.id === creator.profileId), 'no followed notification');
+  expectError(await call(creator, 'PUT', `/v1/profiles/${creator.profileId}/follow`), 422, 'same_account');
+  await call(creator, 'DELETE', `/v1/profiles/${target}/follow`);
+  expect((await call(creator, 'GET', `/v1/profiles/${target}/follow`)).json.following === false, 'unfollow failed');
+  const reels = await call(creator, 'GET', '/v1/reels/creators?limit=4');
+  expect(reels.status === 200 && reels.json.items.length > 0, `reels/creators ${reels.text}`);
+  const first = reels.json.items[0];
+  expect(first.author && Array.isArray(first.videos) && first.videos.length >= 1 && first.videos.length <= 10, 'creator page shape');
+  expect(first.videos.every((v) => v.kind === 'video' && v.ownerProfileId === first.author.id), 'videos of another author');
+  if (reels.json.nextCursor) {
+    const next = await call(creator, 'GET', `/v1/reels/creators?limit=4&cursor=${reels.json.nextCursor}`);
+    expect(!next.json.items.some((x) => reels.json.items.some((y) => y.author.id === x.author.id)), 'cursor repeats a creator');
+  }
+  const catalog = await call(free, 'GET', '/v1/profiles?type=creator&limit=5');
+  expect(catalog.json.items.every((c) => typeof c.bio === 'string'), 'catalog without bio');
+});
+
+await test('J: A edits the profile; A asks contact B for a review; B gets it and publishes (or already has)', async () => {
+  const own = (await call(creator, 'GET', `/v1/profiles/${creator.profileId}`)).json;
+  const edited = `${own.bio} · e2e`;
+  expect((await call(creator, 'PATCH', `/v1/profiles/${creator.profileId}`, { bio: edited })).status === 200, 'patch failed');
+  expect((await call(free, 'GET', `/v1/profiles/${creator.profileId}`)).json.bio === edited, 'edit not visible to others');
+  await call(creator, 'PATCH', `/v1/profiles/${creator.profileId}`, { bio: own.bio });
+  // B = the business, a confirmed contact after scenario C.
+  const sheet = (await call(creator, 'GET', '/v1/reviews/requests/sheet')).json.items;
+  const row = sheet.find((i) => i.profile.id === business.profileId);
+  expect(row, 'business is not in the review sheet (contact missing)');
+  if (row.state === 'available') {
+    const r = await call(creator, 'POST', '/v1/reviews/requests', { contactProfileId: business.profileId });
+    expect(r.status < 300, `request ${r.text}`);
+    const notes = (await call(business, 'GET', '/v1/notifications?limit=30')).json.items;
+    expect(notes.some((n) => n.type === 'review_request' && n.actor?.id === creator.profileId), 'no review_request notification');
+    const pub = await call(business, 'POST', '/v1/reviews', { recipientProfileId: creator.profileId, quality: 5, speed: 5, contact: 4, comment: 'E2E: smooth collaboration, on time.' });
+    expect(pub.status < 300 || pub.json?.error?.code === 'already_reviewed', `publish ${pub.text}`);
+  }
+  const list = (await call(free, 'GET', `/v1/reviews?profileId=${creator.profileId}`)).json;
+  expect(list.items.some((x) => x.author?.id === business.profileId) || row.state !== 'available', 'published review not listed');
+});
+
 await test('cleanup: the e2e job is deleted', async () => {
   if (jobId) expect((await call(business, 'DELETE', `/v1/jobs/${jobId}`)).json.status === 'deleted', 'delete failed');
 });

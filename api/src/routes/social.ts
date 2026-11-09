@@ -71,6 +71,42 @@ reels.get('/', requireAuth, requireProfile, async (c) => {
   });
 });
 
+// GET /v1/reels/creators?cursor= — the iOS feed: one vertical page per creator, each with its videos (horizontal),
+// creators ordered by their latest video; cursor by (latest, id).
+reels.get('/creators', requireAuth, requireProfile, async (c) => {
+  const profile = actingProfile(c);
+  const limit = clampLimit(c.req.query('limit'), 5, 10);
+  const cursor = decodeCursor<{ t: number; id: string }>(c.req.query('cursor'));
+  const creators = await c.env.DB.prepare(`SELECT p.id, MAX(m.created_at) AS latest FROM profiles p
+      JOIN media m ON m.owner_profile_id = p.id AND m.kind = 'video' AND m.purpose IN ('portfolio', 'intro') AND m.status = 'ready' AND m.is_public = 1
+      WHERE p.type = 'creator' AND p.status = 'active' AND p.visibility = 'public'
+      GROUP BY p.id HAVING (?1 IS NULL OR (MAX(m.created_at), p.id) < (?1, ?2))
+      ORDER BY latest DESC, p.id DESC LIMIT ?3`).bind(cursor?.t ?? null, cursor?.id ?? null, limit + 1).all<{ id: string; latest: number }>();
+  const page = creators.results.slice(0, limit);
+  if (!page.length) return c.json({ items: [], nextCursor: null });
+  const ids = page.map((p) => p.id);
+  const marks = ids.map(() => '?').join(',');
+  const [cards, videos, follows, bios] = await Promise.all([
+    loadCards(c.env, ids),
+    c.env.DB.prepare(`SELECT ${mediaColumns}, EXISTS (SELECT 1 FROM likes l WHERE l.media_id = m.id AND l.profile_id = ?) AS is_liked
+        FROM media m WHERE m.owner_profile_id IN (${marks}) AND m.kind = 'video' AND m.purpose IN ('portfolio', 'intro')
+        AND m.status = 'ready' AND m.is_public = 1 ORDER BY m.position, m.created_at DESC`).bind(profile.id, ...ids).all<MediaRow & { is_liked: number }>(),
+    c.env.DB.prepare(`SELECT followee_profile_id FROM follows WHERE follower_profile_id = ? AND followee_profile_id IN (${marks})`)
+      .bind(profile.id, ...ids).all<{ followee_profile_id: string }>(),
+    c.env.DB.prepare(`SELECT id, bio FROM profiles WHERE id IN (${marks})`).bind(...ids).all<{ id: string; bio: string }>(),
+  ]);
+  const followed = new Set(follows.results.map((f) => f.followee_profile_id));
+  const bio = new Map(bios.results.map((b) => [b.id, b.bio]));
+  const last = creators.results.length > limit ? page[page.length - 1] : null;
+  return c.json({
+    items: page.map((p) => ({
+      author: cards.get(p.id), bio: bio.get(p.id) ?? '', isFollowing: followed.has(p.id),
+      videos: videos.results.filter((v) => v.owner_profile_id === p.id).slice(0, 10).map((v) => mediaJSON(c.env, v, { isLiked: v.is_liked === 1 })),
+    })),
+    nextCursor: last ? encodeCursor({ t: last.latest, id: last.id }) : null,
+  });
+});
+
 // ─── Search: creators, businesses, jobs, the user's contacts and messages (never other people's private data).
 
 export const search = new Hono<AppEnv>();

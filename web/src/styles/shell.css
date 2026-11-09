@@ -7,12 +7,12 @@
    — оконные слои (шапки, нижнее меню, просмотры) становятся absolute, иначе
      position: fixed привязал бы их к окну браузера, а не к экрану телефона;
    — роль системной строки играет фейковый статус-бар, он занимает верхние
-     33px холста — ровно столько же даёт --safe-top. */
+     62px холста, как safe area iPhone 17 Pro (402 × 874), — столько же даёт --safe-top. */
 
 :root.is-mockup {
-  --safe-top: 33px;
+  --safe-top: 62px;
   /* скруглённый низ экрана мокапа: чуть больше воздуха под иконками меню */
-  --safe-bottom: 6px;
+  --safe-bottom: 34px;
   /* приложение занимает экран мокапа, а не окно браузера */
   --app-h: 100%;
   /* колонка равна экрану телефона, боковых полей нет */
@@ -131,10 +131,6 @@
 .is-mockup #app { position: absolute; inset: 0; overflow: hidden; }
 
 /* ─── телефон без мокапа: приложение на весь экран, с безопасными зонами ─── */
-:root.is-mobile {
-  --safe-top: env(safe-area-inset-top, 0px);
-  --safe-bottom: env(safe-area-inset-bottom, 0px);
-}
 .is-mobile, .is-mobile body { height: 100%; margin: 0; overflow: hidden; background: #0B0B0B; }
 .is-mobile .page-logo, .is-mobile .frame, .is-mobile .ios-statusbar { display: none; }
 .is-mobile .stage, .is-mobile .phone, .is-mobile .screen {

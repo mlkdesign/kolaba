@@ -1,183 +1,276 @@
-// My Profile and public profiles; portfolio, collections, reviews; edit; settings & profile switching; reviews flow.
-import { useRef, useState } from 'preact/hooks';
-import { Card, del, errorText, get, Job, Media, patch, post, posterFrom, ProfilePage, Review, uploadFile } from '../api';
-import { activeProfile, back, openSheet, profiles, push, refresh, refreshTick, reloadSession, setActiveProfile, showToast, signOut, user } from '../state';
-import { Avatar, confirmSheet, DemoTag, Empty, fmtCount, gradientFor, Icon, initials, MediaTile, openViewer, ProBadge, SheetFrame, Spinner, Stars,
-  timeAgo, TopBar, useLoad } from '../ui';
+// My Profile and public profiles (MyProfileView / VisitorProfileView): the 400 pt photo under the status bar with the
+// animated glow, name + PRO, figures, actions, social circles, Portfolio / Reviews; edit, settings, collections, the
+// review request sheet, the review form and the invite landing.
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { Card, del, errorText, get, Job, Media, patch, post, posterFrom, ProfilePage, put, Review, uploadFile } from '../api';
+import { activeProfile, back, isBusiness, openSheet, profiles, push, refresh, refreshTick, reloadSession, setActiveProfile, showToast, signOut, user } from '../state';
+import { ProfileGlow } from '../fx';
+import {
+  Avatar, BackButton, confirmSheet, DemoTag, Empty, fmtCount, GlassButton, gradientFor, Header, HeaderTitle, Icon, icon, initials, MediaTile,
+  openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, Stars, SwipePages, timeAgo, useLoad, usePullToRefresh,
+} from '../ui';
 import { JobCard } from './jobs';
 import { CreateProfile, Legal } from './auth';
 
-type PTab = 'portfolio' | 'collections' | 'reviews' | 'jobs' | 'about';
+const SOCIAL_ICON: Record<string, string> = { instagram: 'SocialInstagramColor', tiktok: 'SocialTikTokColor', youtube: 'SocialYouTubeColor', pinterest: 'SocialPinterestColor' };
+const LINK_ICON: Record<string, string> = { instagram: 'ContactInstagram', tiktok: 'ContactTikTokGlyph', youtube: 'ContactYouTubeGlyph', telegram: 'ContactTelegram',
+  whatsapp: 'ContactWhatsApp', email: 'ContactEmail', pinterest: 'ContactPinterest', website: 'ContactLink' };
 
-export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: PTab }) {
+export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'reviews' }) {
   const profileId = id ?? activeProfile.value?.id;
   const { data: p, error, reload } = useLoad<ProfilePage>((s) => get(`/v1/profiles/${profileId}`, s), [profileId, refreshTick.value]);
-  const own = !id || p?.isOwner;
-  const [tab, setTab] = useState<PTab>(initialTab ?? 'portfolio');
+  const own = !id || !!p?.isOwner;
+  const [tabIndex, setTabIndex] = useState(initialTab === 'reviews' ? 1 : 0);
+  const [scrolled, setScrolled] = useState(0);
   const viewed = useRef(false);
-  if (p && !own && !viewed.current) { viewed.current = true; post(`/v1/profiles/${p.id}/view`).catch(() => {}); }
-  if (error) return <><TopBar title="Profile" onBack={id ? undefined : false} /><div class="below-topbar"><Empty title="Profile not available" text={errorText(error)} /></div></>;
-  if (!p) return <><TopBar title="" onBack={id ? undefined : false} /><div class="below-topbar"><Spinner /></div></>;
+  const { scroller, Indicator } = usePullToRefresh(() => reload());
+  useEffect(() => {
+    if (p && !own && !viewed.current) { viewed.current = true; post(`/v1/profiles/${p.id}/view`).catch(() => {}); }
+  }, [p?.id]);
+
+  const left = id ? <BackButton /> : null;
+  if (error) return <><Header left={left} /><div class="section-top"><Empty title="Profile not available" text={errorText(error)} /></div></>;
+  if (!p) return <><Header left={left} /><div class="phero skeleton" style={{ borderRadius: 0 }} /><Spinner /></>;
+
   const business = p.type === 'business';
-  const tabs: [PTab, string][] = business ? [['jobs', 'Job posts'], ['about', 'About'], ['reviews', 'Reviews']] : [['portfolio', 'Portfolio'], ['collections', 'Collections'], ['reviews', 'Reviews']];
-  const current = tabs.some(([t]) => t === tab) ? tab : tabs[0][0];
+  const right = own
+    ? <GlassButton name="IconGear" label="Settings" onClick={() => push('settings', {}, 'profile')} />
+    : <GlassButton name="IconDotsThree" label="More" onClick={() => profileMenu(p, reload)} />;
+  const tabs = business ? ['Job posts', 'Reviews'] : ['Portfolio', 'Reviews'];
   return (
     <>
-      <header class="topbar">
-        {id && !own ? <button class="glass-btn" aria-label="Back" onClick={back}><Icon name="IconArrowLeft" /></button>
-          : id ? <button class="glass-btn" aria-label="Back" onClick={back}><Icon name="IconArrowLeft" /></button> : <span class="topbar__spacer" />}
-        <span class="grow" />
-        {own ? (
-          <>
-            <button class="glass-btn" aria-label="Request a review" onClick={() => openRequestReview()}><Icon name="IconStarRating" /></button>
-            <button class="glass-btn" aria-label="Settings" onClick={() => push('settings')}><Icon name="IconGear" /></button>
-          </>
-        ) : <button class="glass-btn" aria-label="More" onClick={() => profileMenu(p)}><Icon name="IconDotsThree" /></button>}
-      </header>
-      <div class="scroll">
-        <div class="profile-hero">
-          <div class="monogram" style={{ background: gradientFor(p.displayName) }}>{initials(p.displayName)}</div>
-          {p.avatarUrl && <img src={p.avatarUrl} alt="" style={{ position: 'relative' }} onError={(e) => { e.currentTarget.style.display = 'none'; }} />}
-        </div>
-        <div class={`glow ${business ? 'is-business' : ''}`} />
-        <div class="profile-info">
-          <div class="profile-name">{p.displayName} <ProBadge card={p} /><DemoTag card={p} /></div>
-          <div class="profile-meta">
-            <span>@{p.username}</span>
-            {p.location && <span>{p.flag} {p.location}</span>}
-            {p.category && <span>{p.category}</span>}
-          </div>
-          <div class="row" style={{ marginTop: 10, gap: 8 }}>
-            {p.ratings?.count ? <><Stars value={p.ratings.rating!} size={15} /><b>{p.ratings.rating!.toFixed(1)}</b><span class="muted">· {p.ratings.count} reviews</span></>
-              : <span class="muted" style={{ fontSize: 13 }}>No reviews yet</span>}
-          </div>
-          <div class="figures">
-            {business ? <div class="figure"><b>{p.counts?.jobs ?? 0}</b><span>Jobs</span></div> : <div class="figure"><b>{p.counts?.portfolio ?? 0}</b><span>Portfolio</span></div>}
-            <div class="figure"><b>{p.counts?.contacts ?? 0}</b><span>Contacts</span></div>
-            <div class="figure"><b>{fmtCount(p.counts?.likes ?? 0)}</b><span>Likes</span></div>
-            {p.socialAccounts[0] && <div class="figure"><b>{fmtCount(p.socialAccounts.reduce((s, a) => s + a.followers, 0))}</b><span>Followers</span></div>}
-          </div>
-          {p.bio && <div class="profile-bio selectable">{p.bio}</div>}
-          {p.links.length > 0 && (
-            <div class="links">{p.links.map((l) => (
-              <a class="link-chip" href={l.url} target="_blank" rel="noopener noreferrer nofollow">
-                <img src={`${import.meta.env.BASE_URL}icons/${{ instagram: 'IconInstagram', tiktok: 'IconTikTok', youtube: 'IconYouTube', telegram: 'IconTelegram', whatsapp: 'IconWhatsApp', email: 'ContactEmail' }[l.kind] ?? 'IconGlobe'}.svg`} alt="" />
-                {l.kind === 'website' ? new URL(l.url).hostname : l.kind}
-              </a>
-            ))}</div>
-          )}
-          {own ? (
-            <div class="profile-actions">
-              <button class="btn secondary" onClick={() => push('profile-edit')}>Edit profile</button>
-              {!business && <UploadButton purpose="portfolio" label="Upload" onDone={reload} />}
-              {business && <button class="btn accent" onClick={() => push('job-editor', {}, 'jobs')}>New job</button>}
+      <div class="scroll" ref={scroller} onScroll={(e) => setScrolled(e.currentTarget.scrollTop)}>
+        <Hero p={p} own={own} />
+        <div class="pinfo">
+          <div class="pinfo__block">
+            <div class="pname"><span>{p.displayName}</span><ProBadge card={p} /><DemoTag card={p} /></div>
+            <div class="pmeta">
+              {p.location && <span>{p.flag} {p.location}</span>}
+              {p.category && <span>{p.category}</span>}
+              {!p.location && !p.category && <span>@{p.username}</span>}
             </div>
-          ) : <VisitorActions profile={p} onChange={reload} />}
-        </div>
-        {p.introVideo && (
-          <div class="pad" style={{ margin: '4px 0 16px' }}>
-            <div class="section-title" style={{ margin: '0 0 8px' }}>Intro video</div>
-            <video src={p.introVideo.url ?? undefined} poster={p.introVideo.posterUrl ?? undefined} controls playsInline preload="none"
-              style={{ width: '100%', borderRadius: 18, maxHeight: 420, background: '#000' }} />
+            {p.bio && <Bio text={p.bio} />}
           </div>
-        )}
-        <nav class="seg sticky">
-          {tabs.map(([t, label]) => <button class={`seg__tab ${current === t ? 'is-active' : ''}`} onClick={() => setTab(t)}>{label}{t === 'reviews' && p.ratings?.count ? <span class="seg__count">{p.ratings.count}</span> : null}</button>)}
-        </nav>
-        <div style={{ paddingTop: 12 }}>
-          {current === 'portfolio' && <Portfolio profile={p} own={!!own} />}
-          {current === 'collections' && <Collections profile={p} own={!!own} />}
-          {current === 'reviews' && <Reviews profile={p} own={!!own} />}
-          {current === 'jobs' && <ProfileJobs profile={p} own={!!own} />}
-          {current === 'about' && (
-            <div class="pad">
-              <p class="profile-bio selectable">{p.bio || 'No description yet.'}</p>
-              {p.website && <p><a class="link-chip" href={p.website} target="_blank" rel="noopener noreferrer nofollow">🌐 {new URL(p.website).hostname}</a></p>}
-              {p.languages.length > 0 && <div class="chips">{p.languages.map((l) => <span class="chip">{l.toUpperCase()}</span>)}</div>}
-            </div>
-          )}
+          <Figures p={p} />
+          {own ? <OwnerActions p={p} /> : <VisitorActions profile={p} />}
+          <Socials p={p} />
         </div>
+        <div class="ptab-bar" style={{ marginTop: 22 }}>
+          <PageTabs tabs={tabs} index={tabIndex} onChange={setTabIndex} profile />
+        </div>
+        <SwipePages index={tabIndex} onChange={setTabIndex}>
+          {business ? <ProfileJobs profile={p} own={own} /> : <Portfolio profile={p} own={own} onChange={reload} />}
+          <Reviews profile={p} own={own} />
+        </SwipePages>
+        <div style={{ height: own ? 'var(--tabbar-clear)' : 40 }} />
       </div>
+      <ProfileGlow business={business} />
+      <Indicator />
+      <Header left={left} right={right} blurOpacity={Math.min(Math.max((scrolled - 200) / 120, 0), 1)} />
     </>
   );
 }
 
-function profileMenu(p: ProfilePage) {
-  openSheet((close) => (
-    <SheetFrame title={p.displayName} close={close}>
-      <button class="menu-item is-danger" onClick={async () => {
-        close();
-        try { await post('/v1/reports', { targetType: 'profile', targetId: p.id, reason: 'inappropriate' }); showToast('Reported — our team will review it', 'ok'); }
-        catch (e) { showToast(errorText(e), 'error'); }
-      }}><img src={`${import.meta.env.BASE_URL}icons/IconShieldWarning.svg`} alt="" />Report profile</button>
-    </SheetFrame>
-  ));
-}
-
-function VisitorActions({ profile, onChange }: { profile: ProfilePage; onChange: () => void }) {
-  const { data: rel, reload } = useLoad<{ relation: string; requestId: string | null }>((s) => get(`/v1/contacts/relation/${profile.id}`, s), [profile.id, activeProfile.value?.id]);
-  const contact = async () => {
-    try {
-      if (rel?.relation === 'none') await post('/v1/contacts/requests', { profileId: profile.id });
-      else if (rel?.relation === 'incoming') await post(`/v1/contacts/requests/${rel.requestId}/accept`);
-      else if (rel?.relation === 'requested') await post(`/v1/contacts/requests/${rel.requestId}/cancel`);
-      else if (rel?.relation === 'connected') return confirmSheet('Remove contact?', `${profile.displayName} will no longer be in your contacts.`, 'Remove', async () => {
-        await del(`/v1/contacts/${profile.id}`); reload(); onChange(); refresh();
-      }, true);
-      reload(); onChange(); refresh();
-    } catch (e) { showToast(errorText(e), 'error'); }
-  };
-  const message = async () => {
-    try { const { id } = await post('/v1/conversations', { profileId: profile.id }); push('conversation', { id }); }
-    catch (e) { showToast(errorText(e), 'error'); }
-  };
-  const label = { none: 'Add contact', requested: 'Requested', incoming: 'Accept', connected: 'Connected ✓', unavailable: 'Your profile' }[rel?.relation ?? 'none'];
+function Hero({ p, own }: { p: ProfilePage; own: boolean }) {
+  const [broken, setBroken] = useState(false);
+  const introInput = useRef<HTMLInputElement>(null);
+  const canIntro = own && p.type === 'creator' && p.entitlements?.introVideo === 'available';
+  const intro = p.introVideo;
   return (
-    <div class="profile-actions">
-      <button class={`btn ${rel?.relation === 'none' || rel?.relation === 'incoming' ? 'accent' : 'secondary'}`} disabled={!rel || rel.relation === 'unavailable'} onClick={contact}>{label}</button>
-      <button class="btn secondary" disabled={rel?.relation === 'unavailable'} onClick={message}>Message</button>
-      {rel?.relation === 'connected' && <button class="btn secondary" onClick={() => push('review-form', { recipient: profile })}>Review</button>}
+    <div class="phero">
+      <div class="phero__track">
+        {p.avatarUrl && !broken ? <img src={p.avatarUrl} alt="" draggable={false} onError={() => setBroken(true)} />
+          : <div class="phero__mono" style={{ background: gradientFor(p.displayName) }}>{initials(p.displayName)}</div>}
+      </div>
+      <div class="phero__shade" />
+      {intro ? (
+        <button class="glass intro-pill is-tinted" onClick={() => openViewer(intro)}><span class="play"><img src={icon('IconPlay')} alt="" /></span>Intro Video</button>
+      ) : canIntro ? (
+        <>
+          <button class="glass intro-pill" onClick={() => introInput.current?.click()}><span class="play"><img src={icon('IconPlay')} alt="" /></span>Add Intro Video</button>
+          <input ref={introInput} type="file" accept="video/mp4,video/quicktime" hidden onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void uploadIntro(p, f); e.currentTarget.value = ''; }} />
+        </>
+      ) : null}
     </div>
   );
 }
 
-function UploadButton({ purpose, label, onDone, accept = 'image/jpeg,image/png,image/webp,video/mp4,video/quicktime' }: { purpose: string; label: string; onDone: () => void; accept?: string }) {
+async function uploadIntro(p: ProfilePage, file: File) {
+  try {
+    showToast('Uploading intro video…');
+    const poster = await posterFrom(file);
+    const posterId = poster ? (await uploadFile(poster, 'poster')).id : undefined;
+    const m = await uploadFile(file, 'intro', posterId ? { posterMediaId: posterId } : {});
+    await patch(`/v1/profiles/${p.id}`, { introVideoMediaId: m.id }); refresh(); showToast('Intro video added', 'ok');
+  } catch (e) { showToast(errorText(e), 'error'); }
+}
+
+function Bio({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > 140 || text.split('\n').length > 3;
+  return (
+    <div class={`pbio selectable ${!open && long ? 'is-clamped' : ''}`} onClick={() => long && setOpen(!open)}>{text}</div>
+  );
+}
+
+/** Collabs | Rating | Contacts (iOS). The web has no collaboration count yet, so the first figure is Reviews. */
+function Figures({ p }: { p: ProfilePage }) {
+  const rating = p.ratings?.count ? p.ratings.rating! : null;
+  return (
+    <div class="stats">
+      <div class="stats__cell"><b>{p.ratings?.count ?? 0}</b><span>Reviews</span></div>
+      <div class="stats__cell"><b>{rating ? rating.toFixed(1) : '—'}{rating && <StarIcon size={16} />}</b><span>Rating</span></div>
+      <div class="stats__cell"><b>{fmtCount(p.counts?.contacts ?? 0)}</b><span>Contacts</span></div>
+    </div>
+  );
+}
+
+function OwnerActions({ p }: { p: ProfilePage }) {
+  const share = async () => {
+    const url = (import.meta as any).env?.VITE_APP_URL ?? location.origin + location.pathname;
+    const text = `${p.displayName} (@${p.username}) on kolaba.`;
+    try {
+      if (navigator.share) await navigator.share({ title: text, url });
+      else { await navigator.clipboard.writeText(`${text} ${url}`); showToast('Profile link copied', 'ok'); }
+    } catch { /* cancelled */ }
+  };
+  return (
+    <div class="pactions">
+      <button class="pbtn" onClick={() => push('profile-edit', {}, 'profile')}><img src={icon('IconPencilLine')} alt="" />Edit Profile</button>
+      <button class="pbtn" onClick={share}><img src={icon('IconShareFat')} alt="" />Share Profile</button>
+    </div>
+  );
+}
+
+function VisitorActions({ profile }: { profile: ProfilePage }) {
+  const { data: follow, setData } = useLoad<{ following: boolean }>((s) => get(`/v1/profiles/${profile.id}/follow`, s), [profile.id, activeProfile.value?.id]);
+  const same = profiles.value.some((x) => x.id === profile.id);
+  const message = async () => {
+    try { const { id } = await post('/v1/conversations', { profileId: profile.id }); push('conversation', { id }); }
+    catch (e) { showToast(errorText(e), 'error'); }
+  };
+  const toggle = async () => {
+    const next = !follow?.following;
+    setData({ following: next });
+    try { next ? await put(`/v1/profiles/${profile.id}/follow`) : await del(`/v1/profiles/${profile.id}/follow`); refresh(); }
+    catch (e) { setData({ following: !next }); showToast(errorText(e), 'error'); }
+  };
+  return (
+    <div class="pactions">
+      <button class="pbtn is-accent" disabled={same} onClick={message}>Message</button>
+      <button class="pbtn" disabled={same || !follow} onClick={toggle} aria-pressed={!!follow?.following}>
+        <img src={icon(follow?.following ? 'IconUserMinus' : 'IconUserPlus')} alt="" />{follow?.following ? 'Unfollow' : 'Follow'}
+      </button>
+    </div>
+  );
+}
+
+function Socials({ p }: { p: ProfilePage }) {
+  const links = p.links ?? [];
+  if (!p.socialAccounts.length && !links.length && !p.website) return null;
+  const linkFor = (platform: string) => links.find((l) => l.kind === platform)?.url;
+  return (
+    <div class="socials" data-hscroll>
+      {p.socialAccounts.map((s) => {
+        const href = linkFor(s.platform);
+        const body = <><span class="social__circle"><img src={icon(SOCIAL_ICON[s.platform] ?? 'ContactLink')} alt="" /></span>{fmtCount(s.followers)}</>;
+        return href ? <a class="social" href={href} target="_blank" rel="noopener noreferrer nofollow" aria-label={s.platform}>{body}</a>
+          : <span class="social" aria-label={s.platform}>{body}</span>;
+      })}
+      <button class="social" onClick={() => openLinks(p)}><span class="social__circle is-filled"><img src={icon('IconLink')} alt="" /></span>All Links</button>
+    </div>
+  );
+}
+
+function openLinks(p: ProfilePage) {
+  const items = [...p.links, ...(p.website && !p.links.some((l) => l.kind === 'website') ? [{ kind: 'website', url: p.website }] : [])];
+  openSheet((close) => (
+    <SheetFrame title="Links" close={close}>
+      {!items.length ? <Empty title="No links yet" iconName="IconLink" /> : items.map((l) => (
+        <a class="menu-item" href={l.url} target="_blank" rel="noopener noreferrer nofollow" style={{ textDecoration: 'none' }}>
+          <img src={icon(LINK_ICON[l.kind] ?? 'ContactLink')} alt="" />
+          <span class="grow ellipsis">{l.kind === 'website' || l.kind === 'email' ? l.url.replace(/^(https?:\/\/|mailto:)/, '') : l.kind[0].toUpperCase() + l.kind.slice(1)}</span>
+          <Icon name="IconCaretRight" size={14} />
+        </a>
+      ))}
+    </SheetFrame>
+  ));
+}
+
+/** The visitor's ••• menu: contacts (add / accept / cancel / remove), a review for a contact, report. */
+function profileMenu(p: ProfilePage, reload: () => void) {
+  openSheet((close) => <ProfileMenu p={p} close={close} reload={reload} />);
+}
+
+function ProfileMenu({ p, close, reload }: { p: ProfilePage; close: () => void; reload: () => void }) {
+  const { data: rel } = useLoad<{ relation: string; requestId: string | null }>((s) => get(`/v1/contacts/relation/${p.id}`, s), [p.id]);
+  const run = async (fn: () => Promise<unknown>, ok: string) => {
+    close();
+    try { await fn(); showToast(ok, 'ok'); reload(); refresh(); } catch (e) { showToast(errorText(e), 'error'); }
+  };
+  const r = rel?.relation;
+  return (
+    <SheetFrame title={p.displayName} close={close}>
+      {!rel ? <Spinner /> : (
+        <>
+          {r === 'none' && <button class="menu-item" onClick={() => run(() => post('/v1/contacts/requests', { profileId: p.id }), 'Contact request sent')}><img src={icon('IconUserPlus')} alt="" />Add to contacts</button>}
+          {r === 'incoming' && <button class="menu-item" onClick={() => run(() => post(`/v1/contacts/requests/${rel.requestId}/accept`), 'Contact added')}><img src={icon('IconCheckCircle')} alt="" />Accept contact request</button>}
+          {r === 'requested' && <button class="menu-item" onClick={() => run(() => post(`/v1/contacts/requests/${rel.requestId}/cancel`), 'Request cancelled')}><img src={icon('IconXCircle')} alt="" />Cancel contact request</button>}
+          {r === 'connected' && <button class="menu-item" onClick={() => { close(); push('review-form', { recipient: p }); }}><img src={icon('IconStarRating')} alt="" />Write a review</button>}
+          {r === 'connected' && <button class="menu-item" onClick={() => { close(); confirmSheet('Remove contact?', `${p.displayName} will no longer be in your contacts.`, 'Remove', () => run(() => del(`/v1/contacts/${p.id}`), 'Contact removed'), true); }}><img src={icon('IconUserMinus')} alt="" />Remove from contacts</button>}
+        </>
+      )}
+      <button class="menu-item is-danger" onClick={() => run(() => post('/v1/reports', { targetType: 'profile', targetId: p.id, reason: 'inappropriate' }), 'Reported — our team will review it')}>
+        <img src={icon('IconShieldWarning')} alt="" />Report profile</button>
+    </SheetFrame>
+  );
+}
+
+// ─── Portfolio: All · Collections · Sort · + ───
+
+function Portfolio({ profile, own, onChange }: { profile: ProfilePage; own: boolean; onChange: () => void }) {
+  const [mode, setMode] = useState<'all' | 'collections'>('all');
+  const [newest, setNewest] = useState(true);
+  const { data, reload } = useLoad<{ items: Media[] }>((s) => get(`/v1/profiles/${profile.id}/media?purpose=portfolio`, s), [profile.id, refreshTick.value]);
   const input = useRef<HTMLInputElement>(null);
   const [progress, setProgress] = useState<number | null>(null);
   const upload = async (file: File) => {
     setProgress(0);
     try {
       let posterMediaId: string | undefined;
-      if (file.type.startsWith('video/')) {
-        const poster = await posterFrom(file);
-        if (poster) posterMediaId = (await uploadFile(poster, 'poster')).id;
-      }
-      await uploadFile(file, purpose, posterMediaId ? { posterMediaId } : {}, (f) => setProgress(f));
-      showToast('Uploaded', 'ok'); onDone(); refresh();
+      if (file.type.startsWith('video/')) { const poster = await posterFrom(file); if (poster) posterMediaId = (await uploadFile(poster, 'poster')).id; }
+      await uploadFile(file, 'portfolio', posterMediaId ? { posterMediaId } : {}, (f) => setProgress(f));
+      showToast('Uploaded', 'ok'); reload(); onChange(); refresh();
     } catch (e) { showToast(errorText(e), 'error'); } finally { setProgress(null); }
   };
+  const items = [...(data?.items ?? [])].sort((a, b) => (newest ? b.createdAt - a.createdAt : a.createdAt - b.createdAt));
+  const openOwn = (m: Media) => openViewer(m, (close) => (
+    <span class="glass-btn is-end" style={{ position: 'absolute', top: 'var(--header-top)', right: 'var(--side)' }}>
+      <GlassButton name="IconTrash" label="Delete" onClick={() => confirmSheet('Delete this?', 'It disappears from your profile and collections.', 'Delete', async () => {
+        try { await del(`/v1/media/${m.id}`); close(); reload(); refresh(); showToast('Deleted', 'ok'); } catch (e) { showToast(errorText(e), 'error'); }
+      }, true)} />
+    </span>
+  ));
   return (
     <>
-      <button class="btn accent" disabled={progress !== null} onClick={() => input.current?.click()}>{progress !== null ? `${Math.round(progress * 100)}%` : label}</button>
-      <input ref={input} type="file" accept={accept} hidden onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void upload(f); e.currentTarget.value = ''; }} />
+      <div class="mfilter">
+        <button class={`mchip ${mode === 'all' ? 'is-on' : ''}`} onClick={() => setMode('all')}>All</button>
+        <button class={`mchip ${mode === 'collections' ? 'is-on' : ''}`} onClick={() => setMode('collections')}>Collections</button>
+        <span class="grow" />
+        {mode === 'all' && <button class="mchip" style={{ color: '#fff' }} onClick={() => setNewest(!newest)} aria-label={newest ? 'Newest first' : 'Oldest first'}>
+          <img src={icon('IconSortAscending')} alt="" style={{ transform: newest ? undefined : 'scaleY(-1)' }} />Sort</button>}
+        {own && mode === 'all' && <button class="mchip" style={{ color: '#fff', padding: '0 8px' }} aria-label="Upload" disabled={progress !== null}
+          onClick={() => input.current?.click()}>{progress !== null ? `${Math.round(progress * 100)}%` : <img src={icon('IconPlus')} alt="" style={{ width: 20, height: 20 }} />}</button>}
+        <input ref={input} type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime" hidden
+          onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void upload(f); e.currentTarget.value = ''; }} />
+      </div>
+      {mode === 'collections' ? <Collections profile={profile} own={own} /> : !data ? <Spinner /> : !items.length ? (
+        <Empty title={own ? 'Your portfolio is empty' : 'No portfolio yet'} text={own ? 'Upload photos and videos of your best work with +.' : undefined} iconName="IconImages" />
+      ) : (
+        <div class="mgrid">{items.map((m) => <MediaTile media={m} key={m.id} onOpen={own ? () => openOwn(m) : undefined} />)}</div>
+      )}
     </>
   );
-}
-
-function Portfolio({ profile, own }: { profile: ProfilePage; own: boolean }) {
-  const { data, reload } = useLoad<{ items: Media[] }>((s) => get(`/v1/profiles/${profile.id}/media?purpose=portfolio`, s), [profile.id, refreshTick.value]);
-  if (!data) return <Spinner />;
-  if (!data.items.length) return <Empty title={own ? 'Your portfolio is empty' : 'No portfolio yet'} text={own ? 'Upload photos and videos of your best work.' : undefined} iconName="IconImages" />;
-  const openOwn = (m: Media) => openSheet((close) => (
-    <div class="viewer">
-      {m.kind === 'video' ? <video src={m.url ?? undefined} poster={m.posterUrl ?? undefined} controls autoPlay playsInline /> : <img src={m.url ?? ''} alt="" />}
-      <button class="glass-btn" aria-label="Close" onClick={close}><Icon name="IconSheetClose" size={16} /></button>
-      <button class="glass-btn" style={{ left: 'auto', right: 'var(--gutter)' }} aria-label="Delete" onClick={() => confirmSheet('Delete this?', 'It disappears from your profile and collections.', 'Delete', async () => {
-        try { await del(`/v1/media/${m.id}`); close(); reload(); refresh(); showToast('Deleted', 'ok'); } catch (e) { showToast(errorText(e), 'error'); }
-      }, true)}><Icon name="IconTrash" /></button>
-    </div>
-  ));
-  return <div class="media-grid">{data.items.map((m) => <MediaTile media={m} key={m.id} onOpen={own ? () => openOwn(m) : undefined} />)}</div>;
 }
 
 function Collections({ profile, own }: { profile: ProfilePage; own: boolean }) {
@@ -186,27 +279,24 @@ function Collections({ profile, own }: { profile: ProfilePage; own: boolean }) {
   const locked = own && profile.entitlements?.collections === 'locked';
   const create = () => openSheet((close) => <NewCollection close={close} onDone={() => { close(); reload(); }} />);
   if (!data) return <Spinner />;
+  if (locked) return <div class="locked"><b>Collections are part of creator.pro</b>Group your work into folders for brands. Test environment: PRO is a test entitlement — no payments.</div>;
+  if (!data.items.length && !own) return <Empty title="No collections yet" iconName="IconFolderSimpleDashed" />;
   return (
-    <>
-      {locked && <div class="locked-card"><b>Collections are part of creator.pro</b>
-        <div class="soft" style={{ fontSize: 13, marginTop: 4 }}>Group your work into folders for brands. Test environment: PRO is a test entitlement — no payments.</div></div>}
-      {!data.items.length && !own ? <Empty title="No collections yet" iconName="IconFolderSimpleDashed" /> : (
-        <div class="folders">
-          {own && !locked && (
-            <button class="folder" onClick={create}><div class="folder__cover tile-add" style={{ display: 'grid' }}><Icon name="IconPlus" /></div>
-              <div class="folder__title">New folder</div></button>
-          )}
-          {data.items.map((col) => (
-            <button class="folder" key={col.id} onClick={() => push('collection', { id: col.id, own })}>
-              <div class="folder__cover">{col.cover ? <img src={(col.cover.kind === 'video' ? col.cover.posterUrl : col.cover.url) ?? ''} alt="" loading="lazy" /> : null}</div>
-              <div class="folder__title ellipsis">{col.title}</div>
-              <div class="folder__count">{col.itemsCount} {col.itemsCount === 1 ? 'item' : 'items'}</div>
-            </button>
-          ))}
-        </div>
+    <div class="folders" data-hscroll style={{ flexWrap: 'wrap', overflow: 'visible' }}>
+      {data.items.map((col) => (
+        <button class="folder" key={col.id} onClick={() => push('collection', { id: col.id, own })}>
+          <div class="folder__cover">{col.cover ? <img src={(col.cover.kind === 'video' ? col.cover.posterUrl : col.cover.url) ?? ''} alt="" loading="lazy" /> : <Icon name="IconFolderSimpleDashed" size={28} />}</div>
+          <div class="folder__title ellipsis">{col.title}</div>
+          <div class="folder__count">{col.itemsCount} {col.itemsCount === 1 ? 'item' : 'items'}</div>
+        </button>
+      ))}
+      {own && (
+        <button class="folder" onClick={create} style={{ marginLeft: data.items.length ? 30 : 0 }}>
+          <div class="folder__cover is-new"><Icon name="IconNewFolderPlus" size={28} /></div>
+          <div class="folder__title">New folder</div>
+        </button>
       )}
-      {!data.items.length && own && !locked && <Empty title="No collections yet" text="Create a folder and add your portfolio to it." iconName="IconFolderSimpleDashed" />}
-    </>
+    </div>
   );
 }
 
@@ -217,8 +307,8 @@ function NewCollection({ close, onDone }: { close: () => void; onDone: () => voi
   };
   return (
     <SheetFrame title="New folder" close={close}>
-      <input class="input" maxLength={40} placeholder="Folder name" value={title} onInput={(e) => setTitle(e.currentTarget.value)} />
-      <button class="btn accent" style={{ marginTop: 14 }} disabled={!title.trim()} onClick={save}>Create</button>
+      <label class="field"><input maxLength={40} placeholder="Folder name" value={title} onInput={(e) => setTitle(e.currentTarget.value)} /></label>
+      <button class="btn" style={{ marginTop: 16 }} disabled={!title.trim()} onClick={save}>Create</button>
     </SheetFrame>
   );
 }
@@ -226,31 +316,31 @@ function NewCollection({ close, onDone }: { close: () => void; onDone: () => voi
 export function CollectionScreen({ id, own }: { id: string; own: boolean }) {
   const { data, reload } = useLoad<{ collection: any; items: Media[] }>((s) => get(`/v1/media/collections/${id}/items`, s), [id, refreshTick.value]);
   const edit = () => openSheet((close) => <PickMedia close={close} selected={data!.items.map((m) => m.id)} onSave={async (ids) => {
-    try { await fetchPut(`/v1/media/collections/${id}/items`, { mediaIds: ids }); close(); reload(); refresh(); } catch (e) { showToast(errorText(e), 'error'); }
+    try { await put(`/v1/media/collections/${id}/items`, { mediaIds: ids }); close(); reload(); refresh(); } catch (e) { showToast(errorText(e), 'error'); }
   }} />, true);
   const remove = () => confirmSheet('Delete folder?', 'Its photos and videos stay in your portfolio.', 'Delete folder', async () => {
     try { await del(`/v1/media/collections/${id}`); refresh(); back(); } catch (e) { showToast(errorText(e), 'error'); }
   }, true);
+  const menu = () => openSheet((close) => (
+    <SheetFrame title="Folder" close={close}>
+      <button class="menu-item" onClick={() => { close(); edit(); }}><img src={icon('IconImages')} alt="" />Choose items</button>
+      <button class="menu-item is-danger" onClick={() => { close(); remove(); }}><img src={icon('IconTrash')} alt="" />Delete folder</button>
+    </SheetFrame>
+  ));
   return (
     <>
-      <TopBar title={data?.collection.title ?? ''}>
-        {own ? <button class="glass-btn" aria-label="Edit" onClick={() => openSheet((close) => (
-          <SheetFrame title="Folder" close={close}>
-            <button class="menu-item" onClick={() => { close(); edit(); }}>Choose items</button>
-            <button class="menu-item is-danger" onClick={() => { close(); remove(); }}>Delete folder</button>
-          </SheetFrame>))}><Icon name="IconDotsThree" /></button> : <span class="topbar__spacer" />}
-      </TopBar>
       <div class="scroll">
-        <div class="below-topbar" />
+        <div class="section-top" />
         {!data ? <Spinner /> : !data.items.length ? <Empty title="This folder is empty" text={own ? 'Add photos and videos from your portfolio.' : undefined}>
-          {own && <button class="btn small accent" onClick={edit}>Add items</button>}</Empty> :
-          <div class="media-grid">{data.items.map((m) => <MediaTile media={m} key={m.id} />)}</div>}
+          {own && <button class="btn is-small" onClick={edit}>Add items</button>}</Empty> :
+          <div class="mgrid">{data.items.map((m) => <MediaTile media={m} key={m.id} />)}</div>}
+        <div style={{ height: 40 }} />
       </div>
+      <Header left={<BackButton />} center={<HeaderTitle title={data?.collection.title ?? ''} sub={data ? `${data.items.length} items` : undefined} />}
+        right={own ? <GlassButton name="IconDotsThree" label="Folder menu" onClick={menu} /> : null} />
     </>
   );
 }
-
-const fetchPut = (path: string, body: unknown) => import('../api').then((a) => a.put(path, body));
 
 function PickMedia({ close, selected, onSave }: { close: () => void; selected: string[]; onSave: (ids: string[]) => void }) {
   const [ids, setIds] = useState<string[]>(selected);
@@ -258,14 +348,11 @@ function PickMedia({ close, selected, onSave }: { close: () => void; selected: s
   return (
     <SheetFrame title="Choose items" close={close}>
       {!data ? <Spinner /> : (
-        <div class="media-grid">{data.items.map((m) => (
-          <button class="media-tile" style={{ outline: ids.includes(m.id) ? '3px solid var(--accent)' : 'none', outlineOffset: -3 }}
-            onClick={() => setIds((x) => (x.includes(m.id) ? x.filter((y) => y !== m.id) : [...x, m.id]))}>
-            <img src={(m.kind === 'video' ? m.posterUrl : m.url) ?? ''} alt="" loading="lazy" />
-          </button>
+        <div class="mgrid" style={{ padding: 0 }}>{data.items.map((m) => (
+          <MediaTile media={m} picked={ids.includes(m.id)} onOpen={() => setIds((x) => (x.includes(m.id) ? x.filter((y) => y !== m.id) : [...x, m.id]))} />
         ))}</div>
       )}
-      <button class="btn accent" style={{ marginTop: 16 }} onClick={() => onSave(ids)}>Save ({ids.length})</button>
+      <button class="btn" style={{ marginTop: 16 }} onClick={() => onSave(ids)}>Save ({ids.length})</button>
     </SheetFrame>
   );
 }
@@ -274,9 +361,15 @@ function ProfileJobs({ profile, own }: { profile: ProfilePage; own: boolean }) {
   const { data } = useLoad<{ items: Job[] }>((s) => get(`/v1/profiles/${profile.id}/jobs`, s), [profile.id, refreshTick.value]);
   if (!data) return <Spinner />;
   if (profile.hideJobPosts && !own) return <Empty title="Job posts are hidden" iconName="IconBriefcase" />;
-  if (!data.items.length) return <Empty title="No job posts" iconName="IconBriefcase" />;
-  return <>{data.items.map((j) => <JobCard job={j} key={j.id} />)}</>;
+  if (!data.items.length) return (
+    <Empty title="No job posts" iconName="IconBriefcase" text={own ? 'Publish your first job — creators apply in the job. section.' : undefined}>
+      {own && <button class="btn is-small" onClick={() => push('job-editor', {}, 'jobs')}>Create a job</button>}
+    </Empty>
+  );
+  return <div class="feed">{data.items.map((j, i) => <>{i > 0 && <div class="post-sep" style={{ margin: '20px 0', height: 1, background: 'var(--separator)' }} />}<JobCard job={j} key={j.id} /></>)}</div>;
 }
+
+// ─── Reviews (FEATURE 23): the summary, criteria bars, cards ───
 
 function Reviews({ profile, own }: { profile: ProfilePage; own: boolean }) {
   const [sort, setSort] = useState('newest');
@@ -284,35 +377,41 @@ function Reviews({ profile, own }: { profile: ProfilePage; own: boolean }) {
   if (!data) return <Spinner />;
   const s = data.summary;
   return (
-    <>
+    <div style={{ paddingTop: 16 }}>
       {s?.count ? (
-        <div class="rating-summary">
-          <div class="center"><div class="rating-big">{s.rating.toFixed(1)}</div><Stars value={s.rating} /><div class="muted" style={{ fontSize: 12, marginTop: 4 }}>{s.count} reviews</div></div>
-          <div class="bars">{(['quality', 'speed', 'contact'] as const).map((k) => (
-            <div class="bar-row"><span style={{ textTransform: 'capitalize' }}>{k}</span><div class="bar"><i style={{ width: `${(s[k] / 5) * 100}%` }} /></div><b>{s[k].toFixed(1)}</b></div>
-          ))}</div>
+        <div class="rsummary">
+          <div class="rsummary__top"><span class="rsummary__big">{s.rating.toFixed(1)}</span>
+            <div><Stars value={s.rating} /><div class="muted" style={{ fontSize: 12, marginTop: 4 }}>{s.count} {s.count === 1 ? 'review' : 'reviews'}</div></div></div>
+          {(['quality', 'speed', 'contact'] as const).map((k) => (
+            <div class="crit"><span style={{ textTransform: 'capitalize' }}>{k}</span><div class="crit__bar"><i style={{ width: `${(s[k] / 5) * 100}%` }} /></div><b>{s[k].toFixed(1)}</b></div>
+          ))}
         </div>
       ) : null}
-      {own && <div class="pad" style={{ marginBottom: 12 }}><button class="btn secondary" onClick={() => openRequestReview()}>Request a review</button></div>}
+      {own && <div class="pad" style={{ margin: '8px 0 16px' }}><button class="pbtn" style={{ width: '100%' }} onClick={() => openRequestReview()}><img src={icon('IconStarRating')} alt="" />Request a review</button></div>}
       {data.items.length > 1 && (
-        <div class="pad chips" style={{ marginBottom: 12 }}>
-          {[['newest', 'Newest'], ['oldest', 'Oldest'], ['highest', 'Highest'], ['lowest', 'Lowest']].map(([v, l]) => (
-            <button class={`chip ${sort === v ? 'is-on' : ''}`} onClick={() => setSort(v)}>{l}</button>
+        <div class="mfilter" style={{ paddingTop: 0 }}>
+          {[['newest', 'Newest'], ['highest', 'Highest'], ['lowest', 'Lowest']].map(([v, l]) => (
+            <button class={`mchip ${sort === v ? 'is-on' : ''}`} onClick={() => setSort(v)}>{l}</button>
           ))}
         </div>
       )}
       {!data.items.length ? <Empty title="No reviews yet" text={own ? 'Ask your contacts for a review.' : 'Reviews come from confirmed contacts.'} iconName="IconStarRating" /> :
-        data.items.map((r) => (
-          <div class="review" key={r.id}>
-            <button class="row" style={{ textAlign: 'left', width: '100%' }} onClick={() => r.author && push('profile-view', { id: r.author.id })}>
-              <Avatar card={r.author} size={38} />
-              <div class="grow"><div style={{ fontWeight: 600, fontSize: 14 }}>{r.author?.displayName}</div><div class="muted" style={{ fontSize: 12 }}>{timeAgo(r.createdAt)}</div></div>
-              <Stars value={r.rating} /><b style={{ fontSize: 13 }}>{r.rating.toFixed(1)}</b>
-            </button>
-            <div class="review__text selectable">{r.comment}</div>
-          </div>
-        ))}
-    </>
+        data.items.map((r) => <ReviewCard r={r} key={r.id} />)}
+    </div>
+  );
+}
+
+function ReviewCard({ r }: { r: Review }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div class="rcard">
+      <button class="rcard__head" onClick={() => r.author && push('profile-view', { id: r.author.id })}>
+        <Avatar card={r.author} size={48} />
+        <div class="grow"><div class="rcard__name ellipsis">{r.author?.displayName}</div><div class="rcard__date">{timeAgo(r.createdAt)}</div></div>
+        <Stars value={r.rating} />
+      </button>
+      <div class={`rcard__text selectable ${open ? '' : 'lines-3'}`} onClick={() => setOpen(!open)}>{r.comment}</div>
+    </div>
   );
 }
 
@@ -332,27 +431,25 @@ function RequestReview({ close }: { close: () => void }) {
     catch (e) { setData({ items: data!.items.map((i) => (i.profile.id === card.id ? { ...i, state: 'available' } : i)) }); showToast(errorText(e), 'error'); }
   };
   const invite = async () => {
-    try {
-      const { url } = await post('/v1/reviews/invites');
-      openSheet((c2) => <InviteLink url={url} close={c2} />);
-    } catch (e) { showToast(errorText(e), 'error'); }
+    try { const { url } = await post('/v1/reviews/invites'); openSheet((c2) => <InviteLink url={url} close={c2} />); }
+    catch (e) { showToast(errorText(e), 'error'); }
   };
   const items = (data?.items ?? []).filter((i) => !query || i.profile.displayName.toLowerCase().includes(query.toLowerCase()));
   return (
     <SheetFrame title="Request a review" close={close}>
-      {sent && <div class="notice" style={{ marginTop: 0, marginBottom: 12, color: '#fff' }}>✓ Request sent to {sent}. They'll see it in their notifications.</div>}
-      <label class="search" style={{ marginBottom: 12 }}><img src={`${import.meta.env.BASE_URL}icons/IconMagnifyingGlass.svg`} alt="" />
+      {sent && <div class="notice" style={{ marginBottom: 12, color: '#fff' }}>✓ Request sent to {sent}. They'll see it in their notifications.</div>}
+      <label class="field" style={{ marginBottom: 12 }}><img src={icon('IconMagnifyingGlass')} alt="" />
         <input placeholder="Search contacts" value={query} onInput={(e) => setQuery(e.currentTarget.value)} /></label>
       {!data ? <Spinner /> : !items.length ? <Empty title="No contacts yet" text="Reviews come from confirmed contacts. Invite someone new below." iconName="IconUserPlus" /> :
         items.map((i) => (
-          <div class="list-row" style={{ padding: '10px 0' }} key={i.profile.id}>
-            <Avatar card={i.profile} size={42} />
-            <div class="grow"><div class="list-row__title ellipsis">{i.profile.displayName}</div><div class="list-row__sub">{i.profile.location}</div></div>
-            {i.state === 'available' ? <button class="btn small accent" onClick={() => request(i.profile)}>Request</button>
-              : <span class="btn small secondary" aria-disabled="true">{i.state === 'requested' ? 'Requested' : 'Reviewed'}</span>}
+          <div class="row" style={{ padding: '8px 0' }} key={i.profile.id}>
+            <Avatar card={i.profile} size={48} />
+            <div class="grow"><div class="list-row__title ellipsis">{i.profile.displayName}</div><div class="list-row__sub ellipsis">{i.profile.location ?? `@${i.profile.username}`}</div></div>
+            {i.state === 'available' ? <button class="btn is-small" onClick={() => request(i.profile)}>Request</button>
+              : <span class="btn is-small is-dim" aria-disabled="true">{i.state === 'requested' ? 'Requested' : 'Reviewed'}</span>}
           </div>
         ))}
-      <button class="btn secondary" style={{ marginTop: 16 }} onClick={invite}>Invite someone new</button>
+      <button class="btn is-milky" style={{ marginTop: 16 }} onClick={invite}>Invite someone new</button>
     </SheetFrame>
   );
 }
@@ -366,9 +463,9 @@ function InviteLink({ url, close }: { url: string; close: () => void }) {
   };
   return (
     <SheetFrame title="Invite link" close={close}>
-      <p class="soft" style={{ fontSize: 14, lineHeight: 1.45, marginTop: 0 }}>Send this one-time link to someone outside kolaba. They sign up, become your contact and can leave one review. It expires in 14 days.</p>
-      <div class="input selectable" style={{ display: 'flex', alignItems: 'center', fontSize: 13, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{url}</div>
-      <button class="btn accent" style={{ marginTop: 14 }} onClick={share}>Send link</button>
+      <p class="muted" style={{ fontSize: 14, lineHeight: 1.45, marginTop: 0 }}>Send this one-time link to someone outside kolaba. They sign up, become your contact and can leave one review. It expires in 14 days.</p>
+      <div class="field selectable" style={{ fontSize: 13, overflow: 'hidden', whiteSpace: 'nowrap' }}><span class="ellipsis">{url}</span></div>
+      <button class="btn" style={{ marginTop: 16 }} onClick={share}>Send link</button>
     </SheetFrame>
   );
 }
@@ -381,29 +478,26 @@ export function ReviewForm({ recipient, requestId, inviteId }: { recipient: Card
   const overall = complete ? (scores.quality + scores.speed + scores.contact) / 3 : null;
   const submit = async () => {
     setBusy(true);
-    try {
-      await post('/v1/reviews', { recipientProfileId: recipient.id, ...scores, comment, requestId, inviteId });
-      showToast('Review published', 'ok'); refresh(); back();
-    } catch (e) { showToast(errorText(e), 'error'); } finally { setBusy(false); }
+    try { await post('/v1/reviews', { recipientProfileId: recipient.id, ...scores, comment, requestId, inviteId }); showToast('Review published', 'ok'); refresh(); back(); }
+    catch (e) { showToast(errorText(e), 'error'); } finally { setBusy(false); }
   };
   return (
     <>
-      <TopBar title="Write a review" />
-      <div class="scroll no-tabbar">
-        <div class="below-topbar" />
-        <div class="pad">
-          <div class="row" style={{ marginBottom: 18 }}><Avatar card={recipient} size={48} /><div><div style={{ fontWeight: 700 }}>{recipient.displayName}</div><div class="muted" style={{ fontSize: 13 }}>{recipient.location}</div></div></div>
+      <div class="scroll">
+        <div class="section-top pad">
+          <div class="row" style={{ marginBottom: 22 }}><Avatar card={recipient} size={48} /><div><div style={{ fontWeight: 600 }}>{recipient.displayName}</div><div class="muted" style={{ fontSize: 14 }}>{recipient.location}</div></div></div>
           {(['quality', 'speed', 'contact'] as const).map((k) => (
             <div style={{ marginBottom: 16 }}>
-              <div class="field__label" style={{ textTransform: 'capitalize' }}>{k}</div>
-              <div class="score-picker">{[1, 2, 3, 4, 5].map((n) => <button class={scores[k] === n ? 'is-on' : ''} onClick={() => setScores({ ...scores, [k]: n })}>{n}</button>)}</div>
+              <span class="label" style={{ textTransform: 'capitalize' }}>{k}</span>
+              <div class="score-picker">{[1, 2, 3, 4, 5].map((n) => <button class={scores[k] >= n ? 'is-on' : ''} aria-label={`${k} ${n}`} onClick={() => setScores({ ...scores, [k]: n })}>{n}</button>)}</div>
             </div>
           ))}
           <textarea class="textarea" maxLength={2000} placeholder="How was it to work together?" value={comment} onInput={(e) => setComment(e.currentTarget.value)} />
-          {overall && <div class="muted" style={{ margin: '10px 4px' }}>Overall: <b style={{ color: '#fff' }}>{overall.toFixed(1)}</b></div>}
-          <button class="btn accent" style={{ marginTop: 14 }} disabled={busy || !complete} onClick={submit}>Publish review</button>
+          {overall && <div class="row muted" style={{ margin: '12px 8px', gap: 6 }}>Overall <b style={{ color: '#fff' }}>{overall.toFixed(1)}</b><StarIcon size={14} /></div>}
+          <button class="btn" style={{ margin: '16px 0 40px' }} disabled={busy || !complete} onClick={submit}>{busy ? 'Publishing…' : 'Publish review'}</button>
         </div>
       </div>
+      <Header left={<BackButton />} center={<HeaderTitle title="Write a review" />} />
     </>
   );
 }
@@ -412,7 +506,7 @@ export function ReviewForm({ recipient, requestId, inviteId }: { recipient: Card
 
 export function EditProfileScreen() {
   const { data: p } = useLoad<ProfilePage>((s) => get(`/v1/profiles/${activeProfile.value!.id}`, s), [activeProfile.value?.id]);
-  if (!p) return <><TopBar title="Edit profile" /><div class="below-topbar"><Spinner /></div></>;
+  if (!p) return <><Header left={<BackButton />} center={<HeaderTitle title="Edit Profile" />} /><div class="section-top"><Spinner /></div></>;
   return <EditForm p={p} />;
 }
 
@@ -423,7 +517,6 @@ function EditForm({ p }: { p: ProfilePage }) {
   const [busy, setBusy] = useState(false);
   const set = (k: keyof typeof form) => (e: any) => setForm({ ...form, [k]: e.currentTarget.value });
   const avatarInput = useRef<HTMLInputElement>(null);
-  const introInput = useRef<HTMLInputElement>(null);
   const save = async () => {
     setBusy(true);
     try {
@@ -437,50 +530,34 @@ function EditForm({ p }: { p: ProfilePage }) {
     } catch (e) { showToast(errorText(e), 'error'); } finally { setBusy(false); }
   };
   const uploadAvatar = async (file: File) => {
-    try { const m = await uploadFile(file, 'avatar'); await patch(`/v1/profiles/${p.id}`, { avatarMediaId: m.id }); await reloadSession(); refresh(); showToast('Photo updated', 'ok'); }
+    try { showToast('Uploading photo…'); const m = await uploadFile(file, 'avatar'); await patch(`/v1/profiles/${p.id}`, { avatarMediaId: m.id }); await reloadSession(); refresh(); showToast('Photo updated', 'ok'); }
     catch (e) { showToast(errorText(e), 'error'); }
   };
-  const uploadIntro = async (file: File) => {
-    try {
-      const poster = await posterFrom(file);
-      const posterId = poster ? (await uploadFile(poster, 'poster')).id : undefined;
-      const m = await uploadFile(file, 'intro', posterId ? { posterMediaId: posterId } : {});
-      await patch(`/v1/profiles/${p.id}`, { introVideoMediaId: m.id }); refresh(); showToast('Intro video added', 'ok');
-    } catch (e) { showToast(errorText(e), 'error'); }
-  };
+  const field = (k: keyof typeof form, label: string, placeholder = '') => (
+    <div><span class="label">{label}</span><label class="field"><input value={form[k]} placeholder={placeholder} onInput={set(k)} /></label></div>
+  );
   return (
     <>
-      <TopBar title="Edit profile" />
-      <div class="scroll no-tabbar">
-        <div class="below-topbar" />
-        <div class="pad">
-          <div class="row" style={{ marginBottom: 18 }}>
-            <Avatar card={p} size={72} />
-            <button class="btn small secondary" onClick={() => avatarInput.current?.click()}>Change photo</button>
-            <input ref={avatarInput} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void uploadAvatar(f); }} />
+      <div class="scroll">
+        <div class="section-top pad form-gap" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div class="row" style={{ gap: 16 }}>
+            <Avatar card={activeProfile.value ?? p} size={80} />
+            <button class="btn is-small is-milky" onClick={() => avatarInput.current?.click()}>Change photo</button>
+            <input ref={avatarInput} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void uploadAvatar(f); e.currentTarget.value = ''; }} />
           </div>
-          <label class="field"><span class="field__label">{p.type === 'business' ? 'Business name' : 'Name'}</span><input class="input" maxLength={80} value={form.displayName} onInput={set('displayName')} /></label>
-          <label class="field"><span class="field__label">Username</span><input class="input" value={form.username} onInput={(e) => setForm({ ...form, username: e.currentTarget.value.toLowerCase().replace(/[^a-z0-9._]/g, '') })} /></label>
-          <label class="field"><span class="field__label">{p.type === 'business' ? 'Description' : 'Bio'}</span><textarea class="textarea" maxLength={1000} value={form.bio} onInput={set('bio')} /></label>
-          <div class="row">
-            <label class="field grow"><span class="field__label">City</span><input class="input" value={form.city} onInput={set('city')} /></label>
-            <label class="field grow"><span class="field__label">Country</span><input class="input" value={form.country} onInput={set('country')} /></label>
-          </div>
-          <label class="field"><span class="field__label">{p.type === 'business' ? 'Category' : 'Niche'}</span><input class="input" value={form.category} onInput={set('category')} /></label>
-          <label class="field"><span class="field__label">Website</span><input class="input" value={form.website} onInput={set('website')} placeholder="example.com" /></label>
-          <label class="field"><span class="field__label">Instagram link</span><input class="input" value={form.instagram} onInput={set('instagram')} /></label>
-          <label class="field"><span class="field__label">TikTok link</span><input class="input" value={form.tiktok} onInput={set('tiktok')} /></label>
-          {p.type === 'creator' && (
-            <div class="field">
-              <span class="field__label">Intro video {p.entitlements?.introVideo === 'locked' ? '· creator.pro' : ''}</span>
-              <button class="btn secondary" disabled={p.entitlements?.introVideo !== 'available'} onClick={() => introInput.current?.click()}>
-                {p.introVideo ? 'Replace intro video' : 'Add intro video'}</button>
-              <input ref={introInput} type="file" accept="video/mp4,video/quicktime" hidden onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void uploadIntro(f); }} />
-            </div>
-          )}
-          <button class="btn accent" style={{ margin: '10px 0 30px' }} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save'}</button>
+          {field('displayName', p.type === 'business' ? 'Business name' : 'Name')}
+          <div><span class="label">Username</span><label class="field"><span class="muted">@</span><input value={form.username}
+            onInput={(e) => setForm({ ...form, username: e.currentTarget.value.toLowerCase().replace(/[^a-z0-9._]/g, '') })} /></label></div>
+          <div><span class="label">{p.type === 'business' ? 'Description' : 'Bio'}</span><textarea class="textarea" maxLength={1000} value={form.bio} onInput={set('bio')} /></div>
+          <div class="row">{field('city', 'City')}{field('country', 'Country')}</div>
+          {field('category', p.type === 'business' ? 'Category' : 'Niche')}
+          {field('website', 'Website', 'example.com')}
+          {field('instagram', 'Instagram link', 'https://instagram.com/…')}
+          {field('tiktok', 'TikTok link', 'https://tiktok.com/@…')}
+          <button class="btn" style={{ margin: '8px 0 40px' }} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save'}</button>
         </div>
       </div>
+      <Header left={<BackButton />} center={<HeaderTitle title="Edit Profile" />} />
     </>
   );
 }
@@ -500,44 +577,50 @@ export function SettingsScreen() {
   };
   return (
     <>
-      <TopBar title="Settings" />
-      <div class="scroll no-tabbar">
-        <div class="below-topbar" />
-        <div class="section-title">Profiles</div>
-        {profiles.value.map((p) => (
-          <button class="list-row" onClick={() => p.id !== activeProfile.value?.id && setActiveProfile(p.id)}>
-            <Avatar card={p} size={42} />
-            <div class="grow"><div class="list-row__title">{p.displayName} <ProBadge card={p} /></div><div class="list-row__sub">{p.type === 'business' ? 'Business' : 'Creator'} · @{p.username}</div></div>
-            {p.id === activeProfile.value?.id && <Icon name="IconCheckActive" />}
-          </button>
-        ))}
-        <div class="pad" style={{ display: 'grid', gap: 8, marginTop: 6 }}>
-          {!hasCreator && <button class="btn secondary" onClick={() => setAdding('creator')}>Add creator profile</button>}
-          {businessCount < 5 && <button class="btn secondary" onClick={() => setAdding('business')}>Add business profile ({businessCount}/5, free)</button>}
+      <div class="scroll">
+        <div class="section-top" />
+        <div class="group-title">Profiles</div>
+        <div class="group">
+          {profiles.value.map((p) => (
+            <button class="list-row" onClick={() => p.id !== activeProfile.value?.id && setActiveProfile(p.id)}>
+              <Avatar card={p} size={40} />
+              <div class="grow"><div class="list-row__title row" style={{ gap: 8 }}><span class="ellipsis">{p.displayName}</span><ProBadge card={p} compact /></div>
+                <div class="list-row__sub">{p.type === 'business' ? 'Business' : 'Creator'} · @{p.username}</div></div>
+              {p.id === activeProfile.value?.id && <Icon name="IconCheckActive" />}
+            </button>
+          ))}
+          {!hasCreator && <button class="list-row" onClick={() => setAdding('creator')}><Icon name="IconAddAccount" /><div class="grow">Add creator profile</div></button>}
+          {businessCount < 5 && <button class="list-row" onClick={() => setAdding('business')}><Icon name="IconAddAccount" /><div class="grow">Add business profile <span class="muted">({businessCount}/5, free)</span></div></button>}
         </div>
-        <div class="section-title">Privacy</div>
-        {page?.settings && (
-          <>
+        <div class="group-title">Privacy</div>
+        {page?.settings ? (
+          <div class="group">
             <button class="list-row" onClick={() => setting('showLocation', !page.settings!.showLocation)}><div class="grow">Show location</div><span class={`toggle ${page.settings.showLocation ? 'is-on' : ''}`} /></button>
             <button class="list-row" onClick={() => setting('showLinks', !page.settings!.showLinks)}><div class="grow">Show social links</div><span class={`toggle ${page.settings.showLinks ? 'is-on' : ''}`} /></button>
             <div class="list-row"><div class="grow">Who can message me</div>
-              <select class="select" style={{ width: 'auto', height: 36 }} value={page.settings.whoCanMessage} onChange={(e) => setting('whoCanMessage', e.currentTarget.value)}>
+              <select class="select" style={{ width: 'auto', height: 36, background: 'transparent', color: 'var(--muted)', textAlign: 'right' }} value={page.settings.whoCanMessage}
+                onChange={(e) => setting('whoCanMessage', e.currentTarget.value)}>
                 <option value="everyone">Everyone</option><option value="contacts">Contacts</option><option value="nobody">Nobody</option>
               </select></div>
             {page.type === 'business' && <button class="list-row" onClick={() => setting('hideJobPosts', !page.settings!.hideJobPosts)}><div class="grow">Hide my job posts</div><span class={`toggle ${page.settings.hideJobPosts ? 'is-on' : ''}`} /></button>}
-          </>
-        )}
-        <div class="section-title">Account</div>
-        <div class="list-row"><div class="grow"><div>{user.value?.email}</div><div class="list-row__sub">{user.value?.isDemo ? 'Demo account (shared for testing)' : 'Test environment account'}</div></div></div>
-        <button class="list-row" onClick={() => setLegal(true)}><div class="grow">Terms & Privacy</div><Icon name="IconCaretRight" size={16} /></button>
-        {profiles.value.length > 1 && (
-          <button class="list-row" style={{ color: '#FF5A5A' }} onClick={() => confirmSheet('Deactivate this profile?', 'It disappears for others; its open jobs close.', 'Deactivate', async () => {
-            try { await del(`/v1/profiles/${activeProfile.value!.id}`); await reloadSession(); setActiveProfile(profiles.value[0]?.id ?? null); } catch (e) { showToast(errorText(e), 'error'); }
-          }, true)}>Deactivate this profile</button>
-        )}
-        <div class="pad" style={{ marginTop: 18 }}><button class="btn danger" onClick={() => confirmSheet('Log out?', 'You can log in again any time.', 'Log out', () => void signOut())}>Log out</button></div>
-        <div class="center muted" style={{ fontSize: 11, margin: '18px 0' }}>kolaba. web · WEB MVP 01 · test environment</div>
+          </div>
+        ) : <Spinner />}
+        <div class="group-title">Account</div>
+        <div class="group">
+          <div class="list-row"><div class="grow"><div>{user.value?.email}</div><div class="list-row__sub">{user.value?.isDemo ? 'Demo account (shared for testing)' : 'Test environment account'}</div></div></div>
+          <button class="list-row" onClick={() => push('contacts', {})}><div class="grow">My Contacts</div><img class="chev" src={icon('IconCaretRight')} alt="" /></button>
+          <button class="list-row" onClick={() => setLegal(true)}><div class="grow">Terms & Privacy</div><img class="chev" src={icon('IconCaretRight')} alt="" /></button>
+          {profiles.value.length > 1 && (
+            <button class="list-row" style={{ color: '#FF453A' }} onClick={() => confirmSheet('Deactivate this profile?', 'It disappears for others; its open jobs close.', 'Deactivate', async () => {
+              try { await del(`/v1/profiles/${activeProfile.value!.id}`); await reloadSession(); setActiveProfile(profiles.value[0]?.id ?? null); } catch (e) { showToast(errorText(e), 'error'); }
+            }, true)}>Deactivate this profile</button>
+          )}
+        </div>
+        <div class="pad" style={{ marginTop: 24 }}><button class="btn is-danger" onClick={() => confirmSheet('Log out?', 'You can log in again any time.', 'Log out', () => void signOut())}>
+          <img class="btn__icon" src={icon('IconSignOut')} alt="" />Log out</button></div>
+        <div class="center muted" style={{ fontSize: 11, margin: '18px 0 40px' }}>kolaba. web · test environment{isBusiness.value ? ' · business' : ''}</div>
       </div>
+      <Header left={<BackButton />} center={<HeaderTitle title="Settings" />} />
     </>
   );
 }
@@ -556,17 +639,17 @@ export function InviteScreen({ token }: { token: string }) {
   };
   return (
     <>
-      <TopBar title="Review invite" />
-      <div class="scroll no-tabbar"><div class="below-topbar" />
+      <div class="scroll"><div class="section-top" />
         {error ? <Empty title="Invite not available" text={errorText(error)} /> : !data ? <Spinner /> : (
           <div class="pad center">
             <div style={{ display: 'grid', placeItems: 'center', margin: '20px 0' }}><Avatar card={data.recipient} size={88} /></div>
             <h2 style={{ margin: '0 0 6px' }}>{data.recipient.displayName}</h2>
-            <p class="soft">asks you for a review. Accepting adds you to each other's contacts; then you can leave one review.</p>
-            <button class="btn accent" onClick={accept}>Accept and write a review</button>
+            <p class="muted">asks you for a review. Accepting adds you to each other's contacts; then you can leave one review.</p>
+            <button class="btn" onClick={accept}>Accept and write a review</button>
           </div>
         )}
       </div>
+      <Header left={<BackButton />} center={<HeaderTitle title="Review invite" />} />
     </>
   );
 }

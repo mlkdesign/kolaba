@@ -1,54 +1,56 @@
-// job. — the Jobs feed (Job posts · Applied · Saved / Job posts · My jobs), job details, Apply, editor, applicants.
+// job. — ProjectsView: the feed (Job posts · Applied · Saved / Job posts · My jobs, swiped sideways), the post card
+// (Figma 654:13119), job details (400 pt media, content 38 pt over it, the glass Apply bar), Apply, applicants, editor.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Application, del, errorText, get, Job, Page, patch, post, put } from '../api';
-import { activeProfile, isBusiness, openSheet, push, refresh, refreshTick, showToast } from '../state';
-import { Avatar, confirmSheet, DemoTag, Empty, Icon, openViewer, price, ProBadge, RatingInline, SheetFrame, Spinner, timeAgo, TopBar, useDebounced, useLoad } from '../ui';
+import { activeProfile, back, isBusiness, openSheet, push, refresh, refreshTick, showToast } from '../state';
+import {
+  Avatar, BackButton, confirmSheet, Empty, Gallery, GlassButton, Header, HeaderTitle, Icon, icon, Logo, MediaTile, openViewer, PageTabs, postDate, price,
+  priceCaption, ProBadge, RatingInline, SheetFrame, Spinner, SwipePages, timeAgo, useDebounced, useLoad, usePullToRefresh,
+} from '../ui';
 
 type JobsTab = 'all' | 'applied' | 'saved' | 'mine';
 
 export function JobsScreen() {
   const business = isBusiness.value;
   const tabs: [JobsTab, string][] = business ? [['all', 'Job posts'], ['mine', 'My jobs']] : [['all', 'Job posts'], ['applied', 'Applied'], ['saved', 'Saved']];
-  const [current, setCurrent] = useState<JobsTab>('all');
+  const [index, setIndex] = useState(0);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
   const q = useDebounced(query.trim(), 350);
-  useEffect(() => { if (!tabs.some(([t]) => t === current)) setCurrent('all'); }, [business]);
+  useEffect(() => { setIndex(0); }, [business]);
+  const reloads = useRef<Record<string, () => Promise<unknown>>>({});
+  const { scroller, Indicator } = usePullToRefresh(() => reloads.current[tabs[index][0]]?.());
+  const create = () => {
+    if (activeProfile.value?.entitlements.canCreateJobs) push('job-editor', {});
+    else showToast('Jobs are published from a business profile — add one in Settings.');
+  };
   return (
     <>
-      <header class="topbar">
-        {searching ? (
-          <>
-            <label class="search"><img src={`${import.meta.env.BASE_URL}icons/IconMagnifyingGlass.svg`} alt="" />
-              <input autoFocus placeholder="Search jobs" value={query} onInput={(e) => setQuery(e.currentTarget.value)} /></label>
-            <button class="glass-btn" aria-label="Close search" onClick={() => { setSearching(false); setQuery(''); }}><Icon name="IconSheetClose" size={14} /></button>
-          </>
-        ) : (
-          <>
-            <div class="logo-word">job<i>.</i></div>
-            <button class="glass-btn" aria-label="Search" onClick={() => setSearching(true)}><Icon name="IconMagnifyingGlass" /></button>
-            {business && <button class="glass-btn" aria-label="Create job" onClick={() => push('job-editor', {})}><Icon name="IconPlus" /></button>}
-          </>
-        )}
-      </header>
-      <div class="scroll">
-        <div class="below-topbar" />
-        <nav class="seg sticky" aria-label="Jobs tabs">
-          {tabs.map(([t, label]) => (
-            <button class={`seg__tab ${current === t ? 'is-active' : ''}`} onClick={() => setCurrent(t)}>{label}</button>
-          ))}
-        </nav>
-        <div style={{ height: 14 }} />
-        {/* Each tab keeps its own list (and position) while mounted. */}
-        {tabs.map(([t]) => (
-          <div hidden={t !== current} key={t}><JobList tab={t} q={q} /></div>
-        ))}
+      <div class="scroll" ref={scroller}>
+        <div class="section-top" />
+        <PageTabs tabs={tabs.map(([, l]) => l)} index={index} onChange={setIndex} />
+        <SwipePages index={index} onChange={setIndex}>
+          {tabs.map(([t]) => <JobList key={t} tab={t} q={q} register={(fn) => { reloads.current[t] = fn; }} />)}
+        </SwipePages>
+        <div style={{ height: 'var(--tabbar-clear)' }} />
       </div>
+      <Indicator />
+      <Header
+        left={searching ? null : <GlassButton name="IconPlus" label="Create job" onClick={create} />}
+        center={searching ? null : <Logo word="job" />}
+        right={searching ? (
+          <div class="row" style={{ width: 'calc(100vw - 32px)', maxWidth: 'calc(386px - 32px)', gap: 8 }}>
+            <label class="glass search"><img src={icon('IconMagnifyingGlass')} alt="" />
+              <input autoFocus placeholder="Search jobs" value={query} onInput={(e) => setQuery(e.currentTarget.value)} /></label>
+            <GlassButton name="IconSheetClose" label="Close search" onClick={() => { setSearching(false); setQuery(''); }} />
+          </div>
+        ) : <GlassButton name="IconMagnifyingGlass" label="Search" onClick={() => setSearching(true)} />}
+      />
     </>
   );
 }
 
-function JobList({ tab, q }: { tab: JobsTab; q: string }) {
+function JobList({ tab, q, register }: { tab: JobsTab; q: string; register: (fn: () => Promise<unknown>) => void }) {
   const [items, setItems] = useState<Job[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -59,18 +61,18 @@ function JobList({ tab, q }: { tab: JobsTab; q: string }) {
     try {
       const page = await get<Page<Job>>(`/v1/jobs?tab=${tab}&q=${encodeURIComponent(q)}${!reset && cursor ? `&cursor=${cursor}` : ''}`);
       setItems((prev) => (reset ? page.items : [...prev, ...page.items]));
-      setCursor(page.nextCursor);
-      setError('');
+      setCursor(page.nextCursor); setError('');
     } catch (e) { setError(errorText(e)); } finally { setLoading(false); }
   };
+  register(() => load(true));
   useEffect(() => { void load(true); }, [tab, q, refreshTick.value, activeProfile.value?.id]);
   useEffect(() => {
     if (!sentinel.current) return;
-    const io = new IntersectionObserver((entries) => { if (entries[0].isIntersecting && cursor && !loading) void load(false); }, { rootMargin: '400px' });
+    const io = new IntersectionObserver((entries) => { if (entries[0].isIntersecting && cursor && !loading) void load(false); }, { rootMargin: '600px' });
     io.observe(sentinel.current);
     return () => io.disconnect();
   }, [cursor, loading]);
-  if (error && !items.length) return <Empty title="Couldn't load jobs" text={error}><button class="btn small secondary" onClick={() => load(true)}>Try again</button></Empty>;
+  if (error && !items.length) return <Empty title="Couldn't load jobs" text={error}><button class="btn is-small is-milky" onClick={() => load(true)}>Try again</button></Empty>;
   if (!loading && !items.length) {
     const texts: Record<JobsTab, [string, string]> = {
       all: ['No jobs found', q ? 'Try another search.' : 'New jobs appear here.'],
@@ -81,62 +83,100 @@ function JobList({ tab, q }: { tab: JobsTab; q: string }) {
     return <Empty title={texts[tab][0]} text={texts[tab][1]} iconName="IconBriefcase" />;
   }
   return (
-    <>
-      {items.map((job) => <JobCard job={job} key={job.id} onChange={(j) => setItems((all) => all.map((x) => (x.id === j.id ? j : x)))} />)}
+    <div class="feed">
+      {!items.length && loading && <div class="skeleton" style={{ height: 420 }} />}
+      {items.map((job, i) => (
+        <div key={job.id}>
+          {i > 0 && <div style={{ height: 1, background: 'var(--separator)', margin: '20px 0' }} />}
+          <JobCard job={job} onChange={(j) => setItems((all) => all.map((x) => (x.id === j.id ? j : x)))} />
+        </div>
+      ))}
       <div ref={sentinel} />
-      {loading && <Spinner />}
-    </>
-  );
-}
-
-export function JobCard({ job, onChange }: { job: Job; onChange?: (job: Job) => void }) {
-  const amount = price(job);
-  const toggleSave = async (e: Event) => {
-    e.stopPropagation();
-    try {
-      job.isSaved ? await del(`/v1/jobs/${job.id}/save`) : await put(`/v1/jobs/${job.id}/save`);
-      onChange?.({ ...job, isSaved: !job.isSaved });
-    } catch (err) { showToast(errorText(err), 'error'); }
-  };
-  return (
-    <div class="job-card" role="button" tabIndex={0} onClick={() => push('job', { id: job.id })} onKeyDown={(e) => e.key === 'Enter' && push('job', { id: job.id })}>
-      <div class="job-card__head">
-        <Avatar card={job.owner} size={40} />
-        <div class="grow">
-          <div class="job-card__author ellipsis">{job.owner?.displayName} <ProBadge card={job.owner ?? { isPro: false, type: 'business' }} /></div>
-          <div class="job-card__meta">{job.flag} {job.location} · {timeAgo(job.publishedAt ?? job.createdAt)}</div>
-        </div>
-        {job.status !== 'published' && <span class={`status-pill ${job.status}`}>{job.status}</span>}
-        {!isBusiness.value && job.status !== 'draft' && (
-          <button class="bookmark" aria-label={job.isSaved ? 'Remove from saved' : 'Save'} onClick={toggleSave}>
-            <Icon name={job.isSaved ? 'IconBookmarkFilled' : 'IconBookmarkSimple'} size={18} />
-          </button>
-        )}
-      </div>
-      {job.media.length > 0 && (
-        <div class="job-card__media">
-          {job.media.slice(0, 6).map((m) => <img src={(m.kind === 'video' ? m.posterUrl : m.url) ?? ''} alt="" loading="lazy" />)}
-        </div>
-      )}
-      <div class="job-card__body">
-        <div class="job-card__title">{job.title}</div>
-        <div class="job-card__desc">{job.description}</div>
-      </div>
-      <div class="job-card__foot">
-        {amount && <span class="price">{amount}</span>}
-        {job.deliverables.slice(0, 2).map((d) => <span class="tag">{d.count} {d.kind}</span>)}
-        <span class="grow" />
-        <span class="muted" style={{ fontSize: 12 }}>{job.applicationsCount} applied</span>
-        {job.myApplicationId && <span class="tag" style={{ color: 'var(--success)' }}>Applied</span>}
-      </div>
+      {loading && items.length > 0 && <Spinner />}
     </div>
   );
 }
 
+/** ProjectPostView: author row, media, headline + price, place + languages, description, applicants · bookmark · View project. */
+export function JobCard({ job, onChange }: { job: Job; onChange?: (job: Job) => void }) {
+  const amount = price(job);
+  const open = () => push('job', { id: job.id });
+  const toggleSave = async (e: Event) => {
+    e.stopPropagation();
+    const next = !job.isSaved;
+    onChange?.({ ...job, isSaved: next });
+    try { next ? await put(`/v1/jobs/${job.id}/save`) : await del(`/v1/jobs/${job.id}/save`); }
+    catch (err) { onChange?.({ ...job, isSaved: !next }); showToast(errorText(err), 'error'); }
+  };
+  const mine = activeProfile.value?.id === job.ownerProfileId;
+  const applied = !!job.myApplicationId;
+  return (
+    <article class="post">
+      <div class="row" style={{ gap: 10 }}>
+        <button class="post__head" onClick={() => job.owner && push('profile-view', { id: job.owner.id })}>
+          <Avatar card={job.owner} size={48} ring />
+          <div class="grow">
+            <div class="post__author"><span class="ellipsis">{job.owner?.displayName}</span><ProBadge card={job.owner} compact /></div>
+            <div class="post__date">{postDate(job.publishedAt ?? job.createdAt)}</div>
+          </div>
+        </button>
+        {job.status !== 'published' && <span class={`status-pill ${job.status}`}>{job.status}</span>}
+        <button class="post__more" aria-label="More" onClick={() => jobMenu(job)}><img src={icon('IconDotsThree')} alt="" /></button>
+      </div>
+      {job.media.length > 0 && <Gallery media={job.media} onOpen={(m) => (m.kind === 'video' ? openViewer(m) : open())} />}
+      <div class="post__info" onClick={open} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && open()}>
+        <div class="post__headline">
+          <div class="post__title">{job.title}</div>
+          {amount && <div class="post__price">{amount}<small>{priceCaption(job.compensationType)}</small></div>}
+        </div>
+        <div class="post__req">
+          <span>{job.flag && <span class="flag">{job.flag}</span>}{job.location}</span>
+          {job.languages.length > 0 && <span><img src={icon('IconTranslate')} alt="" />{job.languages.map(langName).join(', ')}</span>}
+        </div>
+        <div class="post__desc lines-4">{job.description}</div>
+      </div>
+      <div class="post__actions" style={{ padding: '0 8px' }}>
+        <div class="post__applicants"><img src={icon('IconUser')} alt="" />{job.applicationsCount} {job.applicationsCount === 1 ? 'applicant' : 'applicants'}</div>
+        {!isBusiness.value && !mine && job.status !== 'draft' && (
+          <button class="bookmark" aria-label={job.isSaved ? 'Remove from saved' : 'Save'} aria-pressed={job.isSaved} onClick={toggleSave}>
+            <img src={icon(job.isSaved ? 'IconBookmarkFilled' : 'IconBookmarkSimple')} alt="" />
+          </button>
+        )}
+        <button class={`view-btn ${applied || job.status === 'closed' ? 'is-dim' : ''}`} onClick={open}>
+          {applied ? 'Applied' : job.status === 'closed' ? 'Closed' : 'View project'}<img src={icon('IconCaretRight')} alt="" />
+        </button>
+      </div>
+    </article>
+  );
+}
+
+const LANGS: Record<string, string> = { en: 'English', tr: 'Turkish', ru: 'Russian', uk: 'Ukrainian', id: 'Indonesian', es: 'Spanish', de: 'German', fr: 'French',
+  it: 'Italian', pl: 'Polish', th: 'Thai', ar: 'Arabic', pt: 'Portuguese', ja: 'Japanese', ko: 'Korean', zh: 'Chinese', vi: 'Vietnamese', kk: 'Kazakh' };
+const langName = (code: string) => LANGS[code.toLowerCase()] ?? code.toUpperCase();
+
+function jobMenu(job: Job) {
+  const mine = activeProfile.value?.id === job.ownerProfileId;
+  openSheet((close) => (
+    <SheetFrame title={job.title} close={close}>
+      <button class="menu-item" onClick={async () => {
+        close();
+        const text = `${job.title} — ${job.owner?.displayName ?? ''} on kolaba.`;
+        try { if (navigator.share) await navigator.share({ title: text, url: location.href }); else { await navigator.clipboard.writeText(text); showToast('Copied', 'ok'); } } catch { /* */ }
+      }}><img src={icon('IconJobShare')} alt="" />Share</button>
+      {mine && <button class="menu-item" onClick={() => { close(); push('job-editor', { job }); }}><img src={icon('IconJobEdit')} alt="" />Edit</button>}
+      {!mine && <button class="menu-item is-danger" onClick={async () => {
+        close();
+        try { await post('/v1/reports', { targetType: 'job', targetId: job.id, reason: 'inappropriate' }); showToast('Reported — thank you', 'ok'); } catch (e) { showToast(errorText(e), 'error'); }
+      }}><img src={icon('IconShieldWarning')} alt="" />Report</button>}
+    </SheetFrame>
+  ));
+}
+
 export function JobScreen({ id }: { id: string }) {
   const { data: job, error, setData, reload } = useLoad<Job>((s) => get(`/v1/jobs/${id}`, s), [id, refreshTick.value]);
-  if (error) return <><TopBar title="Job" /><div class="below-topbar"><Empty title="Job not available" text={errorText(error)} /></div></>;
-  if (!job) return <><TopBar title="Job" /><div class="below-topbar"><Spinner /></div></>;
+  const [scrolled, setScrolled] = useState(0);
+  if (error) return <><Header left={<BackButton />} /><div class="section-top"><Empty title="Job not available" text={errorText(error)} /></div></>;
+  if (!job) return <><Header left={<BackButton />} /><div class="jhero skeleton" style={{ borderRadius: 0 }} /><Spinner /></>;
   const me = activeProfile.value;
   const isOwner = me?.id === job.ownerProfileId;
   const amount = price(job);
@@ -146,80 +186,70 @@ export function JobScreen({ id }: { id: string }) {
     catch (e) { showToast(errorText(e), 'error'); }
   }, true);
   const message = async () => {
-    try {
-      const { id: conversationId } = await post('/v1/conversations', { profileId: job.ownerProfileId, jobId: job.id });
-      push('conversation', { id: conversationId });
-    } catch (e) { showToast(errorText(e), 'error'); }
+    try { const { id: conversationId } = await post('/v1/conversations', { profileId: job.ownerProfileId, jobId: job.id }); push('conversation', { id: conversationId }); }
+    catch (e) { showToast(errorText(e), 'error'); }
   };
   const setStatus = async (action: 'publish' | 'close') => {
     try { setData(await post(`/v1/jobs/${job.id}/${action}`)); showToast(action === 'publish' ? 'Published' : 'Closed — no more applications', 'ok'); refresh(); }
     catch (e) { showToast(errorText(e), 'error'); }
   };
+  const save = async () => {
+    try { job.isSaved ? await del(`/v1/jobs/${job.id}/save`) : await put(`/v1/jobs/${job.id}/save`); setData({ ...job, isSaved: !job.isSaved }); refresh(); }
+    catch (e) { showToast(errorText(e), 'error'); }
+  };
   return (
     <>
-      <TopBar title={job.title}>
-        {!isOwner && !isBusiness.value && (
-          <button class="glass-btn" aria-label="Save" onClick={async () => {
-            try { job.isSaved ? await del(`/v1/jobs/${job.id}/save`) : await put(`/v1/jobs/${job.id}/save`); setData({ ...job, isSaved: !job.isSaved }); refresh(); }
-            catch (e) { showToast(errorText(e), 'error'); }
-          }}><Icon name={job.isSaved ? 'IconBookmarkFilled' : 'IconBookmarkSimple'} /></button>
-        )}
-        {isOwner && <button class="glass-btn" aria-label="Edit" onClick={() => push('job-editor', { job })}><Icon name="IconPencilSimple" /></button>}
-      </TopBar>
-      <div class="scroll no-tabbar" style={{ paddingBottom: 120 }}>
-        <div class="below-topbar" />
-        {job.media.length > 0 && (
-          <div class="job-card__media" style={{ padding: '0 var(--gutter)', marginBottom: 14 }}>
-            {job.media.map((m) => (
-              <button onClick={() => openViewer(m)} style={{ position: 'relative' }}>
-                <img src={(m.kind === 'video' ? m.posterUrl : m.url) ?? ''} alt="" style={{ width: 150, height: 210 }} />
-                {m.kind === 'video' && <span class="media-tile__badge"><Icon name="IconPlay" size={11} /></span>}
-              </button>
-            ))}
-          </div>
-        )}
-        <div class="pad">
-          <button class="row" style={{ textAlign: 'left', width: '100%' }} onClick={() => job.owner && push('profile-view', { id: job.owner.id })}>
-            <Avatar card={job.owner} size={44} />
+      <div class="scroll" onScroll={(e) => setScrolled(e.currentTarget.scrollTop)}>
+        <div class="jhero">
+          {job.media.length ? <Gallery media={job.media} onOpen={(m) => openViewer(m)} /> : <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(160deg,#2a0f24,#0B0B0B)' }} />}
+          <div class="phero__shade" />
+        </div>
+        <div class="jbody">
+          <button class="post__head" onClick={() => job.owner && push('profile-view', { id: job.owner.id })}>
+            <Avatar card={job.owner} size={48} ring />
             <div class="grow">
-              <div style={{ fontWeight: 600 }}>{job.owner?.displayName} <ProBadge card={job.owner ?? { isPro: false, type: 'business' }} />{job.owner && <DemoTag card={job.owner} />}</div>
+              <div class="post__author"><span class="ellipsis">{job.owner?.displayName}</span><ProBadge card={job.owner} compact /></div>
               <RatingInline rating={job.owner?.rating ?? null} count={job.owner?.reviewsCount ?? 0} />
             </div>
             {job.status !== 'published' && <span class={`status-pill ${job.status}`}>{job.status}</span>}
           </button>
-          <h1 style={{ fontSize: 22, margin: '18px 0 6px', lineHeight: 1.25 }}>{job.title}</h1>
-          <div class="muted" style={{ fontSize: 13 }}>{job.flag} {job.location} · Published {timeAgo(job.publishedAt ?? job.createdAt)} ago · {job.viewsCount} views</div>
-          <div class="figures">
-            <div class="figure"><b>{amount ?? '—'}</b><span>{job.compensationType === 'range' ? 'Budget range' : job.compensationType === 'fixed' ? 'Fixed price' : 'Compensation'}</span></div>
-            <div class="figure"><b>{job.applicationsCount}</b><span>Applied</span></div>
-            <div class="figure"><b>{job.deadline ? new Date(job.deadline).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '—'}</b><span>Deadline</span></div>
+          <div class="post__headline">
+            <h1 class="jtitle" style={{ margin: 0, flex: 1 }}>{job.title}</h1>
+            {amount && <div class="post__price">{amount}<small>{priceCaption(job.compensationType)}</small></div>}
           </div>
-          <p class="profile-bio selectable">{job.description}</p>
-          {job.deliverables.length > 0 && (<><div class="section-title" style={{ margin: '18px 0 8px' }}>Deliverables</div>
-            <div class="chips">{job.deliverables.map((d) => <span class="chip">{d.count} {d.kind}</span>)}</div></>)}
-          {job.languages.length > 0 && (<><div class="section-title" style={{ margin: '18px 0 8px' }}>Languages</div>
-            <div class="chips">{job.languages.map((l) => <span class="chip">{l.toUpperCase()}</span>)}</div></>)}
-          {job.tags.length > 0 && (<><div class="section-title" style={{ margin: '18px 0 8px' }}>Tags</div>
-            <div class="chips">{job.tags.map((t) => <span class="chip">{t}</span>)}</div></>)}
+          <div class="post__req" style={{ flexWrap: 'wrap', rowGap: 8 }}>
+            <span>{job.flag && <span class="flag">{job.flag}</span>}{job.location}</span>
+            {job.languages.length > 0 && <span><img src={icon('IconTranslate')} alt="" />{job.languages.map(langName).join(', ')}</span>}
+            <span><img src={icon('IconJobViews')} alt="" />{job.viewsCount}</span>
+          </div>
+          <div class="figure-row">
+            <div class="figure-card"><b>{job.applicationsCount}</b><span>Applicants</span></div>
+            <div class="figure-card"><b>{job.deadline ? new Date(job.deadline).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '—'}</b><span>Deadline</span></div>
+            <div class="figure-card"><b>{timeAgo(job.publishedAt ?? job.createdAt)}</b><span>Published</span></div>
+          </div>
+          <div class="post__desc selectable" style={{ fontSize: 16, whiteSpace: 'pre-line' }}>{job.description}</div>
+          {job.deliverables.length > 0 && (<><div class="subhead">Deliverables</div><div class="tags">{job.deliverables.map((d) => <span class="tag">{d.count} {d.kind}</span>)}</div></>)}
+          {job.tags.length > 0 && (<><div class="subhead">Tags</div><div class="tags">{job.tags.map((t) => <span class="tag">{t}</span>)}</div></>)}
+          {isOwner && (
+            <button class="pbtn" style={{ flex: 'none', marginTop: 8 }} onClick={() => push('applicants', { job })}>
+              <img src={icon('IconUser')} alt="" />View applicants ({job.applicationsCount})</button>
+          )}
         </div>
-        {isOwner && <Applicants job={job} />}
       </div>
-      <div class="bottom-bar">
+      <Header left={<BackButton />} blurOpacity={Math.min(Math.max((scrolled - 260) / 120, 0), 1)}
+        right={isOwner ? <GlassButton name="IconPencilSimple" label="Edit" onClick={() => push('job-editor', { job })} />
+          : !isBusiness.value ? <GlassButton name={job.isSaved ? 'IconBookmarkFilled' : 'IconBookmarkSimple'} label={job.isSaved ? 'Remove from saved' : 'Save'} onClick={save} /> : null} />
+      <div class="apply-bar glass">
         {isOwner ? (
-          <>
-            {job.status === 'published'
-              ? <button class="btn secondary" onClick={() => setStatus('close')}>Close applications</button>
-              : <button class="btn accent" onClick={() => setStatus('publish')}>{job.status === 'draft' ? 'Publish' : 'Re-open'}</button>}
-          </>
+          job.status === 'published'
+            ? <button class="btn is-milky" onClick={() => setStatus('close')}>Close applications</button>
+            : <button class="btn is-accent" onClick={() => setStatus('publish')}>{job.status === 'draft' ? 'Publish' : 'Re-open'}</button>
         ) : isBusiness.value ? (
-          <div class="muted" style={{ fontSize: 13, flex: 1, textAlign: 'center' }}>Switch to a creator profile to apply.</div>
+          <button class="btn" onClick={message}>Message</button>
         ) : job.myApplicationId ? (
-          <>
-            <button class="btn secondary" onClick={withdraw}>Withdraw</button>
-            <button class="btn" onClick={message}>Message</button>
-          </>
+          <><button class="btn is-milky" onClick={withdraw}>Withdraw</button><button class="btn" onClick={message}>Message</button></>
         ) : (
-          <button class="btn accent" disabled={!job.acceptsApplications} onClick={apply}>{job.acceptsApplications ? 'Apply' : 'Applications closed'}</button>
+          <button class="btn is-accent" disabled={!job.acceptsApplications} onClick={apply}>{job.acceptsApplications ? 'Apply' : 'Applications closed'}</button>
         )}
       </div>
     </>
@@ -239,76 +269,68 @@ function ApplySheet({ job, close, onDone }: { job: Job; close: () => void; onDon
   };
   return (
     <SheetFrame title="Apply" close={close}>
-      <div class="muted" style={{ fontSize: 13, marginBottom: 10 }}>{job.title} · {job.owner?.displayName}</div>
-      <textarea class="textarea" maxLength={2000} placeholder="Message to the business: why you, ideas, dates…" value={message}
-        onInput={(e) => setMessage(e.currentTarget.value)} />
-      <div class="section-title" style={{ margin: '18px 0 8px' }}>Attach from portfolio {ent?.canAttachMediaToApplications ? '' : '· creator.pro'}</div>
+      <div class="muted" style={{ fontSize: 14, margin: '0 8px 12px' }}>{job.title} · {job.owner?.displayName}</div>
+      <textarea class="textarea" maxLength={2000} placeholder="Message to the business: why you, ideas, dates…" value={message} onInput={(e) => setMessage(e.currentTarget.value)} />
+      <span class="label" style={{ marginTop: 18 }}>Attach from portfolio {ent?.canAttachMediaToApplications ? `· ${selected.length}/10` : '· creator.pro'}</span>
       {ent?.canAttachMediaToApplications ? (
-        <div class="media-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+        <div class="mgrid" style={{ padding: 0, gridTemplateColumns: 'repeat(4, 1fr)' }}>
           {(portfolio.data?.items ?? []).slice(0, 12).map((m: any) => (
-            <button class="media-tile" style={{ outline: selected.includes(m.id) ? '3px solid var(--accent)' : 'none', outlineOffset: -3 }}
-              onClick={() => setSelected((s) => (s.includes(m.id) ? s.filter((x) => x !== m.id) : [...s, m.id].slice(0, 10)))}>
-              <img src={(m.kind === 'video' ? m.posterUrl : m.url) ?? ''} alt="" loading="lazy" />
-            </button>
+            <MediaTile media={m} picked={selected.includes(m.id)} onOpen={() => setSelected((s) => (s.includes(m.id) ? s.filter((x) => x !== m.id) : [...s, m.id].slice(0, 10)))} />
           ))}
         </div>
-      ) : (
-        <div class="locked-card"><b>Attach media with creator.pro</b><div class="soft" style={{ fontSize: 13, marginTop: 4 }}>
-          Free applications are text-only. (Test environment: PRO is granted to demo accounts.)</div></div>
-      )}
-      <button class="btn accent" style={{ marginTop: 18 }} disabled={busy || !message.trim()} onClick={send}>{busy ? 'Sending…' : 'Send application'}</button>
+      ) : <div class="locked" style={{ margin: 0 }}><b>Attach media with creator.pro</b>Free applications are text-only. (Test environment: PRO is granted to demo accounts.)</div>}
+      <button class="btn is-accent" style={{ marginTop: 18 }} disabled={busy || !message.trim()} onClick={send}>{busy ? 'Sending…' : 'Send application'}</button>
     </SheetFrame>
   );
 }
 
-function Applicants({ job }: { job: Job }) {
+export function ApplicantsScreen({ job }: { job: Job }) {
   const [sort, setSort] = useState('newest');
   const [shortlisted, setShortlisted] = useState(false);
   const { data, setData } = useLoad<{ items: Application[] }>((s) => get(`/v1/jobs/${job.id}/applications?sort=${sort}&shortlisted=${shortlisted ? 1 : 0}`, s),
     [job.id, sort, shortlisted, refreshTick.value]);
   const toggle = async (a: Application) => {
-    try {
-      await put(`/v1/jobs/applications/${a.id}/shortlist`, { shortlisted: !a.isShortlisted });
-      setData({ items: data!.items.map((x) => (x.id === a.id ? { ...x, isShortlisted: !x.isShortlisted } : x)) });
-    } catch (e) { showToast(errorText(e), 'error'); }
+    try { await put(`/v1/jobs/applications/${a.id}/shortlist`, { shortlisted: !a.isShortlisted }); setData({ items: data!.items.map((x) => (x.id === a.id ? { ...x, isShortlisted: !x.isShortlisted } : x)) }); }
+    catch (e) { showToast(errorText(e), 'error'); }
   };
   const message = async (a: Application) => {
     try { const { id } = await post('/v1/conversations', { profileId: a.applicant!.id, jobId: job.id }); push('conversation', { id }); }
     catch (e) { showToast(errorText(e), 'error'); }
   };
   return (
-    <div style={{ marginTop: 22 }}>
-      <div class="row pad" style={{ marginBottom: 10 }}>
-        <div style={{ fontWeight: 700, fontSize: 17 }} class="grow">Applicants <span class="muted">{data?.items.length ?? ''}</span></div>
-        <select class="select" style={{ width: 'auto', height: 34, padding: '0 12px', fontSize: 13 }} value={sort} onChange={(e) => setSort(e.currentTarget.value)} aria-label="Sort">
-          <option value="newest">Newest</option><option value="oldest">Oldest</option><option value="rating">Highest rated</option>
-        </select>
-        <button class={`chip ${shortlisted ? 'is-on' : ''}`} onClick={() => setShortlisted(!shortlisted)}>♥ Shortlist</button>
-      </div>
-      {!data ? <Spinner /> : !data.items.length ? <Empty title="No applicants yet" text="Applications appear here as creators apply." iconName="IconUser" /> :
-        data.items.map((a) => (
-          <div class="review" key={a.id}>
-            <div class="row">
-              <button class="row grow" style={{ textAlign: 'left' }} onClick={() => a.applicant && push('profile-view', { id: a.applicant.id })}>
-                <Avatar card={a.applicant} size={42} />
-                <div class="grow"><div style={{ fontWeight: 600 }}>{a.applicant?.displayName} {a.applicant && <ProBadge card={a.applicant} />}</div>
-                  <RatingInline rating={a.applicant?.rating ?? null} count={a.applicant?.reviewsCount ?? 0} /></div>
-              </button>
-              <span class="muted" style={{ fontSize: 12 }}>{timeAgo(a.createdAt)}</span>
-            </div>
-            <div class="review__text selectable">{a.message}</div>
-            {a.media.length > 0 && (
-              <div class="job-card__media" style={{ padding: 0, marginTop: 10 }}>
-                {a.media.map((m) => <button onClick={() => openViewer(m)}><img src={(m.kind === 'video' ? m.posterUrl : m.url) ?? ''} alt="" style={{ width: 80, height: 110 }} /></button>)}
+    <>
+      <div class="scroll">
+        <div class="section-top" />
+        <div class="mfilter" style={{ paddingTop: 0 }}>
+          {[['newest', 'Newest'], ['oldest', 'Oldest'], ['rating', 'Top rated']].map(([v, l]) => <button class={`mchip ${sort === v ? 'is-on' : ''}`} onClick={() => setSort(v)}>{l}</button>)}
+          <span class="grow" />
+          <button class={`mchip ${shortlisted ? 'is-on' : ''}`} onClick={() => setShortlisted(!shortlisted)}>♥</button>
+        </div>
+        <div class="pad" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {!data ? <Spinner /> : !data.items.length ? <Empty title="No applicants yet" text="Applications appear here as creators apply." iconName="IconUser" /> :
+            data.items.map((a) => (
+              <div class="applicant" key={a.id}>
+                <div class="row">
+                  <button class="row grow" style={{ gap: 16 }} onClick={() => a.applicant && push('profile-view', { id: a.applicant.id })}>
+                    <Avatar card={a.applicant} size={48} />
+                    <div class="grow"><div class="row" style={{ gap: 8, fontWeight: 600 }}><span class="ellipsis">{a.applicant?.displayName}</span><ProBadge card={a.applicant} compact /></div>
+                      <RatingInline rating={a.applicant?.rating ?? null} count={a.applicant?.reviewsCount ?? 0} /></div>
+                  </button>
+                  <span class="muted" style={{ fontSize: 12 }}>{timeAgo(a.createdAt)}</span>
+                </div>
+                <div class="post__desc selectable lines-4">{a.message}</div>
+                {a.media.length > 0 && <div class="applicant__media" data-hscroll>{a.media.map((m) => <button onClick={() => openViewer(m)}><img src={(m.kind === 'video' ? m.posterUrl : m.url) ?? ''} alt="" /></button>)}</div>}
+                <div class="row" style={{ gap: 8 }}>
+                  <button class="btn is-small is-milky" style={{ flex: 1 }} onClick={() => toggle(a)}>{a.isShortlisted ? '♥ Shortlisted' : '♡ Shortlist'}</button>
+                  <button class="btn is-small" style={{ flex: 1 }} onClick={() => message(a)}>Message</button>
+                </div>
               </div>
-            )}
-            <div class="row" style={{ marginTop: 12 }}>
-              <button class="btn small secondary" onClick={() => toggle(a)}>{a.isShortlisted ? '♥ Shortlisted' : '♡ Shortlist'}</button>
-              <button class="btn small" onClick={() => message(a)}>Message</button>
-            </div>
-          </div>
-        ))}
-    </div>
+            ))}
+        </div>
+        <div style={{ height: 40 }} />
+      </div>
+      <Header left={<BackButton />} center={<HeaderTitle title="Applicants" sub={job.title} />} />
+    </>
   );
 }
 
@@ -338,61 +360,47 @@ export function JobEditor({ job }: { job?: Job }) {
     try {
       const saved: Job = job ? await patch(`/v1/jobs/${job.id}`, body) : await post('/v1/jobs', { ...body, publish });
       if (job && publish && saved.status !== 'published') await post(`/v1/jobs/${job.id}/publish`);
-      showToast(publish ? 'Job published' : 'Saved', 'ok');
-      refresh();
-      (await import('../state')).back();
+      showToast(publish ? 'Job published' : 'Saved', 'ok'); refresh(); back();
     } catch (e) { showToast(errorText(e), 'error'); } finally { setBusy(false); }
   };
   const remove = () => confirmSheet('Delete job?', 'It disappears with its applications. This can\'t be undone.', 'Delete', async () => {
-    try { await del(`/v1/jobs/${job!.id}`); refresh(); const s = await import('../state'); s.back(); s.back(); } catch (e) { showToast(errorText(e), 'error'); }
+    try { await del(`/v1/jobs/${job!.id}`); refresh(); back(false); back(false); } catch (e) { showToast(errorText(e), 'error'); }
   }, true);
+  const chip = (on: boolean, label: string, onClick: () => void) => <button class={`mchip ${on ? 'is-on' : ''}`} style={{ background: on ? '#fff' : 'var(--input)' }} onClick={onClick}>{label}</button>;
+  const input = (label: string, value: string, set: (v: string) => void, extra: any = {}) => (
+    <div class="grow"><span class="label">{label}</span><label class="field"><input value={value} onInput={(e) => set(e.currentTarget.value)} {...extra} /></label></div>
+  );
   return (
     <>
-      <TopBar title={job ? 'Edit job' : 'New job'} />
-      <div class="scroll no-tabbar" style={{ paddingBottom: 120 }}>
-        <div class="below-topbar" />
-        <div class="pad">
-          <label class="field"><span class="field__label">Title</span><input class="input" maxLength={100} value={title} onInput={(e) => setTitle(e.currentTarget.value)} /></label>
-          <label class="field"><span class="field__label">Details</span><textarea class="textarea" maxLength={2000} value={description} onInput={(e) => setDescription(e.currentTarget.value)} /></label>
-          <div class="field__label">Location</div>
-          <div class="chips" style={{ marginBottom: 10 }}>
-            <button class={`chip ${worldwide ? 'is-on' : ''}`} onClick={() => setWorldwide(true)}>🌍 Worldwide</button>
-            <button class={`chip ${!worldwide ? 'is-on' : ''}`} onClick={() => setWorldwide(false)}>📍 Specific place</button>
-          </div>
-          {!worldwide && (
-            <div class="row">
-              <label class="field grow"><span class="field__label">City</span><input class="input" value={city} onInput={(e) => setCity(e.currentTarget.value)} /></label>
-              <label class="field grow"><span class="field__label">Shown as</span><input class="input" placeholder="Bali, Indonesia" value={location} onInput={(e) => setLocation(e.currentTarget.value)} /></label>
-            </div>
-          )}
-          <div class="field__label">Compensation</div>
-          <div class="chips" style={{ marginBottom: 10 }}>
-            {(['fixed', 'range', 'barter', 'not_selected'] as const).map((c) => (
-              <button class={`chip ${comp === c ? 'is-on' : ''}`} onClick={() => setComp(c)}>{{ fixed: 'Fixed price', range: 'Budget range', barter: 'Barter', not_selected: 'Not set' }[c]}</button>
-            ))}
-          </div>
+      <div class="scroll">
+        <div class="section-top pad" style={{ display: 'flex', flexDirection: 'column', gap: 16, paddingBottom: 140 }}>
+          {input('Title', title, setTitle, { maxLength: 100 })}
+          <div><span class="label">Details</span><textarea class="textarea" maxLength={2000} value={description} onInput={(e) => setDescription(e.currentTarget.value)} /></div>
+          <div><span class="label">Location</span><div class="row" style={{ gap: 8 }}>{chip(worldwide, 'Worldwide', () => setWorldwide(true))}{chip(!worldwide, 'Specific place', () => setWorldwide(false))}</div></div>
+          {!worldwide && <div class="row">{input('City', city, setCity)}{input('Shown as', location, setLocation, { placeholder: 'Bali, Indonesia' })}</div>}
+          <div><span class="label">Compensation</span><div class="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            {(['fixed', 'range', 'barter', 'not_selected'] as const).map((c) => chip(comp === c, { fixed: 'Fixed price', range: 'Budget range', barter: 'Barter', not_selected: 'Not set' }[c], () => setComp(c)))}
+          </div></div>
           {['fixed', 'range'].includes(comp) && (
             <div class="row">
-              <label class="field grow"><span class="field__label">{comp === 'range' ? 'From' : 'Amount'}</span><input class="input" inputMode="decimal" value={min} onInput={(e) => setMin(e.currentTarget.value.replace(/[^\d.]/g, ''))} /></label>
-              {comp === 'range' && <label class="field grow"><span class="field__label">To</span><input class="input" inputMode="decimal" value={max} onInput={(e) => setMax(e.currentTarget.value.replace(/[^\d.]/g, ''))} /></label>}
-              <label class="field" style={{ width: 96 }}><span class="field__label">Currency</span>
-                <select class="select" value={currency} onChange={(e) => setCurrency(e.currentTarget.value)}>
-                  {['USD', 'EUR', 'GBP', 'UAH', 'PLN', 'AED', 'THB', 'KZT', 'IDR', 'TRY'].map((c) => <option>{c}</option>)}
-                </select></label>
+              {input(comp === 'range' ? 'From' : 'Amount', min, (v) => setMin(v.replace(/[^\d.]/g, '')), { inputMode: 'decimal' })}
+              {comp === 'range' && input('To', max, (v) => setMax(v.replace(/[^\d.]/g, '')), { inputMode: 'decimal' })}
+              <div style={{ width: 100 }}><span class="label">Currency</span><select class="select" value={currency} onChange={(e) => setCurrency(e.currentTarget.value)}>
+                {['USD', 'EUR', 'GBP', 'UAH', 'PLN', 'AED', 'THB', 'KZT', 'IDR', 'TRY'].map((c) => <option>{c}</option>)}</select></div>
             </div>
           )}
-          <div class="row">
-            <label class="field grow"><span class="field__label">Reels</span><input class="input" inputMode="numeric" value={reels} onInput={(e) => setReels(e.currentTarget.value.replace(/\D/g, ''))} /></label>
-            <label class="field grow"><span class="field__label">Photos</span><input class="input" inputMode="numeric" value={photos} onInput={(e) => setPhotos(e.currentTarget.value.replace(/\D/g, ''))} /></label>
-          </div>
-          <label class="field"><span class="field__label">Tags (comma separated)</span><input class="input" value={tags} onInput={(e) => setTags(e.currentTarget.value)} /></label>
-          {job && <button class="btn danger" style={{ marginTop: 10 }} onClick={remove}>Delete job</button>}
+          <div class="row">{input('Reels', reels, (v) => setReels(v.replace(/\D/g, '')), { inputMode: 'numeric' })}{input('Photos', photos, (v) => setPhotos(v.replace(/\D/g, '')), { inputMode: 'numeric' })}</div>
+          {input('Tags (comma separated)', tags, setTags)}
+          {job && <button class="btn is-danger" onClick={remove}><img class="btn__icon" src={icon('IconTrash')} alt="" />Delete job</button>}
         </div>
       </div>
-      <div class="bottom-bar">
-        {(!job || job.status === 'draft') && <button class="btn secondary" disabled={busy || !title.trim()} onClick={() => save(false)}>Save draft</button>}
-        <button class="btn accent" disabled={busy || !title.trim()} onClick={() => save(!job || job.status !== 'closed')}>{job && job.status === 'published' ? 'Save' : 'Publish'}</button>
+      <Header left={<BackButton />} center={<HeaderTitle title={job ? 'Edit job' : 'New job'} />} />
+      <div class="apply-bar glass">
+        {(!job || job.status === 'draft') && <button class="btn is-milky" disabled={busy || !title.trim()} onClick={() => save(false)}>Save draft</button>}
+        <button class="btn is-accent" disabled={busy || !title.trim()} onClick={() => save(!job || job.status !== 'closed')}>{job && job.status === 'published' ? 'Save' : 'Publish'}</button>
       </div>
     </>
   );
 }
+
+export { Icon };

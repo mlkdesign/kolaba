@@ -3,7 +3,9 @@
 import { computed, signal } from '@preact/signals';
 import { get, OwnProfile, post, session, setUnauthorizedHandler } from './api';
 
-export type Tab = 'jobs' | 'chat' | 'kolaba' | 'creators' | 'profile';
+export type Tab = 'jobs' | 'creators' | 'kolaba' | 'chat' | 'profile';
+/** iOS MainTab order: job. · creators. · kolaba. · chat. · My Profile. */
+export const TAB_ORDER: Tab[] = ['jobs', 'creators', 'kolaba', 'chat', 'profile'];
 
 export interface Route { screen: string; params?: Record<string, any>; key: number }
 
@@ -14,7 +16,7 @@ export const activeProfile = computed(() => profiles.value.find((p) => p.id === 
 export const isBusiness = computed(() => activeProfile.value?.type === 'business');
 export const booted = signal(false);
 
-export const tab = signal<Tab>('jobs');
+export const tab = signal<Tab>('profile');
 let keySeq = 1;
 const root = (screen: string): Route => ({ screen, key: keySeq++ });
 const initialStacks = (): Record<Tab, Route[]> => ({
@@ -27,7 +29,7 @@ export const badges = signal({ notifications: 0, conversations: 0, contactReques
 export const refreshTick = signal(0);
 export const refresh = () => { refreshTick.value++; };
 
-export interface Sheet { id: number; render: (close: () => void) => any; tall?: boolean }
+export interface Sheet { id: number; render: (close: () => void) => any; tall?: boolean; raw?: boolean; closing?: boolean }
 export const sheets = signal<Sheet[]>([]);
 export const toast = signal<{ text: string; id: number; tone?: 'error' | 'ok' } | null>(null);
 
@@ -36,9 +38,17 @@ export function push(screen: string, params?: Record<string, any>, inTab: Tab = 
   if (inTab !== tab.value) tab.value = inTab;
 }
 
-export function back() {
-  const stack = stacks.value[tab.value];
-  if (stack.length > 1) stacks.value = { ...stacks.value, [tab.value]: stack.slice(0, -1) };
+/** The screen sliding away (its key) while Back animates; removed when the animation ends. */
+export const leaving = signal<number | null>(null);
+export function back(animated = true) {
+  const t = tab.value;
+  const stack = stacks.value[t];
+  if (stack.length <= 1 || leaving.value !== null) return;
+  const top = stack[stack.length - 1];
+  const pop = () => { leaving.value = null; stacks.value = { ...stacks.value, [t]: stacks.value[t].filter((r) => r.key !== top.key) }; };
+  if (!animated) { pop(); return; }
+  leaving.value = top.key;
+  window.setTimeout(pop, 320);
 }
 
 /** Tapping the current tab again returns to its root. */
@@ -50,11 +60,23 @@ export function selectTab(next: Tab) {
   tab.value = next;
 }
 
-export function openSheet(render: Sheet['render'], tall = false) {
+export function openSheet(render: Sheet['render'], options: boolean | { tall?: boolean; raw?: boolean } = false) {
   const id = keySeq++;
-  sheets.value = [...sheets.value, { id, render, tall }];
-  return () => { sheets.value = sheets.value.filter((s) => s.id !== id); };
+  const o = typeof options === 'boolean' ? { tall: options } : options;
+  sheets.value = [...sheets.value, { id, render, ...o }];
+  return () => closeSheet(id);
 }
+
+/** Slides the sheet down (.33 s) and then removes it. */
+export function closeSheet(id: number) {
+  const s = sheets.value.find((x) => x.id === id);
+  if (!s || s.closing) return;
+  if (s.raw) { sheets.value = sheets.value.filter((x) => x.id !== id); return; }
+  sheets.value = sheets.value.map((x) => (x.id === id ? { ...x, closing: true } : x));
+  window.setTimeout(() => { sheets.value = sheets.value.filter((x) => x.id !== id); }, 330);
+}
+
+export const switcherOpen = signal(false);
 
 let toastTimer: number | undefined;
 export function showToast(text: string, tone?: 'error' | 'ok') {
@@ -96,7 +118,7 @@ export function signOutLocally() {
   profiles.value = [];
   activeProfileId.value = null;
   stacks.value = initialStacks();
-  tab.value = 'jobs';
+  tab.value = 'profile';
   sheets.value = [];
 }
 
