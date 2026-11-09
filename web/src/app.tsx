@@ -237,6 +237,15 @@ function MainApp() {
     const [kind, id] = (link ?? '').split(':');
     if (id && kind === 'job') push('job', { id }, 'jobs');
     else if (id && kind === 'profile') push('profile-view', { id }, 'creators');
+    // A link pasted into this tab while the app is open opens too.
+    const onHash = () => {
+      const m = /^#\/(job|profile)\/([A-Za-z0-9_-]{3,80})$/.exec(location.hash);
+      if (!m) return;
+      history.replaceState(null, '', location.pathname);
+      if (m[1] === 'job') push('job', { id: m[2] }, 'jobs'); else push('profile-view', { id: m[2] }, 'creators');
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
   }, []);
   const all = stacks.value;
   const index = TAB_ORDER.indexOf(tab.value);

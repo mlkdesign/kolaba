@@ -298,6 +298,12 @@ function Bio({ text }: { text: string }) {
   );
 }
 
+/** The shareable address of a profile. */
+export function profileLink(id: string) {
+  const base = ((import.meta as any).env?.VITE_APP_URL as string | undefined) ?? location.origin + location.pathname;
+  return `${base.replace(/#.*$/, '').replace(/\/?$/, '/')}#/profile/${encodeURIComponent(id)}`;
+}
+
 /** Collabs | Rating | Contacts (ProfileFiguresRow, FEATURE 20/23): Collabs are the reviews the profile received (one
  *  per finished collaboration); Rating "–" without any. */
 function Figures({ p }: { p: ProfilePage }) {
@@ -313,7 +319,9 @@ function Figures({ p }: { p: ProfilePage }) {
 
 function OwnerActions({ p }: { p: ProfilePage }) {
   const share = async () => {
-    const url = (import.meta as any).env?.VITE_APP_URL ?? location.origin + location.pathname;
+    // The profile's own link: the app's address + #/profile/<profile id> (the id the server generated) — opens this
+    // profile for whoever follows it (after signing in, if needed).
+    const url = profileLink(p.id);
     const text = `${p.displayName} (@${p.username}) on kolaba.`;
     try {
       if (navigator.share) await navigator.share({ title: text, url });
