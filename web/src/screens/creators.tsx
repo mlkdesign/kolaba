@@ -1,10 +1,10 @@
 // creators. — CreatorsView: Creators | My Contacts (swiped sideways). Creator cards (Figma 996:18922): avatar 48,
 // name + PRO, location, rating; bio; a PRO creator's latest works; Message + In contacts / Add contact.
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { Card, errorText, get, Media, Page, post } from '../api';
+import { Card, del, errorText, get, Media, Page, post } from '../api';
 import { activeProfile, badges, openSheet, push, refresh, refreshTick, showToast } from '../state';
 import {
-  Avatar, Empty, fmtDuration, GlassButton, Header, Icon, icon, Logo, openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, SwipePages,
+  pickSheet, openContextMenu, useLongPress, Avatar, Empty, fmtDuration, GlassButton, Header, Icon, icon, Logo, openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, SwipePages,
   useDebounced, useLoad, usePullToRefresh,
 } from '../ui';
 
@@ -32,8 +32,7 @@ export function CreatorsScreen() {
   return (
     <>
       <div class="scroll" ref={scroller}>
-        <div class="section-top" />
-        <PageTabs tabs={[kind === 'creator' ? 'Creators' : 'Businesses', `My Contacts${badges.value.contactRequests ? ` · ${badges.value.contactRequests}` : ''}`]} index={index} onChange={setIndex} />
+        <div class="tabs-pin"><PageTabs tabs={[kind === 'creator' ? 'Creators' : 'Businesses', `My Contacts${badges.value.contactRequests ? ` · ${badges.value.contactRequests}` : ''}`]} index={index} onChange={setIndex} /></div>
         <SwipePages index={index} onChange={setIndex}>
           <Catalog kind={kind} q={q} register={(fn) => { if (index === 0) reloadRef.current = fn; }} />
           <ContactsList query={q} register={(fn) => { if (index === 1) reloadRef.current = fn; }} />
@@ -45,7 +44,7 @@ export function CreatorsScreen() {
         left={searching ? null : <GlassButton name="IconCreatorsFilter" label="Filter" onClick={filter} />}
         center={searching ? null : <Logo word="creators" />}
         right={searching ? (
-          <div class="row" style={{ width: 'calc(100vw - 32px)', maxWidth: 'calc(386px - 32px)', gap: 8 }}>
+          <div class="row" style={{ width: 370, gap: 8 }}>
             <label class="glass search"><img src={icon('IconMagnifyingGlass')} alt="" />
               <input autoFocus placeholder={index === 1 ? 'Search contacts' : 'Search names, niches, cities'} value={query} onInput={(e) => setQuery(e.currentTarget.value)} /></label>
             <GlassButton name="IconSheetClose" label="Close search" onClick={() => { setSearching(false); setQuery(''); }} />
@@ -56,9 +55,20 @@ export function CreatorsScreen() {
   );
 }
 
-function useContactIds() {
-  const { data, reload } = useLoad<{ items: Relation[] }>((s) => get('/v1/contacts?filter=all', s), [refreshTick.value, activeProfile.value?.id]);
-  return { ids: new Set((data?.items ?? []).map((i) => i.profile.id)), reload };
+type Rel = { relation: 'none' | 'requested' | 'incoming' | 'connected'; requestId?: string };
+
+/** Every profile's contact state for the acting profile, from the three My Contacts lists (one request each). */
+function useRelations() {
+  const { data, reload, setData } = useLoad<Map<string, Rel>>(async (s) => {
+    const [all, inc, sent] = await Promise.all((['all', 'requests', 'sent'] as const).map((f) => get<{ items: Relation[] }>(`/v1/contacts?filter=${f}`, s)));
+    const m = new Map<string, Rel>();
+    sent.items.forEach((i) => m.set(i.profile.id, { relation: 'requested', requestId: i.requestId }));
+    inc.items.forEach((i) => m.set(i.profile.id, { relation: 'incoming', requestId: i.requestId }));
+    all.items.forEach((i) => m.set(i.profile.id, { relation: 'connected', requestId: i.requestId }));
+    return m;
+  }, [refreshTick.value, activeProfile.value?.id]);
+  const set = (id: string, rel: Rel) => setData(new Map(data ?? []).set(id, rel));
+  return { get: (id: string): Rel => data?.get(id) ?? { relation: 'none' }, set, reload };
 }
 
 function Catalog({ kind, q, register }: { kind: Kind; q: string; register: (fn: () => Promise<unknown>) => void }) {
@@ -66,7 +76,7 @@ function Catalog({ kind, q, register }: { kind: Kind; q: string; register: (fn: 
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const sentinel = useRef<HTMLDivElement>(null);
-  const contacts = useContactIds();
+  const contacts = useRelations();
   const load = async (reset: boolean) => {
     setLoading(true);
     try {
@@ -87,23 +97,17 @@ function Catalog({ kind, q, register }: { kind: Kind; q: string; register: (fn: 
   return (
     <div class="ccards">
       {!others.length && loading && [0, 1].map(() => <div class="skeleton" style={{ height: 230, borderRadius: 20 }} />)}
-      {others.map((c) => <CreatorCard key={c.id} card={c} inContacts={contacts.ids.has(c.id)} onAdded={contacts.reload} />)}
+      {others.map((c) => <CreatorCard key={c.id} card={c} rel={contacts.get(c.id)} onRel={(r) => contacts.set(c.id, r)} />)}
       <div ref={sentinel} />
       {loading && others.length > 0 && <Spinner />}
     </div>
   );
 }
 
-function CreatorCard({ card, inContacts, onAdded }: { card: Card & { bio?: string }; inContacts: boolean; onAdded: () => void }) {
-  const [requested, setRequested] = useState(false);
+function CreatorCard({ card, rel, onRel }: { card: Card & { bio?: string }; rel: Rel; onRel: (r: Rel) => void }) {
   const message = async () => {
     try { const { id } = await post('/v1/conversations', { profileId: card.id }); push('conversation', { id }); }
     catch (e) { showToast(errorText(e), 'error'); }
-  };
-  const add = async () => {
-    setRequested(true);
-    try { await post('/v1/contacts/requests', { profileId: card.id }); showToast('Contact request sent', 'ok'); onAdded(); refresh(); }
-    catch (e) { setRequested(false); showToast(errorText(e), 'error'); }
   };
   const open = () => push('profile-view', { id: card.id });
   return (
@@ -123,11 +127,30 @@ function CreatorCard({ card, inContacts, onAdded }: { card: Card & { bio?: strin
       {card.isPro && card.type === 'creator' && <Works id={card.id} />}
       <div class="ccard__actions">
         <button class="btn" onClick={message}>Message</button>
-        {inContacts ? <div class="in-contacts">In contacts<img src={icon('IconCheckCircle')} alt="" /></div>
-          : <button class="btn is-outline" disabled={requested} onClick={add}>{requested ? 'Requested' : 'Add contact'}</button>}
+        <ContactButton card={card} rel={rel} onRel={onRel} />
       </div>
     </article>
   );
+}
+
+/** CreatorContactButton: Add to contacts → Requested (Cancel request) → In contacts ✓ (Remove contact); Accept request. */
+export function ContactButton({ card, rel, onRel }: { card: Card; rel: Rel; onRel: (r: Rel) => void }) {
+  const [busy, setBusy] = useState(false);
+  const run = async (fn: () => Promise<any>, next: (res: any) => Rel, ok: string) => {
+    const before = rel;
+    setBusy(true);
+    try { const res = await fn(); onRel(next(res)); showToast(ok, 'ok'); refresh(); }
+    catch (e) { onRel(before); showToast(errorText(e), 'error'); } finally { setBusy(false); }
+  };
+  const add = () => run(() => post('/v1/contacts/requests', { profileId: card.id }), (r) => ({ relation: r?.relation ?? 'requested', requestId: r?.requestId }), 'Contact request sent');
+  if (rel.relation === 'none') return <button class="cbtn is-outlined" disabled={busy} onClick={add}><img src={icon('IconUserPlus')} alt="" />{busy ? 'Sending…' : 'Add to contacts'}</button>;
+  if (rel.relation === 'incoming') return <button class="cbtn is-outlined" disabled={busy} onClick={() => run(() => post(`/v1/contacts/requests/${rel.requestId}/accept`), () => ({ relation: 'connected' }), 'Contact added')}><img src={icon('IconUserPlus')} alt="" />Accept request</button>;
+  const menu = (e: MouseEvent) => openContextMenu(e.currentTarget as HTMLElement, rel.relation === 'requested'
+    ? [{ label: 'Cancel request', icon: 'IconXCircle', danger: true, run: () => void run(() => post(`/v1/contacts/requests/${rel.requestId}/cancel`), () => ({ relation: 'none' }), 'Request cancelled') }]
+    : [{ label: 'Remove contact', icon: 'IconUserMinus', danger: true, run: () => void run(() => del(`/v1/contacts/${card.id}`), () => ({ relation: 'none' }), 'Contact removed') }]);
+  return rel.relation === 'requested'
+    ? <button class="cbtn is-calm" disabled={busy} onClick={menu as any}>Requested</button>
+    : <button class="cbtn is-calm is-in" disabled={busy} onClick={menu as any}>In contacts<img src={icon('IconFollowingCheck')} alt="" style={{ width: 20, height: 20 }} /></button>;
 }
 
 /** A PRO creator's latest videos, loaded once the card is near the screen. */
@@ -172,7 +195,9 @@ function ContactsList({ query, initial = 'all', register }: { query: string; ini
   const message = async (card: Card) => {
     try { const { id } = await post('/v1/conversations', { profileId: card.id }); push('conversation', { id }); } catch (e) { showToast(errorText(e), 'error'); }
   };
-  const list = (data?.items ?? []).filter((i) => !query || `${i.profile.displayName} ${i.profile.username}`.toLowerCase().includes(query.toLowerCase()));
+  const [sort, setSort] = useState<'recent' | 'name'>('recent');
+  const list = (data?.items ?? []).filter((i) => !query || `${i.profile.displayName} ${i.profile.username}`.toLowerCase().includes(query.toLowerCase()))
+    .sort((a, b) => (sort === 'name' ? a.profile.displayName.localeCompare(b.profile.displayName) : b.since - a.since));
   return (
     <>
       <div class="seg-chips">
@@ -181,12 +206,30 @@ function ContactsList({ query, initial = 'all', register }: { query: string; ini
             {{ all: 'All', requests: 'Requests', sent: 'Sent' }[f]}{data?.counts?.[f] ? ` ${data.counts[f]}` : ''}
           </button>
         ))}
+        <span class="grow" />
+        <button class="rsort" onClick={() => pickSheet('Sort contacts', [['recent', 'Recently added'], ['name', 'Name']], sort, setSort)}><img src={icon('IconSortAscending')} alt="" />Sort</button>
       </div>
       {loading && !data ? <Spinner /> : !list.length ? (
         <Empty title={{ all: 'No contacts yet', requests: 'No requests', sent: 'No sent requests' }[filter]}
           text={filter === 'all' ? 'Add creators and businesses from their cards or profiles.' : undefined} iconName="IconUserPlus" />
       ) : list.map((i) => (
-        <div class="contact-row" key={i.requestId}>
+        <ContactRow key={i.requestId} i={i} filter={filter} act={act} message={message} />
+      ))}
+    </>
+  );
+}
+
+function ContactRow({ i, filter, act, message }: { i: Relation; filter: ContactsFilter; act: (id: string, a: 'accept' | 'decline' | 'cancel') => void; message: (c: Card) => void }) {
+  const removeContact = async () => {
+    try { await del(`/v1/contacts/${i.profile.id}`); showToast('Contact removed', 'ok'); refresh(); } catch (e) { showToast(errorText(e), 'error'); }
+  };
+  const actions = filter === 'all' ? [{ label: 'Remove contact', icon: 'IconUserMinus', danger: true, run: () => void removeContact() }]
+    : filter === 'requests' ? [{ label: 'Accept', icon: 'IconCheckCircle', run: () => act(i.requestId, 'accept') }, { label: 'Decline', icon: 'IconXCircle', danger: true, run: () => act(i.requestId, 'decline') }]
+    : [{ label: 'Cancel request', icon: 'IconXCircle', danger: true, run: () => act(i.requestId, 'cancel') }];
+  const press = useLongPress((el) => openContextMenu(el, actions));
+  return (
+        <div class="contact-row" onPointerDown={press.onPointerDown as any} onPointerMove={press.onPointerMove as any} onPointerUp={press.onPointerUp}
+          onPointerCancel={press.onPointerCancel} onPointerLeave={press.onPointerLeave} onContextMenu={press.onContextMenu} onClickCapture={(e) => { if (press.consume()) { e.stopPropagation(); e.preventDefault(); } }}>
           <button class="row grow" style={{ gap: 12 }} onClick={() => push('profile-view', { id: i.profile.id })}>
             <Avatar card={i.profile} size={48} />
             <div class="grow">
@@ -199,8 +242,6 @@ function ContactsList({ query, initial = 'all', register }: { query: string; ini
             <button class="btn is-small is-milky" onClick={() => act(i.requestId, 'decline')}>Decline</button></>}
           {filter === 'sent' && <button class="btn is-small is-milky" onClick={() => act(i.requestId, 'cancel')}>Cancel</button>}
         </div>
-      ))}
-    </>
   );
 }
 

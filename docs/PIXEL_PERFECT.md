@@ -58,3 +58,36 @@ dots under the logo, like pill, pink Follow, bio, progress line); Notifications.
   `backdrop-filter` slightly softer than iOS.
 - Google / Apple sign-in are shown disabled ("iOS app") — they are not configured for the web.
 - Find-in-chat uses the browser prompt.
+
+## Round 2 — Figma audit, fixed phone, long press (2026-11-09)
+Sources compared: the Figma file (page xCode: My Profile PRO 921:9306, Rewiews 980:17859, Notifications 654:16140,
+Projects view 654:15004, My Job 706:2366, My Contacts 996:19190, Review request Sheet 1035:19713, Settings 654:18389,
+Edit profile 663:19090, switcher 885:6949), the iOS code and simulator screenshots, the web at 402 × 874.
+Rule used where they differ: the iOS app is the newer decision (its FIX notes post-date the frames — e.g. the tab bar
+order, Message + Follow on public profiles, compact My Contacts rows); Figma decides where iOS has no reference.
+
+- **One logical screen**: always 402 × 874 (the frame picture is drawn at 452 × 920 so its opening is exactly that);
+  the whole phone is scaled so it is 70 % of the window's height, centred; on phones the screen alone is scaled to fit.
+  Gestures divide pointer distances by the scale (`src/scale.ts`); clicks map natively.
+- **Tab bar**: outside every scroll view, absolute in the screen, z 35 — pushed screens slide over it (as in iOS, where
+  it moves with the sections), sheets and menus sit above it, the account switcher sits under it.
+- **Pinned tabs** in job. and creators. (iOS "area under the pinned tabs"); the profile's Portfolio / Reviews pin under
+  the header.
+- **Long press** (500 ms, the iOS context-menu delay; 10 pt of movement or a scroll cancels; the click after it is
+  swallowed; no browser menu, no image callout): own media → Delete → the app's alert → `DELETE /v1/media/:id`
+  (owner-only on the server; collection items, avatar / intro / cover links, the video's poster and the R2 objects go
+  too) → the tile leaves, lists refresh; on error the tile stays and a toast says why. Someone else's media: Report
+  content. Notifications: Delete notification. My Contacts rows: Accept / Decline / Cancel / Remove.
+- **States**: the contact button's iOS chain (Add to contacts → Requested ▸ Cancel request → In contacts ✓ ▸ Remove
+  contact; Accept request), Follow / Following pills, Request / Requested / Reviewed, busy labels, alerts instead of
+  browser `confirm`, sheets instead of `<select>`, an in-header search instead of `prompt` in chats.
+- **Screens redone from Figma / iOS**: Notifications (Today with its count, Last 30 days, liked-video thumbnail,
+  Follow pill, unread dot), Settings (account card, grouped rows, red Log out, Privacy & Safety, Language), Switch
+  accounts sheet, Request a Review sheet (Invite someone new card), Reviews (4.9 out of 5, pink bars, Sort), job details
+  (author row with bookmark, price in the glass Apply bar, applicants with shortlist / Message / View profile), Edit
+  profile (labelled fields with icons, counters, Save bar), chips (grey fill), Reviews count on the profile tab, Show more.
+- **API (additive)**: notifications carry `media` (liked video) and `isFollowingActor`; `DELETE /v1/notifications/:id`;
+  media delete also removes the poster. E2E scenario K covers deletion and notification removal (15/15 on production).
+
+Remaining differences: Collabs → Reviews figure; one profile photo; no presence dot; Google / Apple disabled on the web;
+CSS blur instead of Liquid Glass refraction; Language offers English only on the web.

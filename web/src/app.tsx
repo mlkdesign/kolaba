@@ -14,6 +14,7 @@ import {
   stacks, startPolling, switcherOpen, Tab, tab, TAB_ORDER, toast, user,
 } from './state';
 import { Avatar, Icon, ProBadge, Sheets, Spinner } from './ui';
+import { uiScale } from './scale';
 
 function renderRoute(route: Route) {
   const p = route.params ?? {};
@@ -100,26 +101,38 @@ function TabBar({ hidden }: { hidden: boolean }) {
   );
 }
 
-/** Switch accounts (long press on the profile item): every profile of the account, Add from Settings. */
+/** Switch accounts (long press on the profile item, Figma 885:6949): a glass sheet under the tab bar — the current
+ *  account highlighted with a check, the others with a caret, Add business / creator account. */
 function AccountSwitcher() {
+  const [closing, setClosing] = useState(false);
   if (!switcherOpen.value) return null;
-  const close = () => { switcherOpen.value = false; };
+  const close = () => { setClosing(true); window.setTimeout(() => { switcherOpen.value = false; setClosing(false); }, 300); };
+  const hasCreator = profiles.value.some((p) => p.type === 'creator');
   return (
     <>
-      <div class="sheet-backdrop" style={{ zIndex: 205, position: 'absolute', inset: 0 }} onClick={close} />
-      <div class="switcher glass" role="dialog" aria-label="Switch accounts">
-        {profiles.value.map((p) => (
-          <button class={`list-row ${p.id === activeProfile.value?.id ? 'is-current' : ''}`}
-            onClick={() => { close(); if (p.id !== activeProfile.value?.id) setActiveProfile(p.id); }}>
-            <Avatar card={p} size={40} />
-            <div class="grow"><div class="list-row__title row" style={{ gap: 8 }}><span class="ellipsis">{p.displayName}</span><ProBadge card={p} compact /></div>
-              <div class="list-row__sub">{p.type === 'business' ? 'Business' : 'Creator'} · @{p.username}</div></div>
-            {p.id === activeProfile.value?.id && <Icon name="IconCheckActive" size={20} />}
-          </button>
-        ))}
-        <button class="list-row" onClick={() => { close(); push('settings', {}, 'profile'); }}>
-          <span class="avatar" style={{ width: 40, height: 40, background: 'rgba(255,255,255,.08)' }}><Icon name="IconAddAccount" size={20} /></span>
-          <div class="grow list-row__title">Add account</div>
+      <div class={`switcher-dim ${closing ? 'is-closing' : ''}`} onClick={close} />
+      <div class={`switcher ${closing ? 'is-closing' : ''}`} role="dialog" aria-label="Switch accounts">
+        <div class="sheet__grabber" />
+        <div class="sheet__head"><span style={{ width: 44 }} /><div class="sheet__title">Switch accounts</div>
+          <button class="glass sheet__close" aria-label="Close" onClick={close}><Icon name="IconSheetClose" size={14} /></button></div>
+        {profiles.value.map((p) => {
+          const current = p.id === activeProfile.value?.id;
+          return (
+            <button class={`switcher__row ${current ? 'is-current' : ''}`} onClick={() => { close(); if (!current) setActiveProfile(p.id); }}>
+              <Avatar card={p} size={32} />
+              <div class="grow" style={{ minWidth: 0 }}>
+                <div class="row" style={{ gap: 8 }}><span class="switcher__name ellipsis">{p.displayName}</span><ProBadge card={p} compact /></div>
+                <div class="switcher__type">{p.type === 'business' ? 'Business' : 'Creator'}</div>
+              </div>
+              {current ? <Icon name="IconCheckActive" size={20} /> : <Icon name="IconCaretRight" size={16} />}
+            </button>
+          );
+        })}
+        <div class="switcher__sep" />
+        <button class="switcher__row" onClick={() => { close(); push('settings', {}, 'profile'); }}>
+          <span class="switcher__plus"><Icon name="IconPlus" size={16} /></span>
+          <div class="grow"><div class="switcher__name">Add {hasCreator ? 'business' : 'creator'} account</div>
+            <div class="switcher__type">{hasCreator ? 'Create a profile for your brand or agency' : 'Portfolio, Reels and applications to jobs'}</div></div>
         </button>
       </div>
     </>
@@ -132,16 +145,17 @@ function PushLayer({ route, under }: { route: Route; under: boolean }) {
   const [settle, setSettle] = useState(false);
   const isLeaving = leaving.value === route.key;
   const start = (e: PointerEvent) => {
+    const k = uiScale();
     const x0 = e.clientX; let last = x0; let lastT = performance.now(); let v = 0;
     const width = (e.currentTarget as HTMLElement).parentElement!.clientWidth;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     const move = (ev: PointerEvent) => {
-      const now = performance.now(); v = ((ev.clientX - last) / Math.max(now - lastT, 1)) * 1000; last = ev.clientX; lastT = now;
-      setDrag(Math.max(0, ev.clientX - x0));
+      const now = performance.now(); v = ((ev.clientX - last) / k / Math.max(now - lastT, 1)) * 1000; last = ev.clientX; lastT = now;
+      setDrag(Math.max(0, (ev.clientX - x0) / k));
     };
     const up = (ev: PointerEvent) => {
       window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up);
-      const dx = Math.max(0, ev.clientX - x0);
+      const dx = Math.max(0, (ev.clientX - x0) / k);
       if (dx > width * 0.5 || v > 700) {
         setSettle(true); setDrag(width);
         window.setTimeout(() => { back(false); }, 300);
@@ -180,7 +194,7 @@ function MainApp() {
         ))}
       </div>
       <div class={`bottom-gradient ${tab.value === 'chat' ? 'is-low' : ''}`} hidden={tab.value === 'kolaba'} />
-      <TabBar hidden={pushed.length > 0} />
+      <TabBar hidden={false} />
       {/* Every pushed screen of every section stays mounted (scroll and data survive Back); only the selected section's show. */}
       {TAB_ORDER.map((t) => all[t].slice(1).map((route, i, list) => (
         <div key={route.key} hidden={t !== tab.value} style={{ position: 'absolute', inset: 0, zIndex: 40 + i, pointerEvents: t === tab.value ? undefined : 'none' }}>

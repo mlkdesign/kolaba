@@ -175,10 +175,17 @@ media.get('/:id/file', async (c) => {
 // DELETE /v1/media/:id — owner only: hidden at once everywhere, the R2 object removed.
 media.delete('/:id', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c);
-  const row = await c.env.DB.prepare(`SELECT owner_profile_id, storage_key, provider FROM media WHERE id = ?`).bind(c.req.param('id'))
-    .first<{ owner_profile_id: string; storage_key: string | null; provider: string }>();
+  const row = await c.env.DB.prepare(`SELECT owner_profile_id, storage_key, provider, poster_media_id FROM media WHERE id = ? AND status <> 'deleted'`)
+    .bind(c.req.param('id')).first<{ owner_profile_id: string; storage_key: string | null; provider: string; poster_media_id: string | null }>();
   if (!row || row.owner_profile_id !== profile.id) fail(404, 'media_not_found');
   const id = c.req.param('id');
+  // A video's poster frame (uploaded with it, same owner) goes with it.
+  const poster = row!.poster_media_id ? await c.env.DB.prepare(`SELECT id, storage_key, provider FROM media WHERE id = ? AND owner_profile_id = ? AND purpose = 'poster'`)
+    .bind(row!.poster_media_id, profile.id).first<{ id: string; storage_key: string | null; provider: string }>() : null;
+  if (poster) {
+    await c.env.DB.prepare(`UPDATE media SET status = 'deleted', deleted_at = ? WHERE id = ?`).bind(now(), poster.id).run();
+    if (poster.provider === 'r2' && poster.storage_key && c.env.MEDIA) c.executionCtx.waitUntil(c.env.MEDIA.delete(poster.storage_key));
+  }
   await c.env.DB.batch([
     c.env.DB.prepare(`UPDATE media SET status = 'deleted', deleted_at = ? WHERE id = ?`).bind(now(), id),
     c.env.DB.prepare(`DELETE FROM collection_items WHERE media_id = ?`).bind(id),

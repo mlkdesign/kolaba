@@ -24,9 +24,23 @@ notifications.get('/', async (c) => {
   const unread = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE recipient_profile_id = ? AND read_at IS NULL`)
     .bind(profile.id).first<{ n: number }>();
   const last = rows.results.length > limit ? page[page.length - 1] : null;
+  // The row's trailing piece (NotificationsView): the liked video's picture, and whether the actor is followed.
+  const payloads = page.map((n) => JSON.parse(n.payload) as Record<string, any>);
+  const mediaIds = [...new Set(payloads.map((p) => p.mediaId).filter(Boolean))] as string[];
+  const actorIds = [...new Set(page.map((n) => n.actor_profile_id).filter(Boolean))] as string[];
+  const [mediaRows, followRows] = await Promise.all([
+    mediaIds.length ? c.env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.id IN (${mediaIds.map(() => '?').join(',')}) AND m.status = 'ready'`)
+      .bind(...mediaIds).all<MediaRow>() : Promise.resolve({ results: [] as MediaRow[] }),
+    actorIds.length ? c.env.DB.prepare(`SELECT followee_profile_id AS id FROM follows WHERE follower_profile_id = ? AND followee_profile_id IN (${actorIds.map(() => '?').join(',')})`)
+      .bind(profile.id, ...actorIds).all<{ id: string }>() : Promise.resolve({ results: [] as { id: string }[] }),
+  ]);
+  const mediaById = new Map(mediaRows.results.map((m) => [m.id, mediaJSON(c.env, m)]));
+  const followed = new Set(followRows.results.map((r) => r.id));
   return c.json({
-    items: page.map((n) => ({ id: n.id, type: n.type, payload: JSON.parse(n.payload), createdAt: n.created_at, readAt: n.read_at,
-                              actor: n.actor_profile_id ? actors.get(n.actor_profile_id) ?? null : null })),
+    items: page.map((n, i) => ({ id: n.id, type: n.type, payload: payloads[i], createdAt: n.created_at, readAt: n.read_at,
+                              actor: n.actor_profile_id ? actors.get(n.actor_profile_id) ?? null : null,
+                              media: payloads[i].mediaId ? mediaById.get(payloads[i].mediaId) ?? null : null,
+                              isFollowingActor: n.actor_profile_id ? followed.has(n.actor_profile_id) : false })),
     unreadCount: unread?.n ?? 0,
     nextCursor: last ? encodeCursor({ t: last.created_at, id: last.id }) : null,
   });
@@ -39,6 +53,14 @@ notifications.post('/read', async (c) => {
   const res = await c.env.DB.prepare(`UPDATE notifications SET read_at = ? WHERE recipient_profile_id = ? AND read_at IS NULL
       AND id IN (${ids.map(() => '?').join(',')})`).bind(now(), profile.id, ...ids).run();
   return c.json({ updated: res.meta.changes });
+});
+
+// DELETE /v1/notifications/:id — the row's long-press Delete (iOS FIX 52).
+notifications.delete('/:id', async (c) => {
+  const profile = actingProfile(c);
+  const res = await c.env.DB.prepare(`DELETE FROM notifications WHERE id = ? AND recipient_profile_id = ?`).bind(c.req.param('id'), profile.id).run();
+  if (!res.meta.changes) fail(404, 'notification_not_found');
+  return c.json({ status: 'deleted' });
 });
 
 notifications.post('/read-all', async (c) => {

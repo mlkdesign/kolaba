@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { Card, Conversation, errorText, get, Message, post, uploadFile } from '../api';
 import { activeProfile, back, badges, chatOpen, openSheet, push, refresh, refreshTick, showToast } from '../state';
 import {
-  Avatar, BackButton, chatTime, clock, daySeparator, Empty, GlassButton, Header, HeaderTitle, icon, Logo, openViewer, ProBadge, SheetFrame, Spinner,
+  Icon, Avatar, BackButton, chatTime, clock, daySeparator, Empty, GlassButton, Header, HeaderTitle, icon, Logo, openViewer, ProBadge, SheetFrame, Spinner,
   useDebounced, useLoad, usePullToRefresh,
 } from '../ui';
 
@@ -71,7 +71,7 @@ export function ChatListScreen() {
         left={searching ? null : <GlassButton name="IconDotsThree" label="Chats menu" onClick={menu} />}
         center={searching ? null : <Logo word="chat" />}
         right={searching ? (
-          <div class="row" style={{ width: 'calc(100vw - 32px)', maxWidth: 'calc(386px - 32px)', gap: 8 }}>
+          <div class="row" style={{ width: 370, gap: 8 }}>
             <label class="glass search"><img src={icon('IconMagnifyingGlass')} alt="" />
               <input autoFocus placeholder="Search chats, contacts, messages" value={query} onInput={(e) => setQuery(e.currentTarget.value)} /></label>
             <GlassButton name="IconSheetClose" label="Close search" onClick={() => { setSearching(false); setQuery(''); }} />
@@ -182,14 +182,14 @@ export function ConversationScreen({ id }: { id: string }) {
         <img src={icon('IconShieldWarning')} alt="" />Report</button>
     </SheetFrame>
   ));
-  const findInChat = () => {
-    const term = window.prompt('Find in chat');
-    if (!term) return;
-    const hit = messages.find((m) => m.body.toLowerCase().includes(term.toLowerCase()));
-    if (!hit) { showToast('Nothing found'); return; }
-    const el = document.querySelector(`[data-msg="${hit.id}"]`);
-    el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  };
+  const [finding, setFinding] = useState(false);
+  const [term, setTerm] = useState('');
+  const [hit, setHit] = useState(0);
+  const hits = term.trim().length >= 2 ? messages.filter((m) => m.body.toLowerCase().includes(term.trim().toLowerCase())) : [];
+  useEffect(() => {
+    const m = hits[hit];
+    if (m) document.querySelector(`[data-msg="${m.id}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [term, hit]);
   if (error) return <><Header left={<BackButton />} /><div class="section-top"><Empty title="Chat not available" text={error} /></div></>;
   const lastOutgoing = messages.find((m) => m.isOutgoing)?.id;
   return (
@@ -211,7 +211,7 @@ export function ConversationScreen({ id }: { id: string }) {
                   {m.attachments.map((a) => (
                     <button class="bubble__media" onClick={() => openViewer(a)}>{a.kind === 'video' ? <video src={a.url ?? undefined} poster={a.posterUrl ?? undefined} preload="metadata" muted playsInline /> : <img src={a.url ?? ''} alt="" loading="lazy" />}</button>
                   ))}
-                  {m.body && <span class="bubble__text">{m.body}</span>}
+                  {m.body && <span class="bubble__text">{finding && term.trim().length >= 2 ? highlight(m.body, term.trim()) : m.body}</span>}
                 </div>
                 <span class="bubble-time">
                   {m.isOutgoing && <Tick read={!!m.isReadByOther || m.id !== lastOutgoing} />}
@@ -232,9 +232,18 @@ export function ConversationScreen({ id }: { id: string }) {
         <GlassButton name="IconArrowLeft" label="Send" disabled={!text.trim() || sending} onClick={() => send()} />
       </div>
       <Header left={<BackButton onClick={() => back()} />}
-        center={<button onClick={() => partner && push('profile-view', { id: partner.id })} style={{ textAlign: 'center' }}>
+        center={finding ? null : <button onClick={() => partner && push('profile-view', { id: partner.id })} style={{ textAlign: 'center' }}>
           <HeaderTitle title={meta?.relatedJobTitle ?? partner?.displayName ?? '…'} sub={meta?.relatedJobTitle ? partner?.displayName : partner ? partner.username : undefined} /></button>}
-        right={<div class="glass glass-pill"><button aria-label="Find in chat" onClick={findInChat}><img src={icon('IconMagnifyingGlass')} alt="" /></button>
+        right={finding ? (
+          <div class="row" style={{ width: 310, gap: 8 }}>
+            <label class="glass search"><img src={icon('IconMagnifyingGlass')} alt="" />
+              <input autoFocus placeholder="Search in chat" value={term} onInput={(e) => { setTerm(e.currentTarget.value); setHit(0); }} aria-label="Search in chat" />
+              {hits.length > 0 && <span class="muted" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{hit + 1} of {hits.length}</span>}
+              {hits.length > 1 && <button aria-label="Older match" onClick={() => setHit((hit + 1) % hits.length)}><Icon name="IconCaretDown" size={14} /></button>}
+            </label>
+            <GlassButton name="IconSheetClose" label="Close search" onClick={() => { setFinding(false); setTerm(''); }} />
+          </div>
+        ) : <div class="glass glass-pill"><button aria-label="Find in chat" onClick={() => setFinding(true)}><img src={icon('IconMagnifyingGlass')} alt="" /></button>
           <button aria-label="More" onClick={menu}><img src={icon('IconDotsThree')} alt="" /></button></div>} />
     </div>
   );
@@ -246,3 +255,10 @@ const Tick = ({ read }: { read: boolean }) => (
     <path d="M2.5 7.5l3 3 6-7" stroke={read ? 'var(--pink)' : 'rgba(236,237,239,.5)'} stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
   </svg>
 );
+
+/** The search term marked inside a bubble. */
+function highlight(text: string, term: string) {
+  const i = text.toLowerCase().indexOf(term.toLowerCase());
+  if (i < 0) return text;
+  return <>{text.slice(0, i)}<mark class="find-mark">{text.slice(i, i + term.length)}</mark>{text.slice(i + term.length)}</>;
+}

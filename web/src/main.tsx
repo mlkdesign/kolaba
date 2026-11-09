@@ -3,20 +3,20 @@ import './styles/shell.css';
 import './styles/app.css';
 import { App } from './app';
 
-// Scales the phone picture (not the app) to the window — the screen keeps real 386 × 841 CSS pixels (from the
-// previous mockup: js/ui/mockup.js). On phones the mockup is off and the app fills the screen.
-const PHONE_WIDTH = 434;
-const PHONE_HEIGHT = 887;
-function fitMockup() {
-  const phone = document.querySelector<HTMLElement>('.phone');
-  const stage = phone?.parentElement;
-  if (!phone || !stage || !document.documentElement.classList.contains('is-mockup')) return;
-  const scale = Math.min(1, stage.clientHeight / PHONE_HEIGHT, stage.clientWidth / PHONE_WIDTH);
-  phone.style.setProperty('--mockup-scale', String(Math.max(0.2, scale)));
+// One fixed logical screen (402 × 874). With the frame, the phone is 70 % of the window's height (and never wider
+// than the window); on a phone the screen alone fills the display. The scale goes to --ui-scale (shell.css, scale.ts).
+const PHONE = { w: 452, h: 920 };
+const SCREEN = { w: 402, h: 874 };
+function fit() {
+  const root = document.documentElement;
+  const mobile = root.classList.contains('is-mobile');
+  const scale = mobile
+    ? Math.min(innerWidth / SCREEN.w, innerHeight / SCREEN.h)
+    : Math.min((innerHeight * 0.7) / PHONE.h, (innerWidth - 32) / PHONE.w);
+  root.style.setProperty('--ui-scale', String(Math.max(0.2, scale)));
 }
-fitMockup();
-const stage = document.querySelector('.stage');
-if (stage) new ResizeObserver(fitMockup).observe(stage);
-window.addEventListener('resize', fitMockup);
+fit();
+window.addEventListener('resize', fit);
+window.visualViewport?.addEventListener('resize', fit);
 
 render(<App />, document.getElementById('app')!);

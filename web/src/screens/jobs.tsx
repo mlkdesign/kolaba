@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { Application, del, errorText, get, Job, Page, patch, post, put } from '../api';
 import { activeProfile, back, isBusiness, openSheet, push, refresh, refreshTick, showToast } from '../state';
 import {
-  Avatar, BackButton, confirmSheet, Empty, Gallery, GlassButton, Header, HeaderTitle, Icon, icon, Logo, MediaTile, openViewer, PageTabs, postDate, price,
+  pickSheet, Avatar, BackButton, confirmSheet, Empty, Gallery, GlassButton, Header, HeaderTitle, Icon, icon, Logo, MediaTile, openViewer, PageTabs, postDate, price,
   priceCaption, ProBadge, RatingInline, SheetFrame, Spinner, SwipePages, timeAgo, useDebounced, useLoad, usePullToRefresh,
 } from '../ui';
 
@@ -27,8 +27,7 @@ export function JobsScreen() {
   return (
     <>
       <div class="scroll" ref={scroller}>
-        <div class="section-top" />
-        <PageTabs tabs={tabs.map(([, l]) => l)} index={index} onChange={setIndex} />
+        <div class="tabs-pin"><PageTabs tabs={tabs.map(([, l]) => l)} index={index} onChange={setIndex} /></div>
         <SwipePages index={index} onChange={setIndex}>
           {tabs.map(([t]) => <JobList key={t} tab={t} q={q} register={(fn) => { reloads.current[t] = fn; }} />)}
         </SwipePages>
@@ -39,7 +38,7 @@ export function JobsScreen() {
         left={searching ? null : <GlassButton name="IconPlus" label="Create job" onClick={create} />}
         center={searching ? null : <Logo word="job" />}
         right={searching ? (
-          <div class="row" style={{ width: 'calc(100vw - 32px)', maxWidth: 'calc(386px - 32px)', gap: 8 }}>
+          <div class="row" style={{ width: 370, gap: 8 }}>
             <label class="glass search"><img src={icon('IconMagnifyingGlass')} alt="" />
               <input autoFocus placeholder="Search jobs" value={query} onInput={(e) => setQuery(e.currentTarget.value)} /></label>
             <GlassButton name="IconSheetClose" label="Close search" onClick={() => { setSearching(false); setQuery(''); }} />
@@ -175,6 +174,7 @@ function jobMenu(job: Job) {
 export function JobScreen({ id }: { id: string }) {
   const { data: job, error, setData, reload } = useLoad<Job>((s) => get(`/v1/jobs/${id}`, s), [id, refreshTick.value]);
   const [scrolled, setScrolled] = useState(0);
+  const [busy, setBusy] = useState(false);
   if (error) return <><Header left={<BackButton />} /><div class="section-top"><Empty title="Job not available" text={errorText(error)} /></div></>;
   if (!job) return <><Header left={<BackButton />} /><div class="jhero skeleton" style={{ borderRadius: 0 }} /><Spinner /></>;
   const me = activeProfile.value;
@@ -190,12 +190,15 @@ export function JobScreen({ id }: { id: string }) {
     catch (e) { showToast(errorText(e), 'error'); }
   };
   const setStatus = async (action: 'publish' | 'close') => {
+    setBusy(true);
     try { setData(await post(`/v1/jobs/${job.id}/${action}`)); showToast(action === 'publish' ? 'Published' : 'Closed — no more applications', 'ok'); refresh(); }
-    catch (e) { showToast(errorText(e), 'error'); }
+    catch (e) { showToast(errorText(e), 'error'); } finally { setBusy(false); }
   };
   const save = async () => {
-    try { job.isSaved ? await del(`/v1/jobs/${job.id}/save`) : await put(`/v1/jobs/${job.id}/save`); setData({ ...job, isSaved: !job.isSaved }); refresh(); }
-    catch (e) { showToast(errorText(e), 'error'); }
+    const next = !job.isSaved;
+    setData({ ...job, isSaved: next });
+    try { next ? await put(`/v1/jobs/${job.id}/save`) : await del(`/v1/jobs/${job.id}/save`); refresh(); }
+    catch (e) { setData({ ...job, isSaved: !next }); showToast(errorText(e), 'error'); }
   };
   return (
     <>
@@ -205,54 +208,111 @@ export function JobScreen({ id }: { id: string }) {
           <div class="phero__shade" />
         </div>
         <div class="jbody">
-          <button class="post__head" onClick={() => job.owner && push('profile-view', { id: job.owner.id })}>
-            <Avatar card={job.owner} size={48} ring />
-            <div class="grow">
-              <div class="post__author"><span class="ellipsis">{job.owner?.displayName}</span><ProBadge card={job.owner} compact /></div>
-              <RatingInline rating={job.owner?.rating ?? null} count={job.owner?.reviewsCount ?? 0} />
-            </div>
+          <div class="row" style={{ gap: 10 }}>
+            <button class="post__head" style={{ flex: 1 }} onClick={() => job.owner && push('profile-view', { id: job.owner.id })}>
+              <Avatar card={job.owner} size={48} ring />
+              <div class="grow">
+                <div class="post__author"><span class="ellipsis">{job.owner?.displayName}</span><ProBadge card={job.owner} compact /></div>
+                <div class="post__date">{postDate(job.publishedAt ?? job.createdAt)}</div>
+              </div>
+            </button>
             {job.status !== 'published' && <span class={`status-pill ${job.status}`}>{job.status}</span>}
-          </button>
+            {!isOwner && !isBusiness.value && (
+              <button class="bookmark" aria-label={job.isSaved ? 'Remove from saved' : 'Save'} aria-pressed={job.isSaved} onClick={save}>
+                <img src={icon(job.isSaved ? 'IconBookmarkFilled' : 'IconBookmarkSimple')} alt="" /></button>
+            )}
+          </div>
           <div class="post__headline">
-            <h1 class="jtitle" style={{ margin: 0, flex: 1 }}>{job.title}</h1>
+            <h1 class="post__title" style={{ margin: 0 }}>{job.title}</h1>
             {amount && <div class="post__price">{amount}<small>{priceCaption(job.compensationType)}</small></div>}
           </div>
           <div class="post__req" style={{ flexWrap: 'wrap', rowGap: 8 }}>
             <span>{job.flag && <span class="flag">{job.flag}</span>}{job.location}</span>
             {job.languages.length > 0 && <span><img src={icon('IconTranslate')} alt="" />{job.languages.map(langName).join(', ')}</span>}
+          </div>
+          {job.deliverables.length > 0 && <div class="post__req">{job.deliverables.map((d) => <span><img src={icon('IconVideoCamera')} alt="" />{d.count} {d.kind}</span>)}</div>}
+          <div class="post__desc selectable" style={{ whiteSpace: 'pre-line' }}>{job.description}</div>
+          {job.tags.length > 0 && <div class="tags">{job.tags.map((t) => <span class="tag">{t}</span>)}</div>}
+          <div class="post__req" style={{ gap: 12 }}>
+            {job.deadline && <span><img src={icon('IconFolderSimpleDashed')} alt="" />{new Date(job.deadline).toLocaleDateString('de-DE')}</span>}
             <span><img src={icon('IconJobViews')} alt="" />{job.viewsCount}</span>
           </div>
-          <div class="figure-row">
-            <div class="figure-card"><b>{job.applicationsCount}</b><span>Applicants</span></div>
-            <div class="figure-card"><b>{job.deadline ? new Date(job.deadline).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '—'}</b><span>Deadline</span></div>
-            <div class="figure-card"><b>{timeAgo(job.publishedAt ?? job.createdAt)}</b><span>Published</span></div>
-          </div>
-          <div class="post__desc selectable" style={{ fontSize: 16, whiteSpace: 'pre-line' }}>{job.description}</div>
-          {job.deliverables.length > 0 && (<><div class="subhead">Deliverables</div><div class="tags">{job.deliverables.map((d) => <span class="tag">{d.count} {d.kind}</span>)}</div></>)}
-          {job.tags.length > 0 && (<><div class="subhead">Tags</div><div class="tags">{job.tags.map((t) => <span class="tag">{t}</span>)}</div></>)}
-          {isOwner && (
-            <button class="pbtn" style={{ flex: 'none', marginTop: 8 }} onClick={() => push('applicants', { job })}>
-              <img src={icon('IconUser')} alt="" />View applicants ({job.applicationsCount})</button>
+          <div class="rdivider" />
+          {isOwner ? <Applicants job={job} /> : (
+            <div class="rlist__head"><img src={icon('IconUser')} alt="" style={{ width: 16, height: 16, opacity: .5 }} /><span>Applicants</span><span class="ptabs__count">{job.applicationsCount}</span></div>
           )}
         </div>
       </div>
       <Header left={<BackButton />} blurOpacity={Math.min(Math.max((scrolled - 260) / 120, 0), 1)}
-        right={isOwner ? <GlassButton name="IconPencilSimple" label="Edit" onClick={() => push('job-editor', { job })} />
-          : !isBusiness.value ? <GlassButton name={job.isSaved ? 'IconBookmarkFilled' : 'IconBookmarkSimple'} label={job.isSaved ? 'Remove from saved' : 'Save'} onClick={save} /> : null} />
+        right={<GlassButton name="IconDotsThree" label="More" onClick={() => jobMenu(job)} />} />
       <div class="apply-bar glass">
-        {isOwner ? (
-          job.status === 'published'
-            ? <button class="btn is-milky" onClick={() => setStatus('close')}>Close applications</button>
-            : <button class="btn is-accent" onClick={() => setStatus('publish')}>{job.status === 'draft' ? 'Publish' : 'Re-open'}</button>
-        ) : isBusiness.value ? (
-          <button class="btn" onClick={message}>Message</button>
-        ) : job.myApplicationId ? (
-          <><button class="btn is-milky" onClick={withdraw}>Withdraw</button><button class="btn" onClick={message}>Message</button></>
-        ) : (
-          <button class="btn is-accent" disabled={!job.acceptsApplications} onClick={apply}>{job.acceptsApplications ? 'Apply' : 'Applications closed'}</button>
-        )}
+        {amount && <div class="apply-bar__price"><span>{priceCaption(job.compensationType) || 'Budget'}</span><b>{amount}</b></div>}
+        <div class="row" style={{ gap: 8 }}>
+          {isOwner ? (
+            job.status === 'published'
+              ? <button class="btn is-milky" disabled={busy} onClick={() => setStatus('close')}>{busy ? 'Closing…' : 'Close applications'}</button>
+              : <button class="btn is-accent" disabled={busy} onClick={() => setStatus('publish')}>{busy ? 'Publishing…' : job.status === 'draft' ? 'Publish' : 'Re-open'}<img class="btn__arrow" src={icon('IconCaretRight')} alt="" style={{ transform: 'none' }} /></button>
+          ) : isBusiness.value ? (
+            <button class="btn" onClick={message}>Message</button>
+          ) : job.myApplicationId ? (
+            <><button class="btn is-milky" onClick={withdraw}>Withdraw</button><button class="btn" onClick={message}>Message</button></>
+          ) : (
+            <button class="btn is-accent" disabled={!job.acceptsApplications} onClick={apply}>{job.acceptsApplications ? 'Apply now' : 'Applications closed'}
+              {job.acceptsApplications && <img class="btn__arrow" src={icon('IconCaretRight')} alt="" style={{ transform: 'none' }} />}</button>
+          )}
+        </div>
       </div>
     </>
+  );
+}
+
+/** One's own job: the applicants under it (Figma 706:2366) — shortlist bookmark, message, profile. */
+function Applicants({ job }: { job: Job }) {
+  const [sort, setSort] = useState<'newest' | 'oldest' | 'rating'>('newest');
+  const { data, setData } = useLoad<{ items: Application[] }>((s) => get(`/v1/jobs/${job.id}/applications?sort=${sort}`, s), [job.id, sort, refreshTick.value]);
+  return (
+    <>
+      <div class="rlist__head"><img src={icon('IconUser')} alt="" style={{ width: 16, height: 16, opacity: .5 }} /><span>Applicants</span>
+        <span class="ptabs__count">{data?.items.length ?? job.applicationsCount}</span><span class="grow" />
+        <button class="rsort" onClick={() => pickSheet('Sort applicants', [['newest', 'Newest'], ['oldest', 'Oldest'], ['rating', 'Top rated']], sort, setSort)}>
+          <img src={icon('IconSortAscending')} alt="" />Sort</button></div>
+      {!data ? <Spinner /> : !data.items.length ? <Empty title="No applicants yet" text="Applications appear here as creators apply." iconName="IconUser" /> :
+        data.items.map((a) => <ApplicantCard a={a} job={job} key={a.id} onShortlist={(v) => setData({ items: data.items.map((x) => (x.id === a.id ? { ...x, isShortlisted: v } : x)) })} />)}
+    </>
+  );
+}
+
+function ApplicantCard({ a, job, onShortlist }: { a: Application; job: Job; onShortlist: (v: boolean) => void }) {
+  const [open, setOpen] = useState(false);
+  const toggle = async () => {
+    const next = !a.isShortlisted;
+    onShortlist(next);
+    try { await put(`/v1/jobs/applications/${a.id}/shortlist`, { shortlisted: next }); } catch (e) { onShortlist(!next); showToast(errorText(e), 'error'); }
+  };
+  const message = async () => {
+    try { const { id } = await post('/v1/conversations', { profileId: a.applicant!.id, jobId: job.id }); push('conversation', { id }); }
+    catch (e) { showToast(errorText(e), 'error'); }
+  };
+  return (
+    <div class="applicant">
+      <div class="row" style={{ alignItems: 'flex-start' }}>
+        <Avatar card={a.applicant} size={48} ring />
+        <div class="grow" style={{ minWidth: 0 }}>
+          <div class="row" style={{ gap: 8 }}><span class="rcard__name ellipsis">{a.applicant?.displayName}</span><ProBadge card={a.applicant} compact />
+            <span class="muted" style={{ fontSize: 12 }}>{timeAgo(a.createdAt)} ago</span></div>
+          <div class="post__date" style={{ fontSize: 14 }}>{a.applicant?.location ? `${a.applicant.flag ?? ''} ${a.applicant.location}` : `@${a.applicant?.username}`}</div>
+        </div>
+        <button class="bookmark" style={{ marginTop: -10, marginRight: -10 }} aria-label={a.isShortlisted ? 'Remove from shortlist' : 'Shortlist'} aria-pressed={a.isShortlisted} onClick={toggle}>
+          <img src={icon(a.isShortlisted ? 'IconBookmarkFilled' : 'IconBookmarkSimple')} alt="" /></button>
+      </div>
+      <div class={`post__desc selectable ${open ? '' : 'lines-4'}`}>{a.message}</div>
+      {a.message.length > 160 && <button class="show-more" style={{ alignSelf: 'flex-start', marginTop: -8 }} onClick={() => setOpen(!open)}>{open ? 'Show less' : 'Show more'}</button>}
+      {a.media.length > 0 && <div class="applicant__media" data-hscroll>{a.media.map((m) => <MediaTile media={m} />)}</div>}
+      <div class="row" style={{ gap: 8 }}>
+        <button class="btn is-small" style={{ flex: 1 }} onClick={message}><img class="btn__icon" src={icon('IconChatTeardropText')} alt="" />Message</button>
+        <button class="btn is-small is-outline" style={{ flex: 1 }} onClick={() => a.applicant && push('profile-view', { id: a.applicant.id })}>View profile<img src={icon('IconCaretRight')} alt="" style={{ width: 14, height: 14 }} /></button>
+      </div>
+    </div>
   );
 }
 
@@ -385,8 +445,10 @@ export function JobEditor({ job }: { job?: Job }) {
             <div class="row">
               {input(comp === 'range' ? 'From' : 'Amount', min, (v) => setMin(v.replace(/[^\d.]/g, '')), { inputMode: 'decimal' })}
               {comp === 'range' && input('To', max, (v) => setMax(v.replace(/[^\d.]/g, '')), { inputMode: 'decimal' })}
-              <div style={{ width: 100 }}><span class="label">Currency</span><select class="select" value={currency} onChange={(e) => setCurrency(e.currentTarget.value)}>
-                {['USD', 'EUR', 'GBP', 'UAH', 'PLN', 'AED', 'THB', 'KZT', 'IDR', 'TRY'].map((c) => <option>{c}</option>)}</select></div>
+              <div style={{ width: 100 }}><span class="label">Currency</span>
+                <button class="field" style={{ width: '100%', justifyContent: 'space-between', paddingRight: 16 }}
+                  onClick={() => pickSheet('Currency', ['USD', 'EUR', 'GBP', 'UAH', 'PLN', 'AED', 'THB', 'KZT', 'IDR', 'TRY'].map((c) => [c, c] as [string, string]), currency, setCurrency)}>
+                  {currency}<Icon name="IconCaretDown" size={14} /></button></div>
             </div>
           )}
           <div class="row">{input('Reels', reels, (v) => setReels(v.replace(/\D/g, '')), { inputMode: 'numeric' })}{input('Photos', photos, (v) => setPhotos(v.replace(/\D/g, '')), { inputMode: 'numeric' })}</div>

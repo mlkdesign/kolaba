@@ -284,6 +284,32 @@ await test('J: A edits the profile; A asks contact B for a review; B gets it and
   expect(list.items.some((x) => x.author?.id === business.profileId) || row.state !== 'available', 'published review not listed');
 });
 
+await test('K: owner deletes media → gone from portfolio and collection; others cannot; notifications can be deleted', async () => {
+  const health = (await call(null, 'GET', '/v1/health')).json;
+  if (health.storage) {
+    const req = await call(creator, 'POST', '/v1/media/uploads', { purpose: 'portfolio', kind: 'photo', mime: 'image/jpeg', bytes: 1000 });
+    const jpeg = new Uint8Array(1000); jpeg.set([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70, 0, 1]);
+    await call(creator, 'PUT', `/v1/media/uploads/${req.json.mediaId}`, jpeg, undefined, { 'Content-Type': 'image/jpeg' });
+    const col = await call(creator, 'POST', '/v1/media/collections', { title: 'E2E folder' });
+    expect(col.status < 300, `collection ${col.text}`);
+    const colId = col.json.id;
+    expect((await call(creator, 'PUT', `/v1/media/collections/${colId}/items`, { mediaIds: [req.json.mediaId] })).status < 300, 'collection items');
+    expectError(await call(business, 'DELETE', `/v1/media/${req.json.mediaId}`), 404, 'media_not_found');
+    expect((await call(creator, 'DELETE', `/v1/media/${req.json.mediaId}`)).json.status === 'deleted', 'owner delete');
+    const items = (await call(creator, 'GET', `/v1/media/collections/${colId}/items`)).json.items;
+    expect(!items.some((m) => m.id === req.json.mediaId), 'deleted media still in the collection');
+    expectError(await call(creator, 'DELETE', `/v1/media/${req.json.mediaId}`), 404, 'media_not_found');
+    await call(creator, 'DELETE', `/v1/media/collections/${colId}`);
+  }
+  await call(creator, 'PUT', `/v1/profiles/${business.profileId}/follow`);
+  const notes = (await call(business, 'GET', '/v1/notifications?limit=10')).json.items;
+  const n = notes.find((x) => x.type === 'followed' && x.actor?.id === creator.profileId);
+  expect(n && typeof n.isFollowingActor === 'boolean', 'notification without isFollowingActor');
+  expectError(await call(creator, 'DELETE', `/v1/notifications/${n.id}`), 404, 'notification_not_found');
+  expect((await call(business, 'DELETE', `/v1/notifications/${n.id}`)).json.status === 'deleted', 'notification delete');
+  await call(creator, 'DELETE', `/v1/profiles/${business.profileId}/follow`);
+});
+
 await test('cleanup: the e2e job is deleted', async () => {
   if (jobId) expect((await call(business, 'DELETE', `/v1/jobs/${jobId}`)).json.status === 'deleted', 'delete failed');
 });

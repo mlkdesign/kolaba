@@ -5,6 +5,7 @@ import { ComponentChildren, toChildArray } from 'preact';
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { Card, Media } from './api';
 import { back, closeSheet, openSheet, sheets } from './state';
+import { uiScale } from './scale';
 
 export const BASE: string = (import.meta as any).env?.BASE_URL ?? '/';
 export const icon = (name: string) => `${BASE}icons/${name}.svg`;
@@ -55,12 +56,12 @@ export const HeaderTitle = ({ title, sub }: { title: string; sub?: string }) => 
 // ─── page tabs and swipeable pages ───
 
 /** Equal-width tabs, 40 pt, the pink capsule underline sliding under the selected one. */
-export function PageTabs({ tabs, index, onChange, profile }: { tabs: string[]; index: number; onChange: (i: number) => void; profile?: boolean }) {
+export function PageTabs({ tabs, index, onChange, profile, counts }: { tabs: string[]; index: number; onChange: (i: number) => void; profile?: boolean; counts?: (number | undefined)[] }) {
   const width = 100 / tabs.length;
   return (
     <nav class={`ptabs ${profile ? 'is-profile' : ''}`} role="tablist">
       {tabs.map((t, i) => (
-        <button role="tab" aria-selected={i === index} class={`ptabs__tab ${i === index ? 'is-active' : ''}`} onClick={() => onChange(i)}>{t}</button>
+        <button role="tab" aria-selected={i === index} class={`ptabs__tab ${i === index ? 'is-active' : ''}`} onClick={() => onChange(i)}>{t}{counts?.[i] ? <span class="ptabs__count">{counts[i]}</span> : null}</button>
       ))}
       <i class="ptabs__line" style={{ width: `${width}%`, transform: `translateX(${index * 100}%)` }} />
     </nav>
@@ -74,12 +75,13 @@ export function useHorizontalSwipe(onDrag: (dx: number) => void, onEnd: (dx: num
   return (e: PointerEvent) => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     if ((e.target as HTMLElement).closest('[data-hscroll], input, textarea')) return;
+    const k = uiScale();
     const x0 = e.clientX; const y0 = e.clientY; const t0 = performance.now();
     let mode: 'none' | 'h' | 'v' = 'none';
     let lastX = x0; let lastT = t0; let vx = 0;
     const el = e.currentTarget as HTMLElement;
     const move = (ev: PointerEvent) => {
-      const dx = ev.clientX - x0; const dy = ev.clientY - y0;
+      const dx = (ev.clientX - x0) / k; const dy = (ev.clientY - y0) / k;
       if (mode === 'none') {
         if (Math.hypot(dx, dy) < 10) return;
         mode = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
@@ -87,13 +89,13 @@ export function useHorizontalSwipe(onDrag: (dx: number) => void, onEnd: (dx: num
       }
       if (mode !== 'h') return;
       const now = performance.now();
-      vx = ((ev.clientX - lastX) / Math.max(now - lastT, 1)) * 1000; lastX = ev.clientX; lastT = now;
+      vx = ((ev.clientX - lastX) / k / Math.max(now - lastT, 1)) * 1000; lastX = ev.clientX; lastT = now;
       onDrag(dx);
     };
     const up = (ev: PointerEvent) => {
       window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up);
       if (mode === 'h') {
-        onEnd(ev.clientX - x0, vx);
+        onEnd((ev.clientX - x0) / k, vx);
         // swallow the click that ends a drag
         const stop = (c: Event) => { c.stopPropagation(); c.preventDefault(); };
         window.addEventListener('click', stop, { capture: true, once: true });
@@ -197,10 +199,10 @@ export function Avatar({ card, size = 48, rounded, ring }: { card: Pick<Card, 'd
 
 export const StarIcon = ({ size = 16 }: { size?: number }) => <i class="star-icon" style={{ width: size, height: size }} aria-hidden="true" />;
 
-export function Stars({ value }: { value: number }) {
+export function Stars({ value, size = 16.667 }: { value: number; size?: number }) {
   return (
     <span class="stars" role="img" aria-label={`${value.toFixed(1)} of 5`}>
-      {[0, 1, 2, 3, 4].map((i) => <i class="star" style={{ ['--fill' as any]: `${Math.min(Math.max(value - i, 0), 1) * 100}%` }} />)}
+      {[0, 1, 2, 3, 4].map((i) => <i class="star" style={{ width: size, height: size, ['--fill' as any]: `${Math.min(Math.max(value - i, 0), 1) * 100}%` }} />)}
     </span>
   );
 }
@@ -264,18 +266,19 @@ function SheetView({ id, tall, closing, render }: { id: number; tall?: boolean; 
     const body = target.closest('.sheet__body') as HTMLElement | null;
     if (!target.closest('[data-drag]') && !(body && body.scrollTop <= 0)) return;
     if (target.closest('input, textarea, select')) return;
+    const k = uiScale();
     const y0 = e.clientY; let lastY = y0; let lastT = performance.now(); let v = 0; let active = false;
     const move = (ev: PointerEvent) => {
-      const dy = ev.clientY - y0;
+      const dy = (ev.clientY - y0) / k;
       if (!active) { if (dy < 8) { if (dy < -8) cleanup(); return; } active = true; }
-      const now = performance.now(); v = ((ev.clientY - lastY) / Math.max(now - lastT, 1)) * 1000; lastY = ev.clientY; lastT = now;
+      const now = performance.now(); v = ((ev.clientY - lastY) / k / Math.max(now - lastT, 1)) * 1000; lastY = ev.clientY; lastT = now;
       setOffset(Math.max(0, dy));
       ev.preventDefault();
     };
     const up = (ev: PointerEvent) => {
       cleanup();
       if (!active) return;
-      const dy = Math.max(0, ev.clientY - y0);
+      const dy = Math.max(0, (ev.clientY - y0) / k);
       const h = ref.current?.clientHeight ?? 400;
       if (dy > h / 3 || v > 700) { ref.current?.style.setProperty('--from', `${dy}px`); setOffset(null); close(); }
       else { setSettling(true); setOffset(0); window.setTimeout(() => { setSettling(false); setOffset(null); }, 300); }
@@ -299,12 +302,20 @@ export function Sheets() {
   return <>{sheets.value.map((s) => (s.raw ? <div key={s.id}>{s.render(() => closeSheet(s.id))}</div> : <SheetView key={s.id} {...s} />))}</>;
 }
 
-export function confirmSheet(title: string, text: string, action: string, onConfirm: () => void, danger = false) {
+/** Confirmation in the app's alert style (iOS Alert). */
+export function confirmSheet(title: string, text: string, action: string, onConfirm: () => void | Promise<void>, danger = false) {
+  alertDialog(title, text, action, onConfirm, danger);
+}
+
+/** A choice from a short list (replaces <select>): a sheet with a check on the current value. */
+export function pickSheet<T extends string>(title: string, options: [T, string][], current: T, onPick: (v: T) => void) {
   openSheet((close) => (
     <SheetFrame title={title} close={close}>
-      <p class="muted" style={{ fontSize: 15, lineHeight: 1.45, margin: '0 4px 18px', textAlign: 'center' }}>{text}</p>
-      <button class={`btn ${danger ? 'is-danger' : ''}`} onClick={() => { close(); onConfirm(); }}>{action}</button>
-      <button class="btn is-ghost" style={{ marginTop: 6 }} onClick={close}>Cancel</button>
+      {options.map(([v, label]) => (
+        <button class="menu-item" role="menuitemradio" aria-checked={v === current} onClick={() => { close(); if (v !== current) onPick(v); }}>
+          <span class="grow">{label}</span>{v === current && <Icon name="IconCheckActive" />}
+        </button>
+      ))}
     </SheetFrame>
   ));
 }
@@ -322,15 +333,20 @@ export function openViewer(media: Media, extra?: (close: () => void) => Componen
   ), { raw: true });
 }
 
-export function MediaTile({ media, onOpen, picked }: { media: Media; onOpen?: () => void; picked?: boolean }) {
+export function MediaTile({ media, onOpen, picked, menu, removing }: { media: Media; onOpen?: () => void; picked?: boolean; menu?: MenuAction[]; removing?: boolean }) {
   const [broken, setBroken] = useState(false);
   const src = media.kind === 'video' ? media.posterUrl : media.url;
+  const press = useLongPress((el) => menu?.length && openContextMenu(el, menu));
+  const open = onOpen ?? (() => openViewer(media));
   return (
-    <button class={`mtile ${picked ? 'is-picked' : ''}`} onClick={onOpen ?? (() => openViewer(media))} aria-label={media.title ?? media.kind}>
+    <button class={`mtile ${picked ? 'is-picked' : ''} ${removing ? 'is-removing' : ''}`} aria-label={media.title ?? (media.kind === 'video' ? 'Video' : 'Photo')}
+      {...(menu?.length ? { onPointerDown: press.onPointerDown as any, onPointerMove: press.onPointerMove as any, onPointerUp: press.onPointerUp,
+        onPointerCancel: press.onPointerCancel, onPointerLeave: press.onPointerLeave, onContextMenu: press.onContextMenu } : {})}
+      onClick={menu?.length ? press.click(open) : open}>
       {src && !broken ? <img src={src} alt="" loading="lazy" draggable={false} onError={() => setBroken(true)} />
         : <div style={{ position: 'absolute', inset: 0, background: gradientFor(media.id) }} />}
       {media.kind === 'video' && (
-        <span class="glass mtile__time"><Icon name="IconPlay" size={12} />{media.duration ? fmtDuration(media.duration) : ''}</span>
+        <span class="mtile__time"><Icon name="IconPlay" size={12} />{media.duration ? fmtDuration(media.duration) : ''}</span>
       )}
     </button>
   );
@@ -360,7 +376,7 @@ export function usePullToRefresh(onRefresh: () => Promise<unknown> | void) {
     const move = (e: TouchEvent | PointerEvent) => {
       if (y0 === null) return;
       const y = 'touches' in e ? e.touches[0].clientY : e.clientY;
-      pull = Math.max(0, (y - y0) * 0.6);
+      pull = Math.max(0, ((y - y0) / uiScale()) * 0.6);
       if (el.scrollTop > 0) { y0 = null; pull = 0; }
       paint(pull);
     };
@@ -465,3 +481,88 @@ export function useDebounced<T>(value: T, ms = 300) {
 }
 
 export const flagLocation = (c: { flag: string | null; location: string | null }) => (c.location ? `${c.flag ?? ''} ${c.location}`.trim() : null);
+
+// ─── long press (the iOS context menu's 0.5 s) ───
+
+/** Press and hold 500 ms without moving (10 pt): `onLong` runs and the click that ends the press is swallowed;
+ *  moving, scrolling or releasing earlier cancels it, so a tap still opens and a swipe still swipes. Mouse and
+ *  touch alike; the browser's own context menu never shows. */
+export function useLongPress(onLong: (el: HTMLElement) => void, ms = 500) {
+  const timer = useRef<number>();
+  const fired = useRef(false);
+  const start = useRef<[number, number] | null>(null);
+  const cancel = () => { window.clearTimeout(timer.current); start.current = null; };
+  return {
+    onPointerDown: (e: PointerEvent) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      fired.current = false;
+      start.current = [e.clientX, e.clientY];
+      const el = e.currentTarget as HTMLElement;
+      timer.current = window.setTimeout(() => { fired.current = true; start.current = null; navigator.vibrate?.(8); onLong(el); }, ms);
+    },
+    onPointerMove: (e: PointerEvent) => {
+      if (!start.current) return;
+      if (Math.hypot(e.clientX - start.current[0], e.clientY - start.current[1]) / uiScale() > 10) cancel();
+    },
+    onPointerUp: cancel,
+    onPointerCancel: cancel,
+    onPointerLeave: cancel,
+    onContextMenu: (e: Event) => e.preventDefault(),
+    /** True (once) right after a long press fired — for swallowing the click that ends it. */
+    consume: () => { const f = fired.current; fired.current = false; return f; },
+    /** Wraps a click handler: skipped right after a long press. */
+    click: (fn: () => void) => () => { if (fired.current) { fired.current = false; return; } fn(); },
+  };
+}
+
+export interface MenuAction { label: string; icon: string; danger?: boolean; run: () => void }
+
+/** The iOS context menu over a lifted card: the rest blurred and dimmed, the card at its place (moved up if the
+ *  menu would not fit under it), the menu under it. A tap outside closes it. */
+export function openContextMenu(el: HTMLElement, actions: MenuAction[]) {
+  const app = (el.closest('.app') as HTMLElement | null) ?? document.body;
+  const k = uiScale();
+  const a = app.getBoundingClientRect(); const r = el.getBoundingClientRect();
+  const box = { x: (r.left - a.left) / k, y: (r.top - a.top) / k, w: r.width / k, h: r.height / k };
+  const menuH = actions.length * 44 + 8;
+  const screenH = a.height / k;
+  const top = Math.max(70, Math.min(box.y, screenH - 40 - menuH - 12 - box.h));
+  const clone = el.cloneNode(true) as HTMLElement;
+  openSheet((close) => (
+    <div class="ctx" onClick={close} onContextMenu={(e) => e.preventDefault()}>
+      <div class="ctx__preview" style={{ left: box.x, top, width: box.w, height: box.h, ['--from' as any]: `${box.y - top}px` }}
+        ref={(n) => { if (n && !n.firstChild) { clone.style.width = '100%'; clone.style.height = '100%'; n.appendChild(clone); } }} />
+      <div class={`ctx__menu glass ${box.x + box.w / 2 > 201 ? 'is-end' : ''}`} role="menu"
+        style={{ top: top + box.h + 12, ...(box.x + box.w / 2 > 201 ? { right: Math.max(16, 402 - box.x - box.w) } : { left: Math.max(16, box.x) }) }}
+        onClick={(e) => e.stopPropagation()}>
+        {actions.map((m) => (
+          <button role="menuitem" class={`ctx__item ${m.danger ? 'is-danger' : ''}`} onClick={() => { close(); m.run(); }}>
+            <span>{m.label}</span><img src={icon(m.icon)} alt="" />
+          </button>
+        ))}
+      </div>
+    </div>
+  ), { raw: true });
+}
+
+/** The app's alert (iOS Alert, KOLABA style): title, message, a destructive or default action and Cancel. */
+export function alertDialog(title: string, message: string, action: string, onConfirm: () => void | Promise<void>, danger = true) {
+  openSheet((close) => <AlertView title={title} message={message} action={action} danger={danger} close={close} onConfirm={onConfirm} />, { raw: true });
+}
+
+function AlertView({ title, message, action, danger, close, onConfirm }: { title: string; message: string; action: string; danger: boolean; close: () => void; onConfirm: () => void | Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <div class="alert-root" onClick={() => !busy && close()}>
+      <div class="alert" role="alertdialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()}>
+        <div class="alert__text"><b>{title}</b><span>{message}</span></div>
+        <div class="alert__buttons">
+          <button disabled={busy} onClick={close}>Cancel</button>
+          <button class={danger ? 'is-danger' : 'is-default'} disabled={busy} onClick={async () => { setBusy(true); try { await onConfirm(); } finally { close(); } }}>
+            {busy ? <span class="spinner" style={{ width: 16, height: 16, margin: 0, borderWidth: 2 }} /> : action}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -4,7 +4,8 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Card, del, errorText, get, Media, Notification, post, put } from '../api';
 import { activeProfile, badges, openSheet, push, refresh, refreshTick, showToast, tab } from '../state';
-import { Avatar, BackButton, Dots, Empty, fmtCount, GlassButton, Header, HeaderTitle, Icon, icon, Logo, ProBadge, SheetFrame, Spinner, timeAgo, useLoad } from '../ui';
+import { uiScale } from '../scale';
+import { gradientFor, openContextMenu, openViewer, useLongPress, Avatar, BackButton, Dots, Empty, fmtCount, GlassButton, Header, HeaderTitle, Icon, icon, Logo, ProBadge, SheetFrame, Spinner, timeAgo, useLoad } from '../ui';
 
 interface CreatorReels { author: Card; bio: string; isFollowing: boolean; videos: Media[] }
 
@@ -106,7 +107,7 @@ function CreatorPage({ creator, index, active, near, muted, onVideo, onLike, onF
   };
   const like = (e: MouseEvent) => {
     const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setHearts((h) => [...h, { id: Date.now(), x: e.clientX - box.left, y: e.clientY - box.top }]);
+    setHearts((h) => [...h, { id: Date.now(), x: (e.clientX - box.left) / uiScale(), y: (e.clientY - box.top) / uiScale() }]);
     if (!media.isLiked) onLike(media);
   };
   const more = () => openSheet((close) => (
@@ -180,71 +181,114 @@ function Reel({ media, active, load, muted, onProgress }: { media: Media; active
   );
 }
 
-// ─── Notifications ───
+// ─── Notifications (NotificationsView, Figma 654:16140): Today (with its unread count) and Last 30 days ───
 
-const notificationText: Record<string, (n: Notification) => string> = {
-  contact_request: () => 'wants to add you to contacts',
-  contact_accepted: () => 'accepted your contact request',
-  new_message: () => 'sent you a message',
-  application_received: (n) => `applied to “${n.payload.jobTitle ?? 'your job'}”`,
-  review_request: () => 'asked you for a review',
-  new_review: () => 'left you a review',
-  liked_video: () => 'liked your video',
-  viewed_profile: () => 'viewed your profile',
-  followed: () => 'started following you',
-  job_update: () => 'updated a job',
+const notificationText: Record<string, string> = {
+  contact_request: 'Sent you a contact request', contact_accepted: 'Accepted your contact request', new_message: 'Sent you a message',
+  application_received: 'Applied to your job', review_request: 'Asked you for a review', new_review: 'Left you a review',
+  liked_video: 'Liked your video', viewed_profile: 'Viewed your profile', followed: 'Followed you', job_update: 'Updated a job you saved',
 };
 const notificationIcon: Record<string, string> = {
-  contact_request: 'IconUserPlus', contact_accepted: 'IconCheckCircle', new_message: 'IconChatText', application_received: 'IconNotifBriefcase',
+  contact_request: 'IconUserPlus', contact_accepted: 'IconUserPlus', new_message: 'IconEnvelopeFilled', application_received: 'IconNotifBriefcase',
   review_request: 'IconStarRating', new_review: 'IconStarRating', liked_video: 'IconNotifHeart', viewed_profile: 'IconNotifEye', followed: 'IconNotifFollow',
-  job_update: 'IconNotifBriefcase',
+  job_update: 'IconArrowsClockwise',
 };
 
+/** "1 m", "3 h" today (or within the hour), else "4 Mar" (NotificationTime). */
+function notificationTime(ms: number) {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (new Date(ms).toDateString() === new Date().toDateString() || s < 3600) return s < 3600 ? `${Math.max(1, Math.floor(s / 60))} m` : `${Math.floor(s / 3600)} h`;
+  return new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+
+type Note = Notification & { media?: Media | null; isFollowingActor?: boolean };
+
 export function NotificationsScreen() {
-  const { data, loading, setData } = useLoad<{ items: Notification[]; unreadCount: number; nextCursor: string | null }>(
-    (s) => get('/v1/notifications?limit=50', s), [refreshTick.value, activeProfile.value?.id]);
-  const open = async (n: Notification) => {
+  const { data, loading, setData, reload } = useLoad<{ items: Note[]; unreadCount: number; nextCursor: string | null }>(
+    (s) => get('/v1/notifications?limit=60', s), [refreshTick.value, activeProfile.value?.id]);
+  const patchItems = (fn: (n: Note) => Note) => setData({ ...data!, items: data!.items.map(fn) });
+  const open = (n: Note) => {
     if (!n.readAt) {
       post('/v1/notifications/read', { ids: [n.id] }).then(refresh).catch(() => {});
-      setData({ ...data!, items: data!.items.map((x) => (x.id === n.id ? { ...x, readAt: Date.now() } : x)) });
+      patchItems((x) => (x.id === n.id ? { ...x, readAt: Date.now() } : x));
     }
     if (n.type === 'new_message' && n.payload.conversationId) push('conversation', { id: n.payload.conversationId });
     else if (n.type === 'application_received' && n.payload.jobId) push('job', { id: n.payload.jobId });
     else if (n.type === 'contact_request') push('contacts', { filter: 'requests' });
     else if (n.type === 'review_request' && n.actor) push('review-form', { recipient: n.actor });
     else if (n.type === 'new_review') push('profile-view', { id: activeProfile.value!.id, tab: 'reviews' });
+    else if (n.type === 'liked_video' && n.media) openViewer(n.media);
     else if (n.actor) push('profile-view', { id: n.actor.id });
+  };
+  const follow = async (n: Note) => {
+    const next = !n.isFollowingActor;
+    const set = (v: boolean) => setData((d) => d && ({ ...d, items: d.items.map((x) => (x.actor?.id === n.actor!.id ? { ...x, isFollowingActor: v } : x)) }));
+    set(next);
+    try { next ? await put(`/v1/profiles/${n.actor!.id}/follow`) : await del(`/v1/profiles/${n.actor!.id}/follow`); }
+    catch (e) { set(!next); showToast(errorText(e), 'error'); }
+  };
+  const remove = async (n: Note) => {
+    try { await del(`/v1/notifications/${n.id}`); setData((d) => d && ({ ...d, items: d.items.filter((x) => x.id !== n.id) })); refresh(); }
+    catch (e) { showToast(errorText(e), 'error'); }
   };
   const readAll = async () => {
     try { await post('/v1/notifications/read-all'); setData({ ...data!, unreadCount: 0, items: data!.items.map((x) => ({ ...x, readAt: x.readAt ?? Date.now() })) }); refresh(); }
     catch (e) { showToast(errorText(e), 'error'); }
   };
-  const today = (data?.items ?? []).filter((n) => Date.now() - n.createdAt < 86_400_000);
-  const earlier = (data?.items ?? []).filter((n) => Date.now() - n.createdAt >= 86_400_000);
-  const row = (n: Notification) => (
-    <button class={`notif ${n.readAt ? '' : 'is-unread'}`} onClick={() => open(n)} key={n.id}>
-      <span style={{ position: 'relative' }}><Avatar card={n.actor} size={48} />
-        <span class="notif__icon" style={{ left: 30 }}><img src={icon(notificationIcon[n.type] ?? 'IconBellSmall')} alt="" /></span></span>
-      <div class="grow"><div class="notif__text"><b>{n.actor?.displayName ?? 'Someone'}</b> {(notificationText[n.type] ?? (() => n.type))(n)}</div>
-        <div class="notif__time">{timeAgo(n.createdAt)}</div></div>
-    </button>
-  );
+  const menu = () => openSheet((close) => (
+    <SheetFrame title="Notifications" close={close}>
+      <button class="menu-item" disabled={!data?.unreadCount} onClick={() => { close(); void readAll(); }}><img src={icon('IconCheckCircle')} alt="" />Mark all as read</button>
+      <button class="menu-item" onClick={() => { close(); void reload(); }}><img src={icon('IconArrowsClockwise')} alt="" />Refresh</button>
+    </SheetFrame>
+  ));
+  const items = data?.items ?? [];
+  const today = items.filter((n) => new Date(n.createdAt).toDateString() === new Date().toDateString());
+  const earlier = items.filter((n) => !today.includes(n) && Date.now() - n.createdAt < 30 * 86_400_000);
+  const unreadToday = today.filter((n) => !n.readAt).length;
   return (
     <>
       <div class="scroll">
-        <div class="section-top" />
-        {loading && !data ? <Spinner /> : !data?.items.length ? <Empty title="No notifications" text="Contact requests, messages, applications, follows and reviews appear here." iconName="IconBell" /> : (
-          <>
-            {today.length > 0 && <div class="section-label" style={{ marginTop: 0 }}>Today</div>}
-            {today.map(row)}
-            {earlier.length > 0 && <div class="section-label">Earlier</div>}
-            {earlier.map(row)}
-          </>
+        <div style={{ height: 'calc(var(--header-h) + 16px)' }} />
+        {loading && !data ? <Spinner /> : !today.length && !earlier.length ? <Empty title="No notifications yet." text="Follows, likes, messages, applications and reviews appear here." iconName="IconBell" /> : (
+          <div class="notifs">
+            {today.length > 0 && <div class="notifs__title">Today{unreadToday > 0 && <span class="badge" style={{ position: 'static' }}>{unreadToday}</span>}</div>}
+            {today.map((n) => <NotificationRow n={n} key={n.id} onOpen={open} onFollow={follow} onDelete={remove} />)}
+            {earlier.length > 0 && <div class="notifs__title">Last 30 days</div>}
+            {earlier.map((n) => <NotificationRow n={n} key={n.id} onOpen={open} onFollow={follow} onDelete={remove} />)}
+          </div>
         )}
         <div style={{ height: 40 }} />
       </div>
       <Header left={<BackButton />} center={<HeaderTitle title="Notifications" />}
-        right={<GlassButton name="IconCheckCircle" label="Mark all as read" disabled={!data?.unreadCount} onClick={readAll} />} />
+        right={<GlassButton name="IconDotsThree" label="More" onClick={menu} />} />
     </>
+  );
+}
+
+function NotificationRow({ n, onOpen, onFollow, onDelete }: { n: Note; onOpen: (n: Note) => void; onFollow: (n: Note) => void; onDelete: (n: Note) => void }) {
+  const press = useLongPress((el) => openContextMenu(el, [{ label: 'Delete notification', icon: 'IconTrash', danger: true, run: () => onDelete(n) }]));
+  const name = n.actor?.username ?? 'kolaba';
+  const job = n.type === 'application_received' || n.type === 'job_update' ? n.payload.jobTitle as string | undefined : undefined;
+  const followable = (n.type === 'followed' || n.type === 'viewed_profile') && n.actor?.type === 'creator';
+  return (
+    <div class={`notif ${n.readAt ? '' : 'is-unread'}`} role="button" tabIndex={0} aria-label={`${name}: ${notificationText[n.type] ?? n.type}`}
+      onPointerDown={press.onPointerDown as any} onPointerMove={press.onPointerMove as any} onPointerUp={press.onPointerUp} onPointerCancel={press.onPointerCancel}
+      onPointerLeave={press.onPointerLeave} onContextMenu={press.onContextMenu} onClick={press.click(() => onOpen(n))}
+      onKeyDown={(e) => e.key === 'Enter' && onOpen(n)}>
+      <Avatar card={n.actor} size={48} />
+      <div class="grow" style={{ minWidth: 0 }}>
+        <div class="notif__title">{name}{job && <><img src={icon('IconNotifAngle')} alt="" class="notif__angle" /><span class="ellipsis">{job}</span></>}</div>
+        <div class="notif__detail"><img src={icon(notificationIcon[n.type] ?? 'IconBellSmall')} alt="" /><span class="ellipsis">{notificationText[n.type] ?? n.type}</span><span>•</span><span style={{ flex: 'none' }}>{notificationTime(n.createdAt)}</span></div>
+      </div>
+      {n.type === 'liked_video' && n.media ? (
+        <img class="notif__thumb" src={(n.media.kind === 'video' ? n.media.posterUrl : n.media.url) ?? ''} alt="" style={{ background: gradientFor(n.media.id) }}
+          onError={(e) => { e.currentTarget.removeAttribute('src'); }} />
+      ) : followable ? (
+        <button class={`follow-pill ${n.isFollowingActor ? 'is-on' : ''}`} aria-pressed={!!n.isFollowingActor}
+          onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); onFollow(n); }}>
+          {n.isFollowingActor ? 'Following' : <>Follow<img src={icon('IconPlusSmall')} alt="" /></>}
+        </button>
+      ) : null}
+    </div>
   );
 }
