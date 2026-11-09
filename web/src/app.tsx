@@ -182,6 +182,12 @@ function MainApp() {
     let token: string | null = null;
     try { token = localStorage.getItem('kolaba.invite'); } catch { /* */ }
     if (token) push('invite', { token }, 'profile');
+    // A direct link to one job / profile (#/job/<id>, #/profile/<id> — e.g. "View Live Post" in the admin panel).
+    let link: string | null = null;
+    try { link = sessionStorage.getItem('kolaba.deeplink'); sessionStorage.removeItem('kolaba.deeplink'); } catch { /* */ }
+    const [kind, id] = (link ?? '').split(':');
+    if (id && kind === 'job') push('job', { id }, 'jobs');
+    else if (id && kind === 'profile') push('profile-view', { id }, 'creators');
   }, []);
   const all = stacks.value;
   const index = TAB_ORDER.indexOf(tab.value);
@@ -213,6 +219,8 @@ export function App() {
   useEffect(() => {
     const match = /^#\/invite\/([A-Za-z0-9_-]{32,64})$/.exec(location.hash);
     if (match) { try { localStorage.setItem('kolaba.invite', match[1]); } catch { /* */ } history.replaceState(null, '', location.pathname); }
+    const direct = /^#\/(job|profile)\/([A-Za-z0-9_-]{3,80})$/.exec(location.hash);
+    if (direct) { try { sessionStorage.setItem('kolaba.deeplink', `${direct[1]}:${direct[2]}`); } catch { /* */ } history.replaceState(null, '', location.pathname); }
     if (!session.token) { booted.value = true; return; }
     api('GET', '/v1/auth/session').then(applySession).catch(() => signOutLocally()).finally(() => { booted.value = true; });
   }, []);

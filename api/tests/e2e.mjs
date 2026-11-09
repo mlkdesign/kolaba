@@ -134,7 +134,7 @@ await test('H: FREE creator cannot attach media or create collections (server de
   expect(mediaId, 'free creator has no media in seed');
   expectError(await call(free, 'POST', `/v1/jobs/${jobId}/apply`, { message: 'with media', mediaIds: [mediaId] }), 403, 'pro_required');
   expectError(await call(free, 'POST', '/v1/media/collections', { title: 'Mine' }), 403, 'pro_required');
-  expectError(await call(free, 'POST', `/v1/admin/profiles/${free.profileId}/pro`, { enabled: true }), 403, 'admin_required');
+  expectError(await call(free, 'PATCH', `/v1/admin/profiles/${free.profileId}/pro`, { enabled: true }), 401, 'admin_auth_required'); // app sessions never reach the admin API
 });
 
 await test('C: contact request → notification → accept → both see it', async () => {

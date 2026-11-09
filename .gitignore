@@ -8,3 +8,5 @@ web/dist/
 *.local
 api/seed/.test-account.json
 api/seed/stock-images.sql
+api/.admin-initial-password
+admin-web/node_modules/

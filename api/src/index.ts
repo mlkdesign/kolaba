@@ -13,14 +13,17 @@ import contacts from './routes/contacts';
 import messages from './routes/messages';
 import reviews from './routes/reviews';
 import me from './routes/me';
-import { admin, notifications, reels, reports, search, sync } from './routes/social';
+import { notifications, reels, reports, search, sync } from './routes/social';
+import admin from './routes/admin';
 
 const app = new Hono<AppEnv>();
 
 // CORS: only the listed origins get CORS headers (never "*" — requests carry a bearer token). CORS is not the
 // protection: every route checks the session and the acting profile itself.
 app.use('*', async (c, next) => {
-  const allowed = c.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean);
+  // The admin API answers only the admin panel's origin(s); the app API only the app's.
+  const list = c.req.path.startsWith('/v1/admin') ? (c.env.ADMIN_ORIGINS ?? '') : c.env.ALLOWED_ORIGINS;
+  const allowed = list.split(',').map((o) => o.trim()).filter(Boolean);
   return cors({
     origin: (origin) => (allowed.includes(origin) ? origin : null),
     allowHeaders: ['Authorization', 'Content-Type', 'X-Profile-Id'],
@@ -41,7 +44,8 @@ app.use('*', async (c, next) => {
   }
 });
 
-app.use('/v1/*', optionalAuth);
+// App sessions only — the admin API has its own (routes/admin.ts) and never reads app sessions.
+app.use('/v1/*', async (c, next) => (c.req.path.startsWith('/v1/admin') ? next() : optionalAuth(c, next)));
 
 app.get('/v1/health', async (c) => {
   const db = await c.env.DB.prepare(`SELECT COUNT(*) AS profiles FROM profiles`).first<{ profiles: number }>().catch(() => null);

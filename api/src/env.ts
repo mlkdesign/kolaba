@@ -28,6 +28,13 @@ export interface Env {
   /** Comma-separated e-mails allowed to switch their own profile between Free and PRO for testing. */
   PRO_TEST_EMAILS?: string;
 
+  /** Admin panel: comma-separated administrator e-mails (only these can ever sign in to /v1/admin). */
+  ADMIN_EMAILS?: string;
+  /** Admin panel: origins allowed to call /v1/admin/* from a browser. */
+  ADMIN_ORIGINS?: string;
+  /** Secret: the first administrator password. Used once to create the admins row, then never read again. */
+  ADMIN_INITIAL_PASSWORD?: string;
+
   /** Secrets. */
   RESEND_API_KEY?: string;
   /** HMAC key for signed media URLs of private files. */
@@ -52,7 +59,14 @@ export interface ActingProfile {
   ownerUserId: string;
 }
 
+export interface AdminSession {
+  id: string;
+  email: string;
+  sessionId: string;
+  mustChangePassword: boolean;
+}
+
 export type AppEnv = {
   Bindings: Env;
-  Variables: { user?: AuthUser; profile?: ActingProfile };
+  Variables: { user?: AuthUser; profile?: ActingProfile; admin?: AdminSession };
 };
