@@ -2,6 +2,7 @@
 // animated glow, name + PRO, figures, actions, social circles, Portfolio / Reviews; edit, settings, collections, the
 // review request sheet, the review form and the invite landing.
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { LocationField, placeFields, placeOf, type Place } from '../location';
 import { api, Card, del, errorText, get, Job, Media, patch, post, posterFrom, ProfilePage, put, Review, uploadFile } from '../api';
 import { activeProfile, back, isBusiness, openSheet, profiles, push, refresh, refreshTick, reloadSession, setActiveProfile, showToast, signOut, signOutLocally, user } from '../state';
 import { ProfileGlow } from '../fx';
@@ -9,15 +10,12 @@ import { openPaywall } from '../paywall';
 import { offerRoleSwitch } from '../roles';
 import {
   BASE, Avatar, BackButton, confirmSheet, Empty, fmtCount, GlassButton, gradientFor, Header, HeaderTitle, Icon, icon, initials, MediaTile,
-  openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, Stars, SwipePages, timeAgo, useLoad, usePullToRefresh, alertDialog, pickSheet, useCollapsingHeader, Subtab, SortButton, AddButton, ActionPill,
+  openViewer, Gallery, Dots, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, Stars, SwipePages, timeAgo, useLoad, usePullToRefresh, alertDialog, pickSheet, useCollapsingHeader, TopBlur, Subtab, SortButton, AddButton, ActionPill,
 } from '../ui';
 import { JobCard } from './jobs';
 import { CreateProfile, Legal } from './auth';
 
 const SOCIAL_ICON: Record<string, string> = { instagram: 'SocialInstagramColor', tiktok: 'SocialTikTokColor', youtube: 'SocialYouTubeColor', pinterest: 'SocialPinterestColor' };
-const LINK_ICON: Record<string, string> = { instagram: 'ContactInstagram', tiktok: 'ContactTikTokGlyph', youtube: 'ContactYouTubeGlyph', telegram: 'ContactTelegram',
-  whatsapp: 'ContactWhatsApp', email: 'ContactEmail', pinterest: 'ContactPinterest', website: 'ContactLink' };
-
 export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'reviews' }) {
   const profileId = id ?? activeProfile.value?.id;
   const { data: p, error, reload } = useLoad<ProfilePage>((s) => get(`/v1/profiles/${profileId}`, s), [profileId, refreshTick.value]);
@@ -45,6 +43,9 @@ export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'rev
   return (
     <div class={`collapsing ${business ? 'is-business-profile' : ''}`} ref={root}>
       <div class="scroll" ref={scroller} onScroll={(e) => setScrolled(e.currentTarget.scrollTop)}>
+        <TopBlur sticky opacity={Math.min(Math.max((scrolled - 200) / 120, 0), 1)} />
+        {/* The glow belongs to the page's top (ProfileGlow): it scrolls away with the content, under the top blur. */}
+        {p.isPro && <ProfileGlow business={business} />}
         {business ? <BusinessHeader p={p} own={own} /> : (
           <>
             <Hero p={p} own={own} />
@@ -52,15 +53,17 @@ export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'rev
               <div class="pinfo__block">
                 <div class="pname"><span>{p.displayName}</span><ProBadge card={p} /></div>
                 <div class="pmeta">
-                  {p.location && <span>{p.flag} {p.location}</span>}
-                  {p.category && <span>{p.category}</span>}
-                  {!p.location && !p.category && <span>@{p.username}</span>}
+                  {p.location ? <span>{p.flag} {p.location}</span>
+                    : own ? <button class="padd-link" onClick={() => push('profile-edit', {}, 'profile')}><img src={icon('IconMapPin')} alt="" /><u>Add location</u></button>
+                    : <span style={{ opacity: .5 }}>Location not specified</span>}
                 </div>
-                {p.bio && <Bio text={p.bio} />}
+                {p.bio ? <Bio text={p.bio} /> : own ? (
+                  <button class="padd-bio" onClick={() => push('profile-edit', {}, 'profile')}>Tell people about yourself and what you create.  <u>Add bio</u></button>
+                ) : null}
               </div>
               <Figures p={p} />
               {own ? <OwnerActions p={p} /> : <VisitorActions profile={p} />}
-              <Socials p={p} />
+              <Socials p={p} own={own} />
             </div>
           </>
         )}
@@ -74,9 +77,8 @@ export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'rev
         </SwipePages>
         <div style={{ height: own ? 'var(--tabbar-clear)' : 40 }} />
       </div>
-      {p.isPro && <ProfileGlow business={business} />}
       <Indicator />
-      <Header left={left} right={right} blurOpacity={Math.min(Math.max((scrolled - 200) / 120, 0), 1)} />
+      <Header left={left} right={right} blur={false} />
     </div>
   );
 }
@@ -149,36 +151,69 @@ function BusinessJobs({ profile, own }: { profile: ProfilePage; own: boolean }) 
 
 /** A business's About (FEATURE 19 / FIX 106): Description, Location, then its links. */
 function BusinessAbout({ p, own }: { p: ProfilePage; own: boolean }) {
-  const items = [...p.links, ...(p.website && !p.links.some((l) => l.kind === 'website') ? [{ kind: 'website', url: p.website }] : [])];
+  const empty = profileContacts(p).isEmpty;
   return (
     <div class="babout">
       <section><h3>Description</h3>{p.bio ? <p class="selectable">{p.bio}</p> : <p class="is-empty">{own ? 'Add a description of your business in Edit profile.' : 'No description yet.'}</p>}</section>
       <section><h3>Location</h3>{p.location ? <p>{p.flag} {p.location}</p> : <p class="is-empty">Location not specified</p>}</section>
-      {items.length > 0 ? (
-        <section><h3>Links</h3><div class="sgroup">{items.map((l) => (
-          <a class="srow" href={l.url} target="_blank" rel="noopener noreferrer nofollow" style={{ textDecoration: 'none' }}>
-            <img class="srow__icon" src={icon(LINK_ICON[l.kind] ?? 'ContactLink')} alt="" style={{ width: 20, height: 20 }} />
-            <span class="grow ellipsis">{l.kind === 'website' || l.kind === 'email' ? l.url.replace(/^(https?:\/\/|mailto:)/, '') : l.kind[0].toUpperCase() + l.kind.slice(1)}</span>
-            <img class="srow__caret" src={icon('IconCaretRight')} alt="" />
-          </a>
-        ))}</div></section>
-      ) : own ? <button class="pbtn" style={{ flex: 'none' }} onClick={() => push('profile-edit', {}, 'profile')}><img src={icon('IconLink')} alt="" />Add links</button> : null}
+      {!empty ? <ContactsList p={p} contactTitle="Contacts" /> : own ? <Socials p={p} own /> : null}
     </div>
   );
 }
 
+/** A creator's profile photos (up to 10; the profile's current photo first), newest after it. */
+function useProfilePhotos(p: ProfilePage) {
+  const { data, reload } = useLoad<{ items: Media[] }>((sig) => get(`/v1/profiles/${p.id}/media?purpose=avatar&kind=photo`, sig), [p.id, p.avatarUrl, refreshTick.value]);
+  const items = data?.items ?? [];
+  const current = items.find((m) => m.url && m.url === p.avatarUrl);
+  const photos = current ? [current, ...items.filter((m) => m !== current)] : items;
+  // An older profile whose photo isn't among its uploads (an external demo photo) still shows it.
+  return { photos: photos.length ? photos : p.avatarUrl ? [{ id: 'avatar', url: p.avatarUrl, kind: 'photo' } as Media] : [], loaded: !!data, reload };
+}
+
+/** Uploads picked photos as profile photos (each up to the 10's room); the first becomes the profile photo when there
+ *  is none. A business has one photo: a new one replaces it. */
+async function addProfilePhotos(p: ProfilePage, files: File[], have: number) {
+  const business = p.type === 'business';
+  const room = business ? 1 : Math.max(0, 10 - have);
+  if (!room) { alertDialog('Limit reached', 'You can add up to 10 profile photos.', 'OK', () => {}, false); return; }
+  const picked = files.slice(0, room);
+  try {
+    showToast(picked.length > 1 ? `Uploading ${picked.length} photos…` : 'Uploading photo…');
+    let first: Media | null = null;
+    for (const f of picked) { const m = await uploadFile(f, 'avatar'); first ??= m; }
+    if (first && (business || !p.avatarUrl)) await patch(`/v1/profiles/${p.id}`, { avatarMediaId: first.id });
+    await reloadSession(); refresh(); showToast(business ? 'Logo updated' : picked.length > 1 ? 'Photos added' : 'Photo added', 'ok');
+    if (files.length > room) alertDialog('Limit reached', 'You can add up to 10 profile photos.', 'OK', () => {}, false);
+  } catch (e) { showToast(errorText(e), 'error'); }
+}
+
 function Hero({ p, own }: { p: ProfilePage; own: boolean }) {
   const [broken, setBroken] = useState(false);
+  const [index, setIndex] = useState(0);
   const introInput = useRef<HTMLInputElement>(null);
+  const photoInput = useRef<HTMLInputElement>(null);
+  const { photos, loaded } = useProfilePhotos(p);
   const canIntro = own && p.type === 'creator' && p.entitlements?.introVideo === 'available';
   const intro = p.introVideo;
+  const empty = loaded && !photos.length;
   return (
-    <div class="phero">
-      <div class="phero__track">
-        {p.avatarUrl && !broken ? <img src={p.avatarUrl} alt="" draggable={false} onError={() => setBroken(true)} />
-          : <div class="phero__mono" style={{ background: gradientFor(p.displayName) }}>{initials(p.displayName)}</div>}
-      </div>
+    <div class={`phero ${empty && own ? 'is-empty' : ''}`}>
+      {photos.length > 0 && !broken ? (
+        <Gallery media={photos} class="phero__gallery" dots={false} onIndex={setIndex} onOpen={(m) => openViewer(m)} />
+      ) : empty && own ? null : (
+        <div class="phero__track">{p.avatarUrl && !broken ? <img src={p.avatarUrl} alt="" draggable={false} onError={() => setBroken(true)} />
+          : <div class="phero__mono" style={{ background: gradientFor(p.displayName) }}>{initials(p.displayName)}</div>}</div>
+      )}
+      {photos.length > 1 && <div class="phero__dots"><Dots count={photos.length} index={index} /></div>}
       <div class="phero__shade" />
+      {empty && own && (
+        <div class="phero__add">
+          <ActionPill label="Add Profile Photos" onClick={() => photoInput.current?.click()} />
+          <input ref={photoInput} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden
+            onChange={(e) => { const f = [...(e.currentTarget.files ?? [])]; if (f.length) void addProfilePhotos(p, f, 0); e.currentTarget.value = ''; }} />
+        </div>
+      )}
       {intro ? (
         <button class="glass intro-pill is-tinted" onClick={() => openViewer(intro)}><span class="play"><img src={icon('IconPlay')} alt="" /></span>Intro Video</button>
       ) : own && p.type === 'creator' && p.entitlements?.introVideo === 'locked' ? (
@@ -189,6 +224,55 @@ function Hero({ p, own }: { p: ProfilePage; own: boolean }) {
           <input ref={introInput} type="file" accept="video/mp4,video/quicktime" hidden onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void uploadIntro(p, f); e.currentTarget.value = ''; }} />
         </>
       ) : null}
+    </div>
+  );
+}
+
+function StripImage({ m, name }: { m: Media; name: string }) {
+  const [broken, setBroken] = useState(false);
+  return m.url && !broken ? <img src={m.url} alt="" draggable={false} onError={() => setBroken(true)} />
+    : <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', fontWeight: 800, background: gradientFor(name) }}>{initials(name)}</span>;
+}
+
+/** Edit profile's photo strip (ProfileSetupView.photoStrip): 80 pt tiles, radius 12, the first is the profile photo;
+ *  a tap offers Make profile photo / Remove; + while there is room. A business: its one Logo, + replaces it. */
+function PhotoStrip({ p }: { p: ProfilePage }) {
+  const { photos, reload } = useProfilePhotos(p);
+  const input = useRef<HTMLInputElement>(null);
+  const business = p.type === 'business';
+  const limit = business ? 1 : 10;
+  const shown = business ? photos.slice(0, 1) : photos;
+  const menu = (m: Media, i: number) => openSheet((close) => (
+    <SheetFrame title={business ? 'Logo' : 'Profile photo'} close={close}>
+      {!business && i > 0 && <button class="menu-item" onClick={async () => { close(); try { await patch(`/v1/profiles/${p.id}`, { avatarMediaId: m.id }); await reloadSession(); refresh(); reload(); } catch (e) { showToast(errorText(e), 'error'); } }}>
+        <Icon name="IconUser" />Make profile photo</button>}
+      {business && <button class="menu-item" onClick={() => { close(); input.current?.click(); }}><Icon name="IconArrowsClockwise" />Replace logo</button>}
+      {m.id !== 'avatar' && <button class="menu-item is-danger" onClick={() => { close(); confirmSheet(business ? 'Remove logo?' : 'Remove photo?', 'It will be removed from your profile.', 'Remove', async () => {
+        try {
+          await del(`/v1/media/${m.id}`);
+          const next = photos.find((x) => x.id !== m.id && x.id !== 'avatar');
+          if (i === 0 && next) await patch(`/v1/profiles/${p.id}`, { avatarMediaId: next.id });
+          await reloadSession(); refresh(); reload();
+        } catch (e) { showToast(errorText(e), 'error'); }
+      }, true); }}><Icon name="IconTrash" />Remove</button>}
+    </SheetFrame>
+  ));
+  return (
+    <div>
+      <div class="row" style={{ justifyContent: 'space-between' }}><span class="label">{business ? 'Logo' : 'Profile photos'}</span>
+        <span class="label" style={{ color: '#fff' }}>{shown.length} <span class="muted">/ {limit}</span></span></div>
+      <div class="photo-strip" data-hscroll>
+        {shown.map((m, i) => (
+          <button class="photo-strip__tile" aria-label={i === 0 ? 'Profile photo' : `Photo ${i + 1}`} onClick={() => menu(m, i)}>
+            <StripImage m={m} name={p.displayName} />{i === 0 && !business && shown.length > 1 && <span class="photo-strip__main">Main</span>}
+          </button>
+        ))}
+        {(business || shown.length < limit) && (
+          <button class="photo-strip__tile is-add" aria-label={business && shown.length ? 'Replace logo' : 'Add photo'} onClick={() => input.current?.click()}><Icon name="IconPlus" size={20} /></button>
+        )}
+      </div>
+      <input ref={input} type="file" accept="image/jpeg,image/png,image/webp" multiple={!business} hidden
+        onChange={async (e) => { const f = [...(e.currentTarget.files ?? [])]; e.currentTarget.value = ''; if (f.length) { await addProfilePhotos(p, f, business ? 0 : shown.filter((x) => x.id !== 'avatar').length); reload(); } }} />
     </div>
   );
 }
@@ -214,13 +298,14 @@ function Bio({ text }: { text: string }) {
   );
 }
 
-/** Collabs | Rating | Contacts (iOS). The web has no collaboration count yet, so the first figure is Reviews. */
+/** Collabs | Rating | Contacts (ProfileFiguresRow, FEATURE 20/23): Collabs are the reviews the profile received (one
+ *  per finished collaboration); Rating "–" without any. */
 function Figures({ p }: { p: ProfilePage }) {
   const rating = p.ratings?.count ? p.ratings.rating! : null;
   return (
     <div class="stats">
-      <div class="stats__cell"><b>{p.ratings?.count ?? 0}</b><span>Reviews</span></div>
-      <div class="stats__cell"><b>{rating ? rating.toFixed(1) : '—'}{rating && <StarIcon size={16} />}</b><span>Rating</span></div>
+      <div class="stats__cell"><b>{fmtCount(p.ratings?.count ?? 0)}</b><span>Collabs</span></div>
+      <div class="stats__cell"><b>{rating ? rating.toFixed(1) : '–'}{rating && <StarIcon size={16} />}</b><span>Rating</span></div>
       <div class="stats__cell"><b>{fmtCount(p.counts?.contacts ?? 0)}</b><span>Contacts</span></div>
     </div>
   );
@@ -266,36 +351,110 @@ function VisitorActions({ profile }: { profile: ProfilePage }) {
   );
 }
 
-function Socials({ p }: { p: ProfilePage }) {
+// ─── Links & Contact (KolabaContactsSheet / ProfileContacts, FEATURE 22): one list per profile, nothing twice ───
+
+interface ContactItem { id: string; kind: string; title: string; subtitle: string | null; followers: number | null; url: string | null }
+const PLATFORM_TITLE: Record<string, string> = { instagram: 'Instagram', youtube: 'YouTube', pinterest: 'Pinterest', tiktok: 'TikTok' };
+const handleOf = (url: string) => {
+  try { const parts = new URL(url).pathname.split('/').filter((x) => x && !['c', 'user', 'channel'].includes(x.toLowerCase())); const n = parts[parts.length - 1]?.replace(/^@/, ''); return n ? `@${n}` : null; }
+  catch { return null; }
+};
+const safeWeb = (url: string) => { try { const u = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`); return u.hostname ? u.href : null; } catch { return null; } };
+const hostOf = (url: string) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; } };
+
+/** Social Media (Instagram · YouTube · Pinterest · TikTok — a platform once, with its link and followers),
+ *  Contact (Telegram · WhatsApp · Email) and More Links (websites, each address once). */
+function profileContacts(p: ProfilePage) {
   const links = p.links ?? [];
-  if (!p.socialAccounts.length && !links.length && !p.website) return null;
-  const linkFor = (platform: string) => links.find((l) => l.kind === platform)?.url;
-  return (
-    <div class="socials" data-hscroll>
-      {p.socialAccounts.map((s) => {
-        const href = linkFor(s.platform);
-        const body = <><span class="social__circle"><img src={icon(SOCIAL_ICON[s.platform] ?? 'ContactLink')} alt="" /></span>{fmtCount(s.followers)}</>;
-        return href ? <a class="social" href={href} target="_blank" rel="noopener noreferrer nofollow" aria-label={s.platform}>{body}</a>
-          : <span class="social" aria-label={s.platform}>{body}</span>;
-      })}
-      <button class="social" onClick={() => openLinks(p)}><span class="social__circle is-filled"><img src={icon('IconLink')} alt="" /></span>All Links</button>
-    </div>
-  );
+  const linkOf = (kind: string) => links.find((l) => l.kind === kind)?.url ?? null;
+  const social: ContactItem[] = ['instagram', 'youtube', 'pinterest', 'tiktok'].flatMap((platform) => {
+    const stat = p.socialAccounts.find((x) => x.platform === platform);
+    const raw = linkOf(platform);
+    if (!stat && !raw) return [];
+    const url = raw ? safeWeb(raw) : null;
+    return [{ id: platform, kind: platform, title: PLATFORM_TITLE[platform], subtitle: url ? handleOf(url) : null, followers: stat?.followers ?? null, url }];
+  });
+  const contact: ContactItem[] = [];
+  const tg = linkOf('telegram');
+  if (tg) { const url = safeWeb(tg.startsWith('@') ? `t.me/${tg.slice(1)}` : tg.includes('/') || tg.includes('.') ? tg : `t.me/${tg}`); contact.push({ id: 'telegram', kind: 'telegram', title: 'Telegram', subtitle: url ? handleOf(url) : tg, followers: null, url }); }
+  const wa = linkOf('whatsapp');
+  if (wa) { const digits = (wa.match(/phone=(\d+)/)?.[1] ?? wa).replace(/\D/g, ''); contact.push({ id: 'whatsapp', kind: 'whatsapp', title: 'WhatsApp', subtitle: digits.length >= 6 ? `+${digits}` : null, followers: null, url: digits.length >= 6 ? `https://wa.me/${digits}` : safeWeb(wa) }); }
+  const mail = linkOf('email');
+  if (mail) { const address = mail.replace(/^mailto:/i, '').split('?')[0]; if (/^[^\s@]+@[^\s@]+$/.test(address)) contact.push({ id: 'email', kind: 'email', title: 'Email', subtitle: address, followers: null, url: `mailto:${address}` }); }
+  const seen = new Set<string>();
+  const more: ContactItem[] = [p.website, linkOf('website')].flatMap((raw) => {
+    const url = raw ? safeWeb(raw) : null;
+    if (!url || seen.has(hostOf(url) + new URL(url).pathname.replace(/\/$/, ''))) return [];
+    seen.add(hostOf(url) + new URL(url).pathname.replace(/\/$/, ''));
+    return [{ id: `link-${url}`, kind: 'website', title: 'Website', subtitle: hostOf(url), followers: null, url }];
+  });
+  return { social, contact, more, isEmpty: !social.length && !contact.length && !more.length };
+}
+
+/** A row's 40 pt mark: the networks' own marks; YouTube / TikTok glyphs on red / black; Email and links white on 20 %. */
+function ContactIcon({ kind }: { kind: string }) {
+  const own: Record<string, string> = { instagram: 'ContactInstagram', pinterest: 'ContactPinterest', telegram: 'ContactTelegram', whatsapp: 'ContactWhatsApp' };
+  if (own[kind]) return <img class="cicon" src={icon(own[kind])} alt="" />;
+  if (kind === 'youtube') return <span class="cicon" style={{ background: '#f00' }}><img src={icon('ContactYouTubeGlyph')} alt="" style={{ width: 20, height: 13.333 }} /></span>;
+  if (kind === 'tiktok') return <span class="cicon" style={{ background: '#000' }}><img src={icon('ContactTikTokGlyph')} alt="" style={{ width: 17.647, height: 20 }} /></span>;
+  return <span class="cicon" style={{ background: 'rgba(255,255,255,.2)' }}><img src={icon(kind === 'email' ? 'ContactEmail' : 'ContactLink')} alt="" style={{ width: 20, height: 20 }} /></span>;
+}
+
+function ContactsList({ p, contactTitle = 'Contact' }: { p: ProfilePage; contactTitle?: string }) {
+  const c = profileContacts(p);
+  const section = (title: string, items: ContactItem[]) => items.length ? (
+    <section class="clist__section">
+      <h3>{title}</h3>
+      <div class="clist__group">
+        {items.map((it, i) => (
+          <>{i > 0 && <i class="clist__sep" />}
+            <a class={`clist__row ${it.url ? '' : 'is-dead'}`} href={it.url ?? undefined} target={it.url?.startsWith('mailto:') ? undefined : '_blank'} rel="noopener noreferrer nofollow">
+              <ContactIcon kind={it.kind} />
+              <span class="grow clist__text"><b>{it.title}</b>{it.subtitle && <span>{it.subtitle}</span>}</span>
+              {it.followers != null && <span class="clist__count"><b>{fmtCount(it.followers)}</b><span>Followers</span></span>}
+              <img class="clist__caret" src={icon('IconCaretRight')} alt="" />
+            </a>
+          </>
+        ))}
+      </div>
+    </section>
+  ) : null;
+  return <div class="clist">{section('Social Media', c.social)}{section(contactTitle, c.contact)}{section('More Links', c.more)}</div>;
 }
 
 function openLinks(p: ProfilePage) {
-  const items = [...p.links, ...(p.website && !p.links.some((l) => l.kind === 'website') ? [{ kind: 'website', url: p.website }] : [])];
   openSheet((close) => (
-    <SheetFrame title="Links" close={close}>
-      {!items.length ? <Empty title="No links yet" iconName="IconLink" /> : items.map((l) => (
-        <a class="menu-item" href={l.url} target="_blank" rel="noopener noreferrer nofollow" style={{ textDecoration: 'none' }}>
-          <img src={icon(LINK_ICON[l.kind] ?? 'ContactLink')} alt="" />
-          <span class="grow ellipsis">{l.kind === 'website' || l.kind === 'email' ? l.url.replace(/^(https?:\/\/|mailto:)/, '') : l.kind[0].toUpperCase() + l.kind.slice(1)}</span>
-          <Icon name="IconCaretRight" size={14} />
-        </a>
-      ))}
+    <SheetFrame title="Links & Contact" close={close}>
+      {profileContacts(p).isEmpty ? <Empty title="No links yet" /> : <ContactsList p={p} />}
+      <div style={{ height: 24 }} />
     </SheetFrame>
-  ));
+  ), { tall: true });
+}
+
+/** The networks row (each platform once, its followers or its name), a business's Web Site, All Links; the owner
+ *  without any link gets the Add links card (Figma 707:4025), someone else nothing. */
+function Socials({ p, own }: { p: ProfilePage; own: boolean }) {
+  const c = profileContacts(p);
+  if (c.isEmpty) {
+    return own ? (
+      <div class="links-empty">
+        <p>Add your social media, website or messenger links so others can connect with you.</p>
+        <ActionPill label="Add links" iconName="IconLink" onClick={() => push('profile-edit', {}, 'profile')} />
+      </div>
+    ) : null;
+  }
+  const web = p.type === 'business' ? c.more[0] : undefined;
+  return (
+    <div class="socials" data-hscroll>
+      {c.social.map((s) => {
+        const body = <><span class="social__circle"><img src={icon(SOCIAL_ICON[s.kind] ?? 'ContactLink')} alt="" /></span>{s.followers != null ? fmtCount(s.followers) : s.title}</>;
+        return s.url ? <a class="social" href={s.url} target="_blank" rel="noopener noreferrer nofollow" aria-label={s.title}>{body}</a>
+          : <span class="social" aria-label={s.title}>{body}</span>;
+      })}
+      {web && <a class="social" href={web.url!} target="_blank" rel="noopener noreferrer nofollow"><span class="social__circle"><img src={icon('IconGlobeSimple')} alt="" style={{ width: 24, height: 24 }} /></span>Web Site</a>}
+      <button class="social" onClick={() => openLinks(p)}><span class="social__circle is-filled"><img src={icon('IconLink')} alt="" /></span>All Links</button>
+    </div>
+  );
 }
 
 /** The visitor's ••• menu: contacts (add / accept / cancel / remove), a review for a contact, report. */
@@ -372,9 +531,9 @@ function Portfolio({ profile, own, onChange }: { profile: ProfilePage; own: bool
           onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void upload(f); e.currentTarget.value = ''; }} />
       </div>
       {mode === 'collections' ? <Collections profile={profile} own={own} /> : !data ? <Spinner /> : !items.length ? (
-        own ? <Empty title="Your portfolio is empty" text="Add photos and videos to showcase your work and let others discover your creativity.">
+        own ? <Empty cards="media" title="Your portfolio is empty" text="Add photos and videos to showcase your work and let others discover your creativity.">
           <ActionPill label={progress !== null ? `Uploading ${Math.round(progress * 100)}%` : 'Add content'} onClick={() => input.current?.click()} /></Empty>
-          : <Empty title="No portfolio yet." />
+          : <Empty cards="media" title="No portfolio yet." />
       ) : (
         <div class="mgrid">{items.filter((m) => !gone.includes(m.id)).map((m) => <MediaTile media={m} key={m.id} menu={menuFor(m)} removing={removing === m.id} />)}</div>
       )}
@@ -631,6 +790,9 @@ export function ReviewForm({ recipient, requestId, inviteId }: { recipient: Card
 
 // ─── Edit profile ───
 
+const LINK_KINDS = ['instagram', 'youtube', 'tiktok', 'telegram', 'whatsapp', 'email'] as const;
+type LinkKind = typeof LINK_KINDS[number];
+
 export function EditProfileScreen() {
   const { data: p } = useLoad<ProfilePage>((s) => get(`/v1/profiles/${activeProfile.value!.id}`, s), [activeProfile.value?.id]);
   if (!p) return <><Header left={<BackButton />} center={<HeaderTitle title="Edit Profile" />} /><div class="section-top"><Spinner /></div></>;
@@ -638,58 +800,46 @@ export function EditProfileScreen() {
 }
 
 function EditForm({ p }: { p: ProfilePage }) {
-  const [form, setForm] = useState({ displayName: p.displayName, username: p.username, bio: p.bio, city: p.city ?? '', country: p.country ?? '',
-    category: p.category ?? '', website: p.website ?? '', instagram: p.links.find((l) => l.kind === 'instagram')?.url ?? '',
-    tiktok: p.links.find((l) => l.kind === 'tiktok')?.url ?? '' });
+  const [place, setPlace] = useState<Place | null>(placeOf(p));
+  const [form, setForm] = useState({ displayName: p.displayName, username: p.username, bio: p.bio, website: p.website ?? p.links.find((l) => l.kind === 'website')?.url ?? '', ...Object.fromEntries(LINK_KINDS.map((k) => [k, p.links.find((l) => l.kind === k)?.url ?? ''])) as Record<LinkKind, string> });
   const [busy, setBusy] = useState(false);
   const set = (k: keyof typeof form) => (e: any) => setForm({ ...form, [k]: e.currentTarget.value });
-  const avatarInput = useRef<HTMLInputElement>(null);
   const save = async () => {
     setBusy(true);
     try {
       const links: Record<string, string> = {};
       if (form.website) links.website = form.website;
-      if (form.instagram) links.instagram = form.instagram;
-      if (form.tiktok) links.tiktok = form.tiktok;
-      await patch(`/v1/profiles/${p.id}`, { displayName: form.displayName, username: form.username, bio: form.bio, city: form.city || null,
-        country: form.country || null, category: form.category || null, website: form.website || null, links });
+      for (const k of LINK_KINDS) if (form[k].trim()) links[k] = form[k].trim();
+      await patch(`/v1/profiles/${p.id}`, { displayName: form.displayName, username: form.username, bio: form.bio, ...placeFields(place),
+        website: form.website || null, links });
       await reloadSession(); refresh(); showToast('Saved', 'ok'); back();
     } catch (e) { showToast(errorText(e), 'error'); } finally { setBusy(false); }
-  };
-  const uploadAvatar = async (file: File) => {
-    try { showToast('Uploading photo…'); const m = await uploadFile(file, 'avatar'); await patch(`/v1/profiles/${p.id}`, { avatarMediaId: m.id }); await reloadSession(); refresh(); showToast('Photo updated', 'ok'); }
-    catch (e) { showToast(errorText(e), 'error'); }
   };
   const field = (k: keyof typeof form, label: string, iconName: string, placeholder = '') => (
     <div><span class="label">{label}</span><label class="field"><img src={icon(iconName)} alt="" /><input value={form[k]} placeholder={placeholder || label} onInput={set(k)} /></label></div>
   );
-  const me = activeProfile.value ?? p;
   return (
     <>
       <div class="scroll">
         <div class="section-top pad" style={{ display: 'flex', flexDirection: 'column', gap: 16, paddingTop: 'calc(var(--header-h) + 16px)', paddingBottom: 120 }}>
           {field('displayName', p.type === 'business' ? 'Business name' : 'Your name', 'IconUser')}
-          <div>
-            <div class="row" style={{ justifyContent: 'space-between' }}><span class="label">Profile photo</span><span class="label" style={{ color: '#fff' }}>{me.avatarUrl ? 1 : 0} <span class="muted">/ 1</span></span></div>
-            <div class="photos-row">
-              {me.avatarUrl && <img class="photos-row__tile" src={me.avatarUrl} alt="Profile photo" />}
-              <button class="photos-row__tile is-add" aria-label={me.avatarUrl ? 'Change photo' : 'Add photo'} onClick={() => avatarInput.current?.click()}><Icon name="IconPlus" size={18} /></button>
-            </div>
-            <input ref={avatarInput} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void uploadAvatar(f); e.currentTarget.value = ''; }} />
-          </div>
+          <PhotoStrip p={p} />
           <div><span class="label">Username</span><label class="field"><img src={icon('IconUser')} alt="" /><input value={form.username} placeholder="Username"
             onInput={(e) => setForm({ ...form, username: e.currentTarget.value.toLowerCase().replace(/[^a-z0-9._]/g, '') })} />
             {/^[a-z0-9._]{3,30}$/.test(form.username) && <img src={icon('IconCheckActive')} alt="Valid" style={{ opacity: 1 }} />}</label></div>
-          <div><span class="label">Your location</span><div class="row" style={{ gap: 8 }}>
-            <label class="field grow"><img src={icon('IconMapPin')} alt="" /><input value={form.city} placeholder="City" onInput={set('city')} /></label>
-            <label class="field grow"><input value={form.country} placeholder="Country" onInput={set('country')} /></label></div></div>
-          {field('category', p.type === 'business' ? 'Category' : 'Niche', 'IconFunnel')}
+          <div><span class="label">Your location</span><LocationField value={place} onChange={setPlace} /></div>
           <div><div class="row" style={{ justifyContent: 'space-between' }}><span class="label">Profile description</span>
             <span class="label" style={{ color: '#fff' }}>{form.bio.length} <span class="muted">/ 1000</span></span></div>
             <textarea class="textarea" maxLength={1000} value={form.bio} onInput={set('bio')} style={{ minHeight: 160 }} /></div>
           {field('website', 'Website', 'IconGlobeSimple', 'example.com')}
-          {field('instagram', 'Instagram', 'IconInstagram', 'https://instagram.com/…')}
-          {field('tiktok', 'TikTok', 'IconTikTok', 'https://tiktok.com/@…')}
+          <span class="label" style={{ marginBottom: -8 }}>Social media</span>
+          {field('instagram', 'Instagram', 'IconInstagram', 'instagram.com/yourname')}
+          {field('youtube', 'YouTube', 'IconYouTube', 'youtube.com/@yourname')}
+          {field('tiktok', 'TikTok', 'IconTikTok', 'tiktok.com/@yourname')}
+          <span class="label" style={{ marginBottom: -8 }}>Contact</span>
+          {field('telegram', 'Telegram', 'IconTelegram', '@yourname')}
+          {field('whatsapp', 'WhatsApp', 'IconWhatsApp', '+380 …')}
+          {field('email', 'Email', 'IconEnvelopeSimple', 'you@example.com')}
         </div>
       </div>
       <div class="save-bar"><button class="btn" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save'}</button></div>

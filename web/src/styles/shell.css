@@ -64,3 +64,9 @@ body { margin: 0; background: #000; }
 .is-mobile .phone { position: fixed; inset: 0; width: 100%; height: 100%; transform: none; }
 .is-mobile .screen { left: 0; top: 0; width: 100%; height: 100%; border-radius: 0; }
 html.is-mobile.is-preloading .phone { opacity: 1; }
+
+/* ─── phone browsers (no mockup): the browser's own bars continue the app's background (#0B0B0B — theme-color,
+   the page's background, which Safari samples for its toolbar tint), no white or grey band at either edge, no rubber
+   band and no browser pull-to-refresh over the app (overscroll-behavior), the app inside the safe areas. ─── */
+html.is-mobile, html.is-mobile body { background: #0B0B0B; overscroll-behavior: none; }
+html.is-mobile body { position: fixed; inset: 0; }

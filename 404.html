@@ -3,7 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#000000">
+<meta name="theme-color" content="#000000" id="theme-color">
+<meta name="color-scheme" content="dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>kolaba. — web</title>
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="kolaba">
@@ -86,9 +90,9 @@ html.is-preloading .phone { opacity: 0; --reveal-scale: .96; }
 
 <link rel="icon" href="assets/icons/app-icon-192.png" sizes="192x192" type="image/png">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://kolaba-api.mlkdesignweb.workers.dev https://images.unsplash.com https://assets.mixkit.co https://images.pexels.com; media-src 'self' blob: https://kolaba-api.mlkdesignweb.workers.dev https://assets.mixkit.co https://videos.pexels.com; connect-src 'self' https://kolaba-api.mlkdesignweb.workers.dev http://127.0.0.1:8787; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
-<script>if (matchMedia("(max-width: 520px), (pointer: coarse) and (max-width: 900px)").matches) { document.documentElement.classList.remove("is-mockup"); document.documentElement.classList.add("is-mobile"); }</script>
-  <script type="module" crossorigin src="/kolaba/app/index-BewJiXtG.js"></script>
-  <link rel="stylesheet" crossorigin href="/kolaba/app/index-B4vMt-nu.css">
+<script>if (matchMedia("(max-width: 520px), (pointer: coarse) and (max-width: 900px)").matches) { document.documentElement.classList.remove("is-mockup"); document.documentElement.classList.add("is-mobile"); var t = document.getElementById("theme-color"); if (t) t.setAttribute("content", "#0B0B0B"); }</script>
+  <script type="module" crossorigin src="/kolaba/app/index-DnCW0upz.js"></script>
+  <link rel="stylesheet" crossorigin href="/kolaba/app/index-D1IKFpzk.css">
 </head>
 <body>
 

@@ -139,10 +139,21 @@ profiles.patch('/:id', requireAuth, async (c) => {
     website: body.website !== undefined ? (body.website ? safeURL(body.website) : null) : undefined,
     visibility: body.visibility, avatar_media_id: body.avatarMediaId, intro_video_media_id: body.introVideoMediaId,
   };
+  // A business replacing its logo: the previous photo is retired (one photo only — FEATURE 19).
+  const previous = body.avatarMediaId ? await c.env.DB.prepare(`SELECT type, avatar_media_id FROM profiles WHERE id = ?`).bind(id)
+    .first<{ type: string; avatar_media_id: string | null }>() : null;
   const set = Object.entries(columns).filter(([, v]) => v !== undefined);
   if (set.length) {
     await c.env.DB.prepare(`UPDATE profiles SET ${set.map(([k]) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`)
       .bind(...set.map(([, v]) => v), now(), id).run();
+  }
+  if (previous?.type === 'business' && previous.avatar_media_id && previous.avatar_media_id !== body.avatarMediaId) {
+    const old = await c.env.DB.prepare(`SELECT storage_key FROM media WHERE id = ? AND owner_profile_id = ? AND purpose = 'avatar'`)
+      .bind(previous.avatar_media_id, id).first<{ storage_key: string | null }>();
+    if (old) {
+      await c.env.DB.prepare(`UPDATE media SET status = 'deleted' WHERE id = ?`).bind(previous.avatar_media_id).run();
+      if (old.storage_key && c.env.MEDIA) await c.env.MEDIA.delete(old.storage_key).catch(() => {});
+    }
   }
   if (body.settings) {
     const s = body.settings;

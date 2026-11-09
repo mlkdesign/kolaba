@@ -194,7 +194,7 @@ function MainApp() {
           <section class="pager__page" data-tab={t} aria-hidden={t !== tab.value} key={t}>{renderRoute(all[t][0])}</section>
         ))}
       </div>
-      <div class={`bottom-gradient ${tab.value === 'chat' ? 'is-low' : ''}`} hidden={tab.value === 'kolaba'} />
+      <div class={`bottom-gradient ${tab.value === 'chat' ? 'is-low' : ''} ${tab.value === 'kolaba' ? 'is-off' : ''}`} />
       <TabBar hidden={false} />
       {/* Every pushed screen of every section stays mounted (scroll and data survive Back); only the selected section's show. */}
       {TAB_ORDER.map((t) => all[t].slice(1).map((route, i, list) => (

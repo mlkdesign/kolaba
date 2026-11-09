@@ -62,15 +62,21 @@ async function checkCode(env: Env, userId: string, purpose: 'verify' | 'reset', 
   await env.DB.prepare(`UPDATE email_codes SET consumed_at = ? WHERE id = ?`).bind(now(), row!.id).run();
 }
 
+/** Who may switch their own PRO for testing: an admin, an address in PRO_TEST_EMAILS, or — while the closed test
+ *  runs (TEST_CODE_INBOX) — an account verified through the test inbox (only the team can complete those sign-ups). */
+export function canTestPro(env: Env, u: { role: string; email: string; email_verification: string | null }) {
+  const testers = (env.PRO_TEST_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+  return u.role === 'admin' || testers.includes(u.email.toLowerCase()) || (!!env.TEST_CODE_INBOX && u.email_verification === 'test_inbox');
+}
+
 async function sessionPayload(env: Env, userId: string, token: string) {
   const user = await env.DB.prepare(`SELECT id, email, role, is_demo, email_verified_at, email_verification FROM users WHERE id = ?`).bind(userId)
     .first<{ id: string; email: string; role: string; is_demo: number; email_verified_at: number | null; email_verification: string | null }>();
-  const proTesters = (env.PRO_TEST_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
   return {
     token,
     user: { id: user!.id, email: user!.email, role: user!.role, isDemo: user!.is_demo === 1, verified: Boolean(user!.email_verified_at),
             emailProof: user!.email_verification ?? (user!.email_verified_at ? 'owner' : null),
-            canTestPro: user!.role === 'admin' || proTesters.includes(user!.email.toLowerCase()) },
+            canTestPro: canTestPro(env, user!) },
     profiles: await profilesOf(env, userId),
   };
 }
@@ -153,7 +159,13 @@ auth.post('/login', async (c) => {
     fail(401, 'invalid_credentials');
   }
   if (user!.status !== 'active') fail(403, 'account_suspended');
-  if (!user!.email_verified_at) return c.json({ status: 'verification_required', email }, 403);
+  // Not verified yet: the right password sends a fresh code at once (the verify screen that follows expects one —
+  // before, it came only after Resend). The resend limit applies, so this can't be used to flood an inbox.
+  if (!user!.email_verified_at) {
+    await rateLimit(c, 'RL_AUTH', `resend:${email}`);
+    await issueCode(c.env, user!.id, email, 'verify');
+    return c.json({ status: 'verification_required', email, codeSent: true }, 403);
+  }
   await c.env.DB.prepare(`UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(user!.id).run();
   const token = await createSession(c.env.DB, user!.id, c.req.header('User-Agent'));
   return c.json(await sessionPayload(c.env, user!.id, token));

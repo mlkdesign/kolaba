@@ -6,7 +6,7 @@ import { activeProfile, back, isBusiness, openSheet, profiles, push, refresh, re
 import { offerRoleSwitch } from '../roles';
 import {
   SortButton, pickSheet, Avatar, BackButton, confirmSheet, Empty, Gallery, GlassButton, Header, HeaderTitle, Icon, icon, Logo, MediaTile, openViewer, PageTabs, postDate, price,
-  priceCaption, ProBadge, RatingInline, SheetFrame, Spinner, SwipePages, timeAgo, useDebounced, useLoad, usePullToRefresh, useCollapsingHeader,
+  priceCaption, ProBadge, RatingInline, SheetFrame, Spinner, SwipePages, timeAgo, useDebounced, useLoad, usePullToRefresh, useCollapsingHeader, TopBlur,
 } from '../ui';
 
 type JobsTab = 'all' | 'applied' | 'saved' | 'mine';
@@ -30,6 +30,7 @@ export function JobsScreen() {
   return (
     <div class="collapsing" ref={root}>
       <div class="scroll" ref={scroller}>
+        <TopBlur sticky />
         <div class="tabs-pin" data-collapse-tabs><PageTabs tabs={tabs.map(([, l]) => l)} index={index} onChange={pick} /></div>
         <SwipePages index={index} onChange={pick}>
           {tabs.map(([t]) => <JobList key={t} tab={t} q={q} register={(fn) => { reloads.current[t] = fn; }} />)}
@@ -37,7 +38,7 @@ export function JobsScreen() {
         <div style={{ height: 'var(--tabbar-clear)' }} />
       </div>
       <Indicator />
-      <Header
+      <Header blur={false}
         left={searching ? null : <GlassButton name="IconPlus" label="Create job" onClick={create} />}
         collapsingTitle center={searching ? null : <Logo word="job" />}
         right={searching ? (

@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { Card, del, errorText, get, Media, Page, post } from '../api';
 import { activeProfile, badges, openSheet, push, refresh, refreshTick, showToast } from '../state';
 import {
-  Subtab, SortButton, pickSheet, openContextMenu, useLongPress, Avatar, Empty, fmtDuration, GlassButton, Header, Icon, icon, Logo, openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, SwipePages,
-  useDebounced, useLoad, usePullToRefresh, useCollapsingHeader,
+  Subtab, SortButton, pickSheet, openContextMenu, useLongPress, Avatar, Empty, VideoTime, GlassButton, Header, Icon, icon, Logo, openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, SwipePages,
+  useDebounced, useLoad, usePullToRefresh, useCollapsingHeader, TopBlur,
 } from '../ui';
 
 type Kind = 'creator' | 'business';
@@ -34,6 +34,7 @@ export function CreatorsScreen() {
   return (
     <div class="collapsing" ref={root}>
       <div class="scroll" ref={scroller}>
+        <TopBlur sticky />
         <div class="tabs-pin" data-collapse-tabs><PageTabs tabs={[kind === 'creator' ? 'Creators' : 'Businesses', `My Contacts${badges.value.contactRequests ? ` · ${badges.value.contactRequests}` : ''}`]} index={index} onChange={pick} /></div>
         <SwipePages index={index} onChange={pick}>
           <Catalog kind={kind} q={q} register={(fn) => { if (index === 0) reloadRef.current = fn; }} />
@@ -42,7 +43,7 @@ export function CreatorsScreen() {
         <div style={{ height: 'var(--tabbar-clear)' }} />
       </div>
       <Indicator />
-      <Header
+      <Header blur={false}
         left={searching ? null : <GlassButton name="IconCreatorsFilter" label="Filter" onClick={filter} />}
         collapsingTitle center={searching ? null : <Logo word="creators" />}
         right={searching ? (
@@ -120,7 +121,7 @@ function CreatorCard({ card, rel, onRel }: { card: Card & { bio?: string }; rel:
           <Avatar card={card} size={48} ring />
           <div class="grow">
             <div class="ccard__name"><span class="ellipsis">{card.displayName}</span><ProBadge card={card} compact /></div>
-            <div class="ccard__loc"><span class="ellipsis">{card.location ? `${card.flag ?? ''} ${card.location}` : card.category ?? `@${card.username}`}</span></div>
+            <div class="ccard__loc"><span class="ellipsis">{card.location ? `${card.flag ?? ''} ${card.location}` : `@${card.username}`}</span></div>
           </div>
         </button>
         {card.rating && card.reviewsCount ? <div class="ccard__rating">{card.rating.toFixed(1)}<StarIcon size={16} /></div> : null}
@@ -176,7 +177,7 @@ function Works({ id }: { id: string }) {
       {(items ?? [0, 1, 2]).map((m: any) => (typeof m === 'number' ? <div class="skeleton" style={{ flex: 'none', width: 112, height: 136 }} /> : (
         <button onClick={() => openViewer(m)} aria-label={m.title ?? m.kind}>
           <img src={(m.kind === 'video' ? m.posterUrl : m.url) ?? ''} alt="" loading="lazy" />
-          {m.kind === 'video' && <span class="glass mtile__time"><Icon name="IconPlay" size={12} />{m.duration ? fmtDuration(m.duration) : ''}</span>}
+          {m.kind === 'video' && <VideoTime media={m} />}
         </button>
       )))}
     </div>

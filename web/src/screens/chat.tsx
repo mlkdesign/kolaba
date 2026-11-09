@@ -5,7 +5,7 @@ import { Card, Conversation, del, errorText, get, Message, post, uploadFile } fr
 import { activeProfile, back, badges, chatOpen, openSheet, push, refresh, refreshTick, showToast } from '../state';
 import {
   alertDialog, openContextMenu, useLongPress, Icon, Avatar, BackButton, chatTime, clock, daySeparator, Empty, GlassButton, Header, HeaderTitle, icon, Logo, openViewer, ProBadge, SheetFrame, Spinner,
-  useDebounced, useLoad, usePullToRefresh, useCollapsingHeader,
+  useDebounced, useLoad, usePullToRefresh, useCollapsingHeader, TopBlur,
 } from '../ui';
 
 export function ChatListScreen() {
@@ -38,6 +38,7 @@ export function ChatListScreen() {
   return (
     <div class="collapsing" ref={root}>
       <div class="scroll" ref={scroller}>
+        <TopBlur sticky />
         <div class="section-top" />
         {q.length >= 2 && search.data && (
           <>
@@ -69,7 +70,7 @@ export function ChatListScreen() {
         <div style={{ height: 'var(--tabbar-clear)' }} />
       </div>
       <Indicator />
-      <Header
+      <Header blur={false}
         left={searching ? null : <GlassButton name="IconDotsThree" label="Chats menu" onClick={menu} />}
         collapsingTitle center={searching ? null : <Logo word="chat" />}
         right={searching ? (

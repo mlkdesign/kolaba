@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, currentUser, requireAuth, requireProfile } from '../lib/auth';
 import { fail, newId, now } from '../lib/util';
+import { canTestPro } from './auth';
 
 const me = new Hono<AppEnv>();
 me.use('*', requireAuth);
@@ -39,8 +40,9 @@ me.put('/settings', async (c) => {
 me.put('/pro-test', requireProfile, async (c) => {
   const user = currentUser(c);
   const profile = actingProfile(c);
-  const testers = (c.env.PRO_TEST_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
-  if (user.role !== 'admin' && !testers.includes(user.email.toLowerCase())) fail(403, 'pro_test_not_allowed');
+  const row = await c.env.DB.prepare(`SELECT role, email, email_verification FROM users WHERE id = ?`).bind(user.id)
+    .first<{ role: string; email: string; email_verification: string | null }>();
+  if (!row || !canTestPro(c.env, row)) fail(403, 'pro_test_not_allowed');
   const { pro } = z.object({ pro: z.boolean() }).parse(await c.req.json());
   await c.env.DB.prepare(`UPDATE subscriptions SET status = 'cancelled', expires_at = ? WHERE profile_id = ? AND status = 'active'`)
     .bind(now(), profile.id).run();

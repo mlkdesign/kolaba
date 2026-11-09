@@ -175,3 +175,29 @@ API for internal logic).
 - E2E scenario L (16/16 on production): settings persist, PRO test switch and account deletion refused to demo
   accounts, deleted chat clears one side only, own profiles not in Reels. Account deletion itself was verified on a
   local disposable account (rows gone, sessions revoked, others untouched).
+
+## Round 6 — layers, blur, galleries, empty profile (2026-11-09)
+- **Top blur** (`TopBlur` in `ui.tsx`): KolabaTopBlur's progressive blur — four stacked 4 px backdrop blurs with ramps
+  ending at 100 / 75 / 50 / 25 % (radius 8 at the top → 0, no edge) over the 70 → 50 → 0 % darkening; at least 100 pt.
+  On screens with pinned tabs the band lives *inside* the scroll view as a zero-height sticky anchor (z 21), so the
+  pinned tabs (z 22) are always above it in one stacking context — also in Safari's composited scrolling (the cause of
+  tabs drawn under the blur); there it reaches 64 pt under the safe area, so content passing under the tabs is blurred.
+- **Sections** are each a backdrop root (`clip-path` + `isolation` on `.pager__page`): blur and brightness never change
+  when a slide starts or ends (late darkening, titles briefly under the blur). The bottom gradient fades instead of
+  vanishing on Reels.
+- **Profile glow** is part of the page (inside the scroll): it scrolls away, above the blur like iOS's chrome layer.
+- **No pull-to-refresh** imitation; `overscroll-behavior: none` on phones (no browser refresh or rubber band).
+- **Galleries**: a gallery owns drags that start inside it (it used to ignore itself) — swipe with finger or mouse,
+  spring settle, no fullscreen for job photos.
+- **Profile photos**: creators up to 10 (hero pager with dots; Edit profile strip: Make profile photo / Remove / +);
+  businesses one logo (+ replaces; the server allows no second photo and retires the replaced one).
+- **Empty My Profile** (Figma 707:3736 …): Add Profile Photos, Add location, Add bio, the Add links card, Collabs ·
+  Rating "–" · Contacts, Collections locked (lock, no count, paywall), card fan ▶ / photos for the portfolio.
+- **Video length** on every video tile from the API or the file's own metadata (never a made-up value).
+- **Links & Contact** sheet (KolabaContactsSheet): Social Media · Contact · More Links, each platform once, Telegram /
+  WhatsApp / Email, original marks; Edit profile has YouTube, Telegram, WhatsApp, Email fields.
+- **Location**: one field — "Ukraine, all cities" or "Kharkiv, Ukraine" (countries in en/uk/ru, big cities, typed
+  "City, Country"); no Niche field anywhere.
+- **Phones**: theme-color / page background #0B0B0B, dark color-scheme.
+- **API**: a login to a not yet verified account sends its code at once (it used to need Resend); PRO test switch also
+  for accounts verified through the closed-test inbox; one business photo.

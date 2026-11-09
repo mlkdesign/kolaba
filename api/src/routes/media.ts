@@ -56,7 +56,15 @@ media.post('/uploads', requireAuth, requireProfile, async (c) => {
   if (body.kind === 'video' && body.duration && body.duration > Number(c.env.MAX_VIDEO_SECONDS)) fail(422, 'video_too_long');
   if (['portfolio', 'intro', 'collection'].includes(body.purpose) && profile.type !== 'creator') fail(403, 'creator_profile_required');
   if (PRO_PURPOSES.has(body.purpose) && !(await isPro(c.env, profile.id))) fail(403, 'pro_required');
-  const limit = COUNT_LIMITS[body.purpose]?.[body.kind];
+  // A business has one photo, its logo (FEATURE 19): a new one may be uploaded only to replace the current one
+  // (PATCH avatarMediaId then retires the old), never a second next to it. A creator keeps up to 10.
+  if (body.purpose === 'avatar' && profile.type === 'business') {
+    const others = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM media m JOIN profiles p ON p.id = m.owner_profile_id
+        WHERE m.owner_profile_id = ? AND m.purpose = 'avatar' AND m.status IN ('pending', 'ready')
+        AND m.created_at > ? AND m.id IS NOT COALESCE(p.avatar_media_id, '')`).bind(profile.id, now() - 3_600_000).first<{ n: number }>();
+    if ((others?.n ?? 0) >= 1) fail(409, 'media_limit_reached', 'A business profile has one photo.');
+  }
+  const limit = body.purpose === 'avatar' && profile.type === 'business' ? 0 : COUNT_LIMITS[body.purpose]?.[body.kind];
   if (limit) {
     const used = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE owner_profile_id = ? AND purpose = ? AND kind = ?
         AND status IN ('pending', 'ready')`).bind(profile.id, body.purpose, body.kind).first<{ n: number }>();

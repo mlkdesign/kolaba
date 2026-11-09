@@ -40,7 +40,7 @@ export function Header({ left, center, right, blur = true, blurOpacity = 1, coll
 }) {
   return (
     <>
-      {blur && <div class="top-blur" style={{ opacity: blurOpacity }} />}
+      {blur && <TopBlur opacity={blurOpacity} />}
       <header class="header">
         <div class="header__side">{left}</div>
         {center && <div class={`header__center ${collapsingTitle ? 'is-title' : ''}`}>{center}</div>}
@@ -48,6 +48,20 @@ export function Header({ left, center, right, blur = true, blurOpacity = 1, coll
       </header>
     </>
   );
+}
+
+/** KolabaTopBlur: the 100 pt band at the top — the background darkening (70 % → 50 % → 0) under a progressive blur
+ *  (radius 8 at the top edge → 0 at the bottom: four stacked 4 px backdrop blurs, each masked by a linear ramp that
+ *  ends lower than the one before, so the radius falls off without a step or an edge). `sticky` puts the band inside a
+ *  scroll view as its first child: then it shares one stacking context with the pinned tabs, which always draw above
+ *  it — in every engine, Safari's composited scrolling included. */
+export function TopBlur({ opacity = 1, sticky }: { opacity?: number; sticky?: boolean }) {
+  const band = (
+    <div class="top-blur" style={{ opacity }} aria-hidden="true">
+      <i class="top-blur__dark" /><i class="top-blur__l1" /><i class="top-blur__l2" /><i class="top-blur__l3" /><i class="top-blur__l4" />
+    </div>
+  );
+  return sticky ? <div class="top-blur-pin" aria-hidden="true">{band}</div> : band;
 }
 
 export const HeaderTitle = ({ title, sub }: { title: string; sub?: string }) => (
@@ -72,10 +86,11 @@ export function PageTabs({ tabs, index, onChange, profile, counts }: { tabs: str
 /** A horizontal drag recogniser: locks to an axis after 10 px, settles to the next page past half a width or a
  *  500 px/s flick (KolabaMotion.MainApp: directionLock 10, pageFlipVelocity 500). Ignores drags that start inside an
  *  element marked data-hscroll (carousels, galleries) so those keep their own swipes. */
-export function useHorizontalSwipe(onDrag: (dx: number) => void, onEnd: (dx: number, velocity: number) => void) {
+export function useHorizontalSwipe(onDrag: (dx: number) => void, onEnd: (dx: number, velocity: number) => void, own = false) {
   return (e: PointerEvent) => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
-    if ((e.target as HTMLElement).closest('[data-hscroll], input, textarea')) return;
+    // A gallery's own recogniser (own) takes drags inside itself; the pages around it leave them alone.
+    if ((e.target as HTMLElement).closest(own ? 'input, textarea' : '[data-hscroll], input, textarea')) return;
     const k = uiScale();
     const x0 = e.clientX; const y0 = e.clientY; const t0 = performance.now();
     let mode: 'none' | 'h' | 'v' = 'none';
@@ -150,6 +165,7 @@ export function Gallery({ media, onOpen, class: cls = 'gallery', dots = true, ch
   const onPointerDown = useHorizontalSwipe(
     (dx) => setDrag((index === 0 && dx > 0) || (index === count - 1 && dx < 0) ? dx / 3 : dx),
     (dx, v) => { setDrag(null); set(settleIndex(index, count, dx, root.current?.clientWidth ?? 370, v)); },
+    true,
   );
   return (
     <div class={cls} ref={root} data-hscroll={count > 1 ? '' : undefined} onPointerDown={count > 1 ? (e) => { e.stopPropagation(); onPointerDown(e as any); } : undefined}>
@@ -232,12 +248,14 @@ export function ProBadge({ card, compact }: { card: Pick<Card, 'isPro' | 'type'>
 
 /** KolabaEmptyState: the card fan (PortfolioCardFan — three glass cards that open with a spring, the pink +), the
  *  message (Bold 16) and its detail (Light 14), both light grey at 50 %, then an optional action. */
-export function Empty({ title, text, children, plus = false }: { title: string; text?: string; iconName?: string; children?: ComponentChildren; plus?: boolean }) {
+export function Empty({ title, text, children, plus = false, cards = 'standard' }: { title: string; text?: string; iconName?: string; children?: ComponentChildren; plus?: boolean; cards?: 'standard' | 'media' }) {
+  // CardFanIcons: the locks on the sides (standard), or a portfolio's video ▶ and photos (Figma 707:3736).
+  const [left, right] = cards === 'media' ? ['IconPlay', 'IconImages'] : ['IconLockKey', 'IconLockKey'];
   return (
     <div class="empty" role="status">
       <div class="fan" aria-hidden="true">
-        <span class="fan__card is-left"><img src={icon('IconLockKey')} alt="" /></span>
-        <span class="fan__card is-right"><img src={icon('IconLockKey')} alt="" /></span>
+        <span class="fan__card is-left"><img src={icon(left)} alt="" class={left === 'IconPlay' ? 'is-dim' : ''} /></span>
+        <span class="fan__card is-right"><img src={icon(right)} alt="" /></span>
         <span class="fan__card is-center"><img src={icon('IconPortfolioMark')} alt="" style={{ width: 20, height: 19.5 }} /></span>
         {plus && <span class="fan__plus"><img src={icon('IconPlus')} alt="" /></span>}
       </div>
@@ -255,7 +273,7 @@ export function Empty({ title, text, children, plus = false }: { title: string; 
 export function Subtab({ label, count, on, onClick, locked }: { label: string; count?: number; on: boolean; onClick: () => void; locked?: boolean }) {
   return (
     <button class={`subtab ${on ? 'is-on' : ''}`} role="tab" aria-selected={on} onClick={onClick}>
-      {label}{count !== undefined && <span class="subtab__count">{count > 999 ? '999+' : count}</span>}
+      {label}{count !== undefined && !locked && <span class="subtab__count">{count > 999 ? '999+' : count}</span>}
       {locked && <img src={icon('IconLockKey')} alt="Locked" class="subtab__lock" />}
     </button>
   );
@@ -378,6 +396,35 @@ export function openViewer(media: Media, extra?: (close: () => void) => Componen
   ), { raw: true });
 }
 
+// ─── a video's real length: the API's duration, else the file's own metadata (read once, kept per id) ───
+
+const durations = new Map<string, number>();
+const pendingDurations = new Map<string, Promise<number | null>>();
+function videoDuration(media: Media): Promise<number | null> {
+  if (media.duration) return Promise.resolve(media.duration);
+  if (durations.has(media.id)) return Promise.resolve(durations.get(media.id)!);
+  if (!media.url) return Promise.resolve(null);
+  if (!pendingDurations.has(media.id)) {
+    pendingDurations.set(media.id, new Promise((resolve) => {
+      const v = document.createElement('video');
+      v.preload = 'metadata'; v.muted = true;
+      const done = (d: number | null) => { v.removeAttribute('src'); v.load(); if (d) durations.set(media.id, d); resolve(d); };
+      v.onloadedmetadata = () => done(Number.isFinite(v.duration) && v.duration > 0 ? v.duration : null);
+      v.onerror = () => done(null);
+      window.setTimeout(() => done(null), 15000);
+      v.src = media.url!;
+    }));
+  }
+  return pendingDurations.get(media.id)!;
+}
+
+/** The ▶ and the length ("0:30", "1:24") on every video tile — never a made-up one. */
+export function VideoTime({ media }: { media: Media }) {
+  const [d, setD] = useState<number | null>(media.duration ?? durations.get(media.id) ?? null);
+  useEffect(() => { let live = true; if (!d) void videoDuration(media).then((x) => { if (live && x) setD(x); }); return () => { live = false; }; }, [media.id]);
+  return <span class="mtile__time"><Icon name="IconPlay" size={12} />{d ? fmtDuration(d) : null}</span>;
+}
+
 export function MediaTile({ media, onOpen, picked, menu, removing }: { media: Media; onOpen?: () => void; picked?: boolean; menu?: MenuAction[]; removing?: boolean }) {
   const [broken, setBroken] = useState(false);
   const src = media.kind === 'video' ? media.posterUrl : media.url;
@@ -390,57 +437,17 @@ export function MediaTile({ media, onOpen, picked, menu, removing }: { media: Me
       onClick={menu?.length ? press.click(open) : open}>
       {src && !broken ? <img src={src} alt="" loading="lazy" draggable={false} onError={() => setBroken(true)} />
         : <div style={{ position: 'absolute', inset: 0, background: gradientFor(media.id) }} />}
-      {media.kind === 'video' && (
-        <span class="mtile__time"><Icon name="IconPlay" size={12} />{media.duration ? fmtDuration(media.duration) : ''}</span>
-      )}
+      {media.kind === 'video' && <VideoTime media={media} />}
     </button>
   );
 }
 
-// ─── pull to refresh: the arrows follow the pull; past 112 pt it refreshes ───
+// ─── pull to refresh: none on the web (the ТЗ removes the imitation). Data still refreshes on events and on return. ───
 
-export function usePullToRefresh(onRefresh: () => Promise<unknown> | void, deps: unknown[] = []) {
+/** Kept as a seam so screens own their scroller ref; there is no pull gesture, indicator or glow reaction. */
+export function usePullToRefresh(_onRefresh?: () => unknown, _deps: unknown[] = []) {
   const scroller = useRef<HTMLDivElement>(null);
-  const indicator = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    const el = scroller.current;
-    if (!el) return;
-    let y0: number | null = null; let pull = 0; let busy = false;
-    const paint = (p: number, spinning = false) => {
-      const ind = indicator.current;
-      if (!ind) return;
-      ind.style.opacity = String(Math.min(p / 112, 1));
-      ind.style.transform = `translateY(${Math.min(p, 140) * 0.5}px) rotate(${p * 2.4}deg)`;
-      ind.classList.toggle('is-spinning', spinning);
-    };
-    const start = (e: TouchEvent | PointerEvent) => {
-      if (busy || el.scrollTop > 0) return;
-      if ('pointerType' in e && e.pointerType !== 'mouse') return;
-      y0 = 'touches' in e ? e.touches[0].clientY : e.clientY; pull = 0;
-    };
-    const move = (e: TouchEvent | PointerEvent) => {
-      if (y0 === null) return;
-      const y = 'touches' in e ? e.touches[0].clientY : e.clientY;
-      pull = Math.max(0, ((y - y0) / uiScale()) * 0.6);
-      if (el.scrollTop > 0) { y0 = null; pull = 0; }
-      paint(pull);
-    };
-    const end = async () => {
-      if (y0 === null) return;
-      y0 = null;
-      if (pull >= 112 * 0.6) {
-        busy = true; paint(112, true);
-        try { await onRefresh(); } finally { busy = false; paint(0); }
-      } else paint(0);
-    };
-    el.addEventListener('touchstart', start, { passive: true }); el.addEventListener('touchmove', move, { passive: true }); el.addEventListener('touchend', end);
-    el.addEventListener('pointerdown', start); window.addEventListener('pointermove', move); window.addEventListener('pointerup', end);
-    return () => {
-      el.removeEventListener('touchstart', start); el.removeEventListener('touchmove', move); el.removeEventListener('touchend', end);
-      el.removeEventListener('pointerdown', start); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end);
-    };
-  }, deps);
-  const Indicator = () => <div class="ptr glass" ref={indicator} aria-hidden="true"><Icon name="IconArrowsClockwise" size={18} /></div>;
+  const Indicator = () => null;
   return { scroller, Indicator };
 }
 

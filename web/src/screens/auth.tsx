@@ -2,6 +2,7 @@
 // inspired), Create profile (e-mail + password, red errors with a shake), Verify e-mail (six cells, paste, resend
 // timer), Welcome back (log in), password reset, the first profile (creator / business) and legal pages.
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { LocationField, placeFields, type Place } from '../location';
 import { ApiError, errorText, post, ProfileType } from '../api';
 import { applySession, profiles, reloadSession, showToast, user } from '../state';
 import { AmbientBackground, subscribe } from '../fx';
@@ -336,16 +337,14 @@ export function CreateProfile({ onDone, onCancel, allowed }: { onDone?: () => vo
   const [type, setType] = useState<ProfileType>(types[0]);
   const [displayName, setDisplayName] = useState('');
   const [username, setUsername] = useState('');
-  const [city, setCity] = useState('');
-  const [country, setCountry] = useState('');
-  const [category, setCategory] = useState('');
+  const [place, setPlace] = useState<Place | null>(null);
   const [bio, setBio] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const submit = async (e: Event) => {
     e.preventDefault(); setBusy(true); setError('');
     try {
-      await post('/v1/profiles', { type, displayName, username, city: city || null, country: country || null, category: category || null, bio });
+      await post('/v1/profiles', { type, displayName, username, ...placeFields(place), bio });
       await reloadSession();
       const created = profiles.value.find((p) => p.username === username.toLowerCase());
       if (created) (await import('../state')).setActiveProfile(created.id);
@@ -373,8 +372,7 @@ export function CreateProfile({ onDone, onCancel, allowed }: { onDone?: () => vo
           <form onSubmit={submit} class="form-gap" noValidate>
             {plain(displayName, setDisplayName, type === 'business' ? 'Business name' : 'Your name', 'IconUser')}
             <Field iconName="IconLink" value={username} placeholder="Username" onInput={(v) => setUsername(v.toLowerCase().replace(/[^a-z0-9._]/g, ''))} />
-            <div class="row" style={{ gap: 8 }}>{plain(city, setCity, 'City', 'IconMapPin')}{plain(country, setCountry, 'Country', 'IconGlobeSimple')}</div>
-            {plain(category, setCategory, type === 'business' ? 'Category (Hotels / Resort)' : 'Niche (Travel / Lifestyle UGC)', 'IconFunnel')}
+            <LocationField value={place} onChange={setPlace} />
             <textarea class="textarea" maxLength={1000} placeholder={type === 'business' ? 'Description' : 'Bio'} value={bio} onInput={(e) => setBio(e.currentTarget.value)} />
             {error && <div class="field-error" role="alert">{error}</div>}
             <NextButton busy={busy} ready={!!displayName && username.length >= 3} label="Create profile" />
