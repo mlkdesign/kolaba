@@ -298,6 +298,18 @@ function Bio({ text }: { text: string }) {
   );
 }
 
+/** Share a profile — one's own or someone else's: the system share sheet, or the link copied. The profile's own link:
+ *  the app's address + #/profile/<profile id> (the id the server generated); it opens that profile (after signing in,
+ *  if needed). */
+export async function shareProfile(p: { id: string; displayName: string; username: string }) {
+  const url = profileLink(p.id);
+  const text = `${p.displayName} (@${p.username}) on kolaba.`;
+  try {
+    if (navigator.share) await navigator.share({ title: text, url });
+    else { await navigator.clipboard.writeText(`${text} ${url}`); showToast('Profile link copied', 'ok'); }
+  } catch { /* cancelled */ }
+}
+
 /** The shareable address of a profile. */
 export function profileLink(id: string) {
   const base = ((import.meta as any).env?.VITE_APP_URL as string | undefined) ?? location.origin + location.pathname;
@@ -318,16 +330,7 @@ function Figures({ p }: { p: ProfilePage }) {
 }
 
 function OwnerActions({ p }: { p: ProfilePage }) {
-  const share = async () => {
-    // The profile's own link: the app's address + #/profile/<profile id> (the id the server generated) — opens this
-    // profile for whoever follows it (after signing in, if needed).
-    const url = profileLink(p.id);
-    const text = `${p.displayName} (@${p.username}) on kolaba.`;
-    try {
-      if (navigator.share) await navigator.share({ title: text, url });
-      else { await navigator.clipboard.writeText(`${text} ${url}`); showToast('Profile link copied', 'ok'); }
-    } catch { /* cancelled */ }
-  };
+  const share = () => shareProfile(p);
   return (
     <div class="pactions">
       <button class="pbtn" onClick={() => push('profile-edit', {}, 'profile')}><img src={icon('IconPencilLine')} alt="" />Edit Profile</button>
@@ -488,6 +491,7 @@ function ProfileMenu({ p, close, reload }: { p: ProfilePage; close: () => void; 
           {r === 'connected' && <button class="menu-item" onClick={() => { close(); confirmSheet('Remove contact?', `${p.displayName} will no longer be in your contacts.`, 'Remove', () => run(() => del(`/v1/contacts/${p.id}`), 'Contact removed'), true); }}><img src={icon('IconUserMinus')} alt="" />Remove from contacts</button>}
         </>
       )}
+      <button class="menu-item" onClick={() => { close(); void shareProfile(p); }}><img src={icon('IconShareFat')} alt="" />Share profile</button>
       <button class="menu-item is-danger" onClick={() => run(() => post('/v1/reports', { targetType: 'profile', targetId: p.id, reason: 'inappropriate' }), 'Reported — our team will review it')}>
         <img src={icon('IconShieldWarning')} alt="" />Report profile</button>
     </SheetFrame>
