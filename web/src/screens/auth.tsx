@@ -138,8 +138,8 @@ function Socials({ intent }: { intent: 'Sign Up' | 'Log in' }) {
     <>
       <div class="auth-or">Or</div>
       <div class="form-gap">
-        <button class="social-btn" disabled title="Available in the iOS app"><img src={icon('IconGoogle')} alt="" />{intent} with Google<small>iOS app</small></button>
-        <button class="social-btn" disabled title="Available in the iOS app"><img src={icon('IconApple')} alt="" />{intent} with Apple<small>iOS app</small></button>
+        <button type="button" class="social-btn" onClick={() => showToast(`${intent} with Google is available in the iOS app`)}><img src={icon('IconGoogle')} alt="" />{intent} with Google</button>
+        <button type="button" class="social-btn" onClick={() => showToast(`${intent} with Apple is available in the iOS app`)}><img src={icon('IconApple')} alt="" />{intent} with Apple</button>
       </div>
     </>
   );
@@ -281,7 +281,6 @@ function Login({ onBack, onForgot, onVerify }: { onBack: () => void; onForgot: (
       </form>
       <button class="btn is-ghost" style={{ marginTop: 8, height: 40 }} onClick={onForgot}>Forgot password?</button>
       <Socials intent="Log in" />
-      <div class="notice" style={{ marginTop: 16 }}>Test environment. Demo accounts are shared with testers separately — their profiles are marked <b>DEMO</b>.</div>
     </AuthPage>
   );
 }
@@ -393,7 +392,7 @@ export function Legal({ onBack }: { onBack: () => void }) {
       <div class="scroll">
         <div class="legal">
           <h2>KOLABA web test version</h2>
-          <p>KOLABA connects creators and businesses. Demo profiles are fictional and the test may be reset. No payments are charged.</p>
+          <p>KOLABA connects creators and businesses. This is a test version: no payments are charged.</p>
           <h2>Legal documents</h2>
           <p><a href={`${BASE}privacy.html`}>Read the Privacy Policy</a></p>
           <p><a href={`${BASE}terms.html`}>Read the Terms of Use</a></p>

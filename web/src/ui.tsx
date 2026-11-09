@@ -218,15 +218,23 @@ export function ProBadge({ card, compact }: { card: Pick<Card, 'isPro' | 'type'>
   return <span class={`pro ${card.type === 'business' ? 'is-business' : ''} ${compact ? 'is-compact' : ''}`}><img src={icon('IconCrownSimple')} alt="" />PRO</span>;
 }
 
-export const DemoTag = ({ card }: { card: Pick<Card, 'isDemo'> }) => (card.isDemo ? <span class="demo-tag" title="Demo profile">DEMO</span> : null);
 
-export function Empty({ title, text, iconName = 'IconFolderSimpleDashed', children }: { title: string; text?: string; iconName?: string; children?: ComponentChildren }) {
+/** KolabaEmptyState: the card fan (PortfolioCardFan — three glass cards that open with a spring, the pink +), the
+ *  message (Bold 16) and its detail (Light 14), both light grey at 50 %, then an optional action. */
+export function Empty({ title, text, children, plus = true }: { title: string; text?: string; iconName?: string; children?: ComponentChildren; plus?: boolean }) {
   return (
-    <div class="empty">
-      <div class="empty__icon"><Icon name={iconName} size={28} /></div>
-      <div class="empty__title">{title}</div>
-      {text && <div>{text}</div>}
-      {children && <div style={{ marginTop: 14 }}>{children}</div>}
+    <div class="empty" role="status">
+      <div class="fan" aria-hidden="true">
+        <span class="fan__card is-left"><img src={icon('IconLockKey')} alt="" /></span>
+        <span class="fan__card is-right"><img src={icon('IconLockKey')} alt="" /></span>
+        <span class="fan__card is-center"><img src={icon('IconPortfolioMark')} alt="" style={{ width: 20, height: 19.5 }} /></span>
+        {plus && <span class="fan__plus"><img src={icon('IconPlus')} alt="" /></span>}
+      </div>
+      <div class="empty__text">
+        <div class="empty__title">{title}</div>
+        {text && <div class="empty__detail">{text}</div>}
+      </div>
+      {children && <div class="empty__action">{children}</div>}
     </div>
   );
 }

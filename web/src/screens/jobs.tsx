@@ -338,7 +338,7 @@ function ApplySheet({ job, close, onDone }: { job: Job; close: () => void; onDon
             <MediaTile media={m} picked={selected.includes(m.id)} onOpen={() => setSelected((s) => (s.includes(m.id) ? s.filter((x) => x !== m.id) : [...s, m.id].slice(0, 10)))} />
           ))}
         </div>
-      ) : <div class="locked" style={{ margin: 0 }}><b>Attach media with creator.pro</b>Free applications are text-only. (Test environment: PRO is granted to demo accounts.)</div>}
+      ) : <div class="locked" style={{ margin: 0 }}><b>Attach media with creator.pro</b>Free applications are text-only.</div>}
       <button class="btn is-accent" style={{ marginTop: 18 }} disabled={busy || !message.trim()} onClick={send}>{busy ? 'Sending…' : 'Send application'}</button>
     </SheetFrame>
   );

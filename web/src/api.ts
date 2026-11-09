@@ -185,9 +185,9 @@ export function errorText(error: unknown): string {
   const code = error instanceof ApiError ? error.code : 'unknown';
   const map: Record<string, string> = {
     invalid_credentials: 'Wrong e-mail or password.', email_taken: 'This e-mail is already registered — log in instead.',
-    registration_closed: 'Registration opens once e-mail delivery is connected. Try a demo account meanwhile.',
+    registration_closed: 'Registration opens once e-mail delivery is connected.',
     email_unavailable: 'E-mail delivery is not configured yet.',
-    registration_invite_only: 'Registration is open to invited testers only for now. Use a demo account, or ask the KOLABA team for access.',
+    registration_invite_only: 'Registration is open to invited testers only for now. Ask the KOLABA team for access.',
     email_failed: 'We couldn\'t send the code to this address. Try again later.', code_invalid: 'Wrong code — check the e-mail and try again.',
     code_expired: 'The code expired. Ask for a new one.', password_too_short: 'At least 8 characters.',
     rate_limited: 'Too many attempts — wait a minute and try again.', account_locked: 'Too many attempts — try again in 15 minutes.',

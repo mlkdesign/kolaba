@@ -91,3 +91,25 @@ order, Message + Follow on public profiles, compact My Contacts rows); Figma dec
 
 Remaining differences: Collabs → Reviews figure; one profile photo; no presence dot; Google / Apple disabled on the web;
 CSS blur instead of Liquid Glass refraction; Language offers English only on the web.
+
+## Round 3 — proportions (2026-11-09)
+Method: web screenshots at the logical 402 × 874 (device pixel ratio 2) and simulator screenshots (1206 px = 402 pt)
+normalised to points; bright-content boxes measured per region (`scratchpad/cmp/measure.py`) and side-by-side overlays.
+Root causes found and fixed:
+- **Section logos were 1.55× too large**: iOS draws `KolabaLogo(size: 20.677, height: 23)` in every section header;
+  32 / 45 is the Start page only. Now `.logo` is 20.677 / 23 and only `.start-logo` uses 32 / 45.
+- **Sizes guessed instead of taken from `KolabaTypography`**: auth titles headingLarge 32 (not 36); inputs and search
+  bodySmall 14 (not 16); legal links caption 12; social sign-in buttons Medium 14; View project / project buttons
+  Medium 12; settings rows 15, values 14, place 12; Apply bar price Bold 14; chat previews light grey at 50 %; profile
+  social counts 16; bio line height 20; no letter-spacing anywhere (iOS uses none).
+- **Spacing**: profile figures had 8 pt extra under them; Reels avatar 48 (not 56), Follow 40, like pill 40, ••• 48 × 32;
+  no permanent "muted" glyph on Reels (iOS has none).
+- **Empty states** rebuilt as KolabaEmptyState: the PortfolioCardFan (100 × 120 centre card, 80 × 96 sides at ±15°,
+  spring 0.58 s, pink +), Bold 16 / Light 14 at 50 %.
+- **No double scaling**: the app has no vw / vh / clamp inside the screen; only `.phone` is scaled (70 % of the window
+  height, centred). Viewport `maximum-scale=1` keeps 14 pt inputs from zooming on phones.
+After the fixes, measured on job., creators., chat., profile, kolaba., Start and Create profile: headers, tabs, names,
+cards, buttons, tab bar and auth blocks within ±1–2 pt of iOS (differences left come from different demo data).
+
+Demo accounts: kept. The "DEMO" labels and demo wording were removed from the interface (the data flag stays in the
+API for internal logic).

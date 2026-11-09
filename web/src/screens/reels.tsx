@@ -129,11 +129,10 @@ function CreatorPage({ creator, index, active, near, muted, onVideo, onLike, onF
         ))}
       </div>
       {hearts.map((h) => <img key={h.id} class="heart-pop" src={icon('IconHeartLiked')} alt="" style={{ left: h.x, top: h.y }} onAnimationEnd={() => setHearts((x) => x.filter((y) => y.id !== h.id))} />)}
-      {active && muted && <span class="reel__muted glass glass-btn" aria-hidden="true"><img src={icon('IconSpeakerX')} alt="" /></span>}
       <div class="reel__shade" />
       <div class="reel__info">
         <div class="reel__author">
-          <button onClick={() => push('profile-view', { id: a.id })} aria-label={a.displayName}><Avatar card={a} size={56} ring /></button>
+          <button onClick={() => push('profile-view', { id: a.id })} aria-label={a.displayName}><Avatar card={a} size={48} ring /></button>
           <button class="reel__who" onClick={() => push('profile-view', { id: a.id })}>
             <div class="reel__name"><span class="ellipsis">{a.displayName}</span><ProBadge card={a} compact /></div>
             {a.location && <div class="reel__loc ellipsis">{a.flag} {a.location}</div>}
@@ -147,7 +146,7 @@ function CreatorPage({ creator, index, active, near, muted, onVideo, onLike, onF
         </div>
         {creator.bio && <div class="reel__bio lines-3">{creator.bio}</div>}
         <div class="reel__foot">
-          <div class="reel__source">{media?.source ? `Stock video · ${media.source.provider} · demo profile` : ''}</div>
+          <div class="reel__source">{media?.source ? `Video: ${media.source.provider}` : ''}</div>
           <button class="glass reel__more" aria-label="More" onClick={more}><img src={icon('IconDotsThree')} alt="" /></button>
         </div>
       </div>

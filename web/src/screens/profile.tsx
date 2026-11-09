@@ -6,7 +6,7 @@ import { Card, del, errorText, get, Job, Media, patch, post, posterFrom, Profile
 import { activeProfile, back, isBusiness, openSheet, profiles, push, refresh, refreshTick, reloadSession, setActiveProfile, showToast, signOut, user } from '../state';
 import { ProfileGlow } from '../fx';
 import {
-  Avatar, BackButton, confirmSheet, DemoTag, Empty, fmtCount, GlassButton, gradientFor, Header, HeaderTitle, Icon, icon, initials, MediaTile,
+  Avatar, BackButton, confirmSheet, Empty, fmtCount, GlassButton, gradientFor, Header, HeaderTitle, Icon, icon, initials, MediaTile,
   openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, Stars, SwipePages, timeAgo, useLoad, usePullToRefresh, alertDialog, pickSheet,
 } from '../ui';
 import { JobCard } from './jobs';
@@ -43,7 +43,7 @@ export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'rev
         <Hero p={p} own={own} />
         <div class="pinfo">
           <div class="pinfo__block">
-            <div class="pname"><span>{p.displayName}</span><ProBadge card={p} /><DemoTag card={p} /></div>
+            <div class="pname"><span>{p.displayName}</span><ProBadge card={p} /></div>
             <div class="pmeta">
               {p.location && <span>{p.flag} {p.location}</span>}
               {p.category && <span>{p.category}</span>}
@@ -671,7 +671,7 @@ export function SettingsScreen() {
               <div class="sgroup is-danger">
                 <Row iconName="IconSignOut" title="Log out" danger onClick={() => confirmSheet('Log out?', 'Sign in again to see your profile, jobs and messages.', 'Log out', () => void signOut(), true)} />
               </div>
-              <div class="center muted" style={{ fontSize: 12, marginTop: 8 }}>{user.value?.email}{user.value?.isDemo ? ' · demo account' : ''}</div>
+              <div class="center muted" style={{ fontSize: 12, marginTop: 8 }}>{user.value?.email}</div>
             </>
           )}
           {page === 'privacy' && (me?.settings ? (
