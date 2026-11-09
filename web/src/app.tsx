@@ -13,7 +13,7 @@ import {
   activeProfile, applySession, back, badges, booted, isBusiness, leaving, profiles, push, Route, selectTab, setActiveProfile, signOutLocally,
   stacks, startPolling, switcherOpen, Tab, tab, TAB_ORDER, toast, user,
 } from './state';
-import { Avatar, headerSlots, Icon, ProBadge, SectionSlot, Sheets, Spinner, TopBlur } from './ui';
+import { Avatar, headerSlots, Icon, SectionSlot, Sheets, Spinner, TopBlur } from './ui';
 import { uiScale } from './scale';
 import { trackScreen } from './analytics';
 
@@ -112,39 +112,78 @@ function TabBar({ hidden }: { hidden: boolean }) {
   );
 }
 
-/** Switch accounts (long press on the profile item, Figma 885:6949): a glass sheet under the tab bar — the current
- *  account highlighted with a check, the others with a caret, Add business / creator account. */
+/** Switch accounts (SwitchAccountsSheet in KolabaGlassModalContainer, Figma 885:7386): a glass modal 6 pt in from the
+ *  screen's sides and bottom, radius 34, ending above the tab bar; the grabber, "Switch accounts" and the round glass
+ *  close; 56 pt rows (radius 20, 16 pt inside) — the active profile first, lit white 10 % with the green check, the
+ *  others with a caret; a 21 pt separator; Add business account after the businesses (gone at the limit of 5).
+ *  It rises in .45 s, leaves in .35 s, and follows a pull down from its header (closes past 90 pt or on a flick). */
 function AccountSwitcher() {
   const [closing, setClosing] = useState(false);
+  const [drag, setDrag] = useState(0);
+  const [settling, setSettling] = useState(false);
   if (!switcherOpen.value) return null;
-  const close = () => { setClosing(true); window.setTimeout(() => { switcherOpen.value = false; setClosing(false); }, 300); };
-  const hasCreator = profiles.value.some((p) => p.type === 'creator');
+  const close = (then?: () => void) => { if (closing) return; setClosing(true); window.setTimeout(() => { switcherOpen.value = false; setClosing(false); setDrag(0); then?.(); }, 350); };
+  const all = profiles.value;
+  const active = all.find((p) => p.id === activeProfile.value?.id);
+  const businesses = all.filter((p) => p.type === 'business' && p.id !== active?.id);
+  const creators = all.filter((p) => p.type === 'creator' && p.id !== active?.id);
+  const canAddBusiness = all.filter((p) => p.type === 'business').length < 5;
+  const hasCreator = all.some((p) => p.type === 'creator');
+  const choose = (id: string) => close(() => setActiveProfile(id));
+  const startDrag = (e: PointerEvent) => {
+    if ((e.target as HTMLElement).closest('button')) return;
+    const k = uiScale(); const y0 = e.clientY; let v = 0; let last = y0; let lastT = performance.now();
+    const move = (ev: PointerEvent) => {
+      const t = performance.now(); v = ((ev.clientY - last) / k / Math.max(t - lastT, 1)) * 1000; last = ev.clientY; lastT = t;
+      setDrag(Math.max(0, (ev.clientY - y0) / k));
+    };
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up);
+      const dy = Math.max(0, (ev.clientY - y0) / k);
+      if (dy > 90 || v > 700) close();
+      else { setSettling(true); setDrag(0); window.setTimeout(() => setSettling(false), 300); }
+    };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
+  };
+  const row = (p: typeof all[number], isActive: boolean) => (
+    <button class={`sw-row ${isActive ? 'is-active' : ''}`} aria-current={isActive ? 'true' : undefined} onClick={() => (isActive ? close() : choose(p.id))}>
+      <span class={`sw-avatar ${p.type === 'business' ? 'is-business' : ''}`}><Avatar card={p} size={32} /></span>
+      <span class="sw-labels">
+        <span class="sw-title"><span class="ellipsis">{p.displayName}</span>{p.isPro && <span class={`pro ${p.type === 'business' ? 'is-business' : ''}`}><img src={`${import.meta.env.BASE_URL}icons/IconCrownSimple.svg`} alt="" />PRO</span>}</span>
+        <span class="sw-sub">{p.type === 'business' ? 'Business' : 'Creator'}</span>
+      </span>
+      {isActive ? <Icon name="IconCheckActive" size={16} /> : <Icon name="IconCaretRight" size={16} />}
+    </button>
+  );
+  const addBusiness = canAddBusiness && (
+    <button class="sw-row" onClick={() => close(() => push('create-profile', { type: 'business' }, 'profile'))}>
+      <img src={`${import.meta.env.BASE_URL}icons/IconAddAccount.svg`} alt="" width={32} height={32} />
+      <span class="sw-labels"><span class="sw-title">Add business account</span><span class="sw-sub">Create a profile for your brand or agency</span></span>
+    </button>
+  );
+  const addCreator = !hasCreator && (
+    <button class="sw-row" onClick={() => close(() => push('create-profile', { type: 'creator' }, 'profile'))}>
+      <img src={`${import.meta.env.BASE_URL}icons/IconAddAccount.svg`} alt="" width={32} height={32} />
+      <span class="sw-labels"><span class="sw-title">Add creator account</span><span class="sw-sub">Portfolio, Reels and applications to jobs</span></span>
+    </button>
+  );
+  const sep = <div class="sw-sep" aria-hidden="true"><i /></div>;
+  const isBusiness = active?.type === 'business';
   return (
     <>
-      <div class={`switcher-dim ${closing ? 'is-closing' : ''}`} onClick={close} />
-      <div class={`switcher ${closing ? 'is-closing' : ''}`} role="dialog" aria-label="Switch accounts">
-        <div class="sheet__grabber" />
-        <div class="sheet__head"><span style={{ width: 44 }} /><div class="sheet__title">Switch accounts</div>
-          <button class="glass sheet__close" aria-label="Close" onClick={close}><Icon name="IconSheetClose" size={14} /></button></div>
-        {profiles.value.map((p) => {
-          const current = p.id === activeProfile.value?.id;
-          return (
-            <button class={`switcher__row ${current ? 'is-current' : ''}`} onClick={() => { close(); if (!current) setActiveProfile(p.id); }}>
-              <Avatar card={p} size={32} />
-              <div class="grow" style={{ minWidth: 0 }}>
-                <div class="row" style={{ gap: 8 }}><span class="switcher__name ellipsis">{p.displayName}</span><ProBadge card={p} compact /></div>
-                <div class="switcher__type">{p.type === 'business' ? 'Business' : 'Creator'}</div>
-              </div>
-              {current ? <Icon name="IconCheckActive" size={20} /> : <Icon name="IconCaretRight" size={16} />}
-            </button>
-          );
-        })}
-        <div class="switcher__sep" />
-        <button class="switcher__row" onClick={() => { close(); push('settings', {}, 'profile'); }}>
-          <span class="switcher__plus"><Icon name="IconPlus" size={16} /></span>
-          <div class="grow"><div class="switcher__name">Add {hasCreator ? 'business' : 'creator'} account</div>
-            <div class="switcher__type">{hasCreator ? 'Create a profile for your brand or agency' : 'Portfolio, Reels and applications to jobs'}</div></div>
-        </button>
+      <div class={`switcher-dim ${closing ? 'is-closing' : ''}`} style={drag ? { opacity: Math.max(0, 1 - drag / 300) } : undefined} onClick={() => close()} />
+      <div class={`switcher ${closing ? 'is-closing' : ''} ${settling ? 'is-settling' : ''}`} role="dialog" aria-label="Switch accounts"
+        style={drag ? { transform: `translateY(${drag}px)` } : undefined}>
+        <div class="sw-head" onPointerDown={startDrag as any}>
+          <span class="sw-grabber" />
+          <div class="sw-bar"><span style={{ width: 44 }} /><div class="sw-heading">Switch accounts</div>
+            <button class="glass sw-close" aria-label="Close" onClick={() => close()}><Icon name="IconSheetClose" size={24} /></button></div>
+        </div>
+        <div class="sw-rows">
+          {active && row(active, true)}
+          {isBusiness ? <>{businesses.map((p) => row(p, false))}{addBusiness}{sep}{creators.map((p) => row(p, false))}{addCreator}</>
+            : <>{sep}{businesses.map((p) => row(p, false))}{addBusiness}{creators.map((p) => row(p, false))}</>}
+        </div>
       </div>
     </>
   );

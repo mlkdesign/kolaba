@@ -221,3 +221,19 @@ API for internal logic).
 - **iOS**: Clarity SDK 4.1.2 (SPM `microsoft/clarity-apps`), `KolabaAnalytics` starts it in `KolabaApp.init()` only with
   a **mobile** project id in Info.plist `KolabaClarityProjectID` (empty until that project exists) and consent;
   section / screen names and paywall events; `clarityMask()` on auth, chats, messages, notifications and settings.
+
+## Round 8 — tabs geometry, KOLABA confirmations, Switch accounts, PRO switch (2026-11-09)
+- **Tabs (root cause)**: the floating tabs are placed from a placeholder left in the content. The tab classes carry
+  `top: var(--safe-top)` (for sticky); the placeholder was `position: relative`, so it took that offset and every row
+  of tabs sat one safe area too low (62 pt in the mockup), over the subtabs and cards under it. The placeholder is now
+  static; the tabs' place is also recomputed whenever anything above them changes size (ResizeObserver on every child
+  of the scroll view, fonts), and they stay hidden until placed. The sections' band reaches 28 pt under the pinned tabs
+  at full strength there, so content passing under them is blurred out of the way.
+- **Confirmations** (`confirmDialog` in `ui.tsx`, used by every alert): the iOS 26 alert in KOLABA colours — 300 pt
+  dark glass card, radius 34, title / message, two full-width 48 pt capsules stacked (action tinted: blue for the
+  business switch, pink for the creator one; destructive in red), scale-and-fade in and out.
+- **Switch accounts** (SwitchAccountsSheet + KolabaGlassModalContainer): 6 pt inset glass modal, radius 34, grabber,
+  title, round glass close; 56 pt rows radius 20, active lit with the green check, others with a caret; 21 pt
+  separator; Add business account → Create Business Profile; pull down to close.
+- **PRO (Testing)**: SettingsToggleRow with the crown, 15 / 12 pt text, and the iOS 26 switch (63 × 28, capsule thumb,
+  pink when on); moves at once, the server decides, reverts on an error.

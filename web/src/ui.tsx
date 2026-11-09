@@ -669,22 +669,43 @@ export function openContextMenu(el: HTMLElement, actions: MenuAction[]) {
   ), { raw: true });
 }
 
-/** The app's alert (iOS Alert, KOLABA style): title, message, a destructive or default action and Cancel. */
-export function alertDialog(title: string, message: string, action: string, onConfirm: () => void | Promise<void>, danger = true) {
-  openSheet((close) => <AlertView title={title} message={message} action={action} danger={danger} close={close} onConfirm={onConfirm} />, { raw: true });
+/** The app's confirmation (the iOS 26 alert, KOLABA's colours): a dark glass card with large corners, the title, the
+ *  message, and two full-width capsules stacked — the action on top (tinted, or a red label when destructive), Cancel
+ *  under it. It fades and settles in like iOS and leaves the same way; Escape or a tap outside cancels. */
+export interface ConfirmOptions { title: string; message?: string; action: string; onConfirm: () => void | Promise<void>; danger?: boolean; tint?: string; cancel?: string; showCancel?: boolean }
+
+export function confirmDialog(o: ConfirmOptions) {
+  openSheet((close) => <ConfirmView {...o} close={close} />, { raw: true });
 }
 
-function AlertView({ title, message, action, danger, close, onConfirm }: { title: string; message: string; action: string; danger: boolean; close: () => void; onConfirm: () => void | Promise<void> }) {
+/** Older call shape, same dialog. `action` "OK" with no Cancel for notices. */
+export function alertDialog(title: string, message: string, action: string, onConfirm: () => void | Promise<void>, danger = true) {
+  confirmDialog({ title, message, action, onConfirm, danger, showCancel: !/^(OK|Got it|Done)$/i.test(action) });
+}
+
+function ConfirmView({ title, message, action, onConfirm, danger, tint, cancel = 'Cancel', showCancel = true, close }: ConfirmOptions & { close: () => void }) {
   const [busy, setBusy] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const dismiss = (then?: () => void) => { if (leaving) return; setLeaving(true); window.setTimeout(() => { close(); then?.(); }, 180); };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) dismiss(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [busy, leaving]);
+  const confirm = async () => {
+    setBusy(true);
+    try { await onConfirm(); } finally { setBusy(false); dismiss(); }
+  };
   return (
-    <div class="alert-root" onClick={() => !busy && close()}>
-      <div class="alert" role="alertdialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()}>
-        <div class="alert__text"><b>{title}</b><span>{message}</span></div>
-        <div class="alert__buttons">
-          <button disabled={busy} onClick={close}>Cancel</button>
-          <button class={danger ? 'is-danger' : 'is-default'} disabled={busy} onClick={async () => { setBusy(true); try { await onConfirm(); } finally { close(); } }}>
-            {busy ? <span class="spinner" style={{ width: 16, height: 16, margin: 0, borderWidth: 2 }} /> : action}
+    <div class={`confirm-root ${leaving ? 'is-leaving' : ''}`} onClick={() => !busy && showCancel && dismiss()}>
+      <div class="confirm" role="alertdialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()}
+        style={tint ? { ['--confirm-tint' as any]: tint } : undefined}>
+        <div class="confirm__text"><b>{title}</b>{message && <span>{message}</span>}</div>
+        <div class="confirm__buttons">
+          <button class={`confirm__btn ${danger ? 'is-danger' : 'is-primary'}`} disabled={busy} onClick={confirm}>
+            {busy ? <span class="spinner" style={{ width: 18, height: 18, margin: 0, borderWidth: 2 }} /> : action}
           </button>
+          {showCancel && <button class="confirm__btn" disabled={busy} onClick={() => dismiss()}>{cancel}</button>}
         </div>
       </div>
     </div>
@@ -743,6 +764,7 @@ export function useCollapsingHeader({ distance = COLLAPSE.restTop - COLLAPSE.pin
         const { natural, pin } = geometry(tabs);
         const top = Math.max(natural - off, pin);
         vars['--tabs-dy'] = String(Math.round((top - pin) * 100) / 100);
+        vars['--tabs-ready'] = '1';
         if (insetTravel) approach = Math.min(Math.max(1 - (top - pin) / insetTravel, 0), 1);
       }
       vars['--collapse-approach'] = approach.toFixed(4);
@@ -768,11 +790,18 @@ export function useCollapsingHeader({ distance = COLLAPSE.restTop - COLLAPSE.pin
     el.addEventListener('scroll', onScroll, { passive: true });
     el.addEventListener('touchstart', down, { passive: true }); el.addEventListener('touchend', up); el.addEventListener('touchcancel', up);
     el.addEventListener('pointerdown', down); window.addEventListener('pointerup', up);
-    const ro = new ResizeObserver(paint); ro.observe(el);
+    // The tabs' natural place moves whenever anything above them changes height (a profile's data, photos, fonts, a
+    // list arriving) — not only on scroll. Every child of the scroll view is watched, and the set of children too,
+    // so the floating tabs never stay behind on top of the content.
+    const ro = new ResizeObserver(() => paint());
+    const watch = () => { ro.disconnect(); ro.observe(el); for (const child of Array.from(el.children)) ro.observe(child); };
+    watch();
+    const mo = new MutationObserver(watch); mo.observe(el, { childList: true });
+    document.fonts?.ready.then(() => paint()).catch(() => {});
     return () => {
       el.removeEventListener('scroll', onScroll); el.removeEventListener('touchstart', down); el.removeEventListener('touchend', up);
       el.removeEventListener('touchcancel', up); el.removeEventListener('pointerdown', down); window.removeEventListener('pointerup', up);
-      ro.disconnect(); window.clearTimeout(timer);
+      ro.disconnect(); mo.disconnect(); window.clearTimeout(timer);
     };
   }, [distance, insetTravel, snap, fade, Object.keys(headerSlots.value).length, ...deps]);
   // A tab change (KolabaTabScrollCoordinator.beginPaging): the header stays where it is; with the header collapsed the

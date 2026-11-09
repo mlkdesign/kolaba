@@ -859,8 +859,11 @@ const Row = ({ iconName, title, value, onClick, danger }: { iconName?: string; t
   </button>
 );
 
-const ToggleRow = ({ title, detail, on, onChange }: { title: string; detail?: string; on: boolean; onChange: (v: boolean) => void }) => (
-  <button class="srow" role="switch" aria-checked={on} onClick={() => onChange(!on)}>
+/** SettingsToggleRow: an optional 16 pt icon, the title (15) and its detail (12, 50 %), the iOS switch at the end;
+ *  50 pt, 10 pt above and below with a detail. */
+const ToggleRow = ({ title, detail, on, onChange, iconName, disabled }: { title: string; detail?: string; on: boolean; onChange: (v: boolean) => void; iconName?: string; disabled?: boolean }) => (
+  <button class={`srow ${detail ? 'has-detail' : ''}`} role="switch" aria-checked={on} disabled={disabled} onClick={() => onChange(!on)}>
+    {iconName && <img class="srow__icon-white" src={icon(iconName)} alt="" />}
     <span class="grow"><span style={{ display: 'block' }}>{title}</span>{detail && <span class="srow__detail">{detail}</span>}</span>
     <span class={`toggle ${on ? 'is-on' : ''}`} />
   </button>
@@ -906,9 +909,15 @@ export function SettingsScreen() {
     if (other) { setActiveProfile(other.id); return; }
     push('create-profile', { type: p.type === 'creator' ? 'business' : 'creator' });
   };
+  // The switch moves at once; the server decides — on an error it goes back to what the server has.
+  const [proShown, setProShown] = useState<boolean | null>(null);
+  const [proBusy, setProBusy] = useState(false);
   const togglePro = async (on: boolean) => {
-    try { await put('/v1/me/pro-test', { pro: on }); await reloadSession(); refresh(); showToast(on ? `${p.type}.pro on (testing)` : `${p.type}.pro off`, 'ok'); }
+    if (proBusy) return;
+    setProShown(on); setProBusy(true);
+    try { await put('/v1/me/pro-test', { pro: on }); await reloadSession(); refresh(); }
     catch (e) { showToast(errorText(e), 'error'); }
+    finally { setProShown(null); setProBusy(false); }
   };
   const title = { main: 'Settings', notifications: 'Notifications', privacy: 'Privacy & Safety', language: 'Language', about: 'About' }[page];
   const canTestPro = !!(user.value as any)?.canTestPro;
@@ -936,7 +945,7 @@ export function SettingsScreen() {
               </div>
               {canTestPro && (
                 <div class="sgroup">
-                  <ToggleRow title={`${p.type}.pro (Testing)`} detail="Test state for this account on the server. No purchase, no subscription." on={p.isPro} onChange={togglePro} />
+                  <ToggleRow iconName="IconCrownSimple" title={`${p.type}.pro (Testing)`} detail="Test state for this account on the server. No purchase, no subscription." on={proShown ?? !!activeProfile.value?.isPro} onChange={togglePro} />
                 </div>
               )}
               <div class="sgroup">

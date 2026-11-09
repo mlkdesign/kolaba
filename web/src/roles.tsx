@@ -3,7 +3,7 @@
 // in context (no jump to My Profile); the server still decides — a creator can never publish a job through the API.
 import type { ProfileType } from './api';
 import { profiles, push, setActiveProfile } from './state';
-import { alertDialog } from './ui';
+import { confirmDialog } from './ui';
 
 export type RoleOffer = 'createJob' | 'apply' | 'manageJob';
 
@@ -16,14 +16,19 @@ const copy: Record<RoleOffer, { target: ProfileType; title: string; message: str
     create: 'You need a Creator Profile to apply for this job. Create one — your business profile stays as it is.' },
 };
 
+/** The target account's accent: blue for a business, pink for a creator. */
+const tintOf = (t: ProfileType) => (t === 'business' ? 'var(--blue)' : 'var(--pink)');
+
 /** Asks, then switches (or creates the profile first) and runs `then` in the new role. */
 export function offerRoleSwitch(offer: RoleOffer, then?: () => void) {
   const c = copy[offer];
   const existing = profiles.value.find((p) => p.type === c.target);
   if (existing) {
-    alertDialog(c.title, c.message, 'Switch account', () => { setActiveProfile(existing.id, false); then?.(); }, false);
+    confirmDialog({ title: c.title, message: c.message, action: 'Switch account', tint: tintOf(c.target),
+      onConfirm: () => { setActiveProfile(existing.id, false); then?.(); } });
     return;
   }
   const label = c.target === 'business' ? 'Business' : 'Creator';
-  alertDialog(`Create a ${label} Profile?`, c.create, `Create ${label} Profile`, () => { push('create-profile', { type: c.target, then }); }, false);
+  confirmDialog({ title: `Create a ${label} Profile?`, message: c.create, action: `Create ${label} Profile`, tint: tintOf(c.target),
+    onConfirm: () => { push('create-profile', { type: c.target, then }); } });
 }
