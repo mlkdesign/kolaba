@@ -1060,7 +1060,7 @@ img.cicon { object-fit: cover; }
 /* Sign in with Google: the official GIS button (pill, dark), centred in a 50 pt slot like the other sign-in buttons */
 .google-wrap { position: relative; width: 100%; height: 50px; border-radius: 99px; overflow: hidden; }
 /* Google's button (40 pt tall) stretched over ours (50 pt) and all but invisible: it receives the tap */
-.google-btn { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; opacity: .011; transform: scaleY(1.3);
+.google-btn { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; opacity: .011; transform: translateX(10px) scaleY(1.3); /* GIS draws its iframe 10 px left of its box */
   color-scheme: light; z-index: 1; }
 .google-btn iframe { max-width: 100%; }
 .google-wrap:hover .social-btn, .google-wrap:focus-within .social-btn { background: rgba(255, 255, 255, .1); }
