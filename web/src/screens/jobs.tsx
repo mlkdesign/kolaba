@@ -5,7 +5,7 @@ import { Application, del, errorText, get, Job, Page, patch, post, put } from '.
 import { activeProfile, back, isBusiness, openSheet, push, refresh, refreshTick, showToast } from '../state';
 import {
   pickSheet, Avatar, BackButton, confirmSheet, Empty, Gallery, GlassButton, Header, HeaderTitle, Icon, icon, Logo, MediaTile, openViewer, PageTabs, postDate, price,
-  priceCaption, ProBadge, RatingInline, SheetFrame, Spinner, SwipePages, timeAgo, useDebounced, useLoad, usePullToRefresh,
+  priceCaption, ProBadge, RatingInline, SheetFrame, Spinner, SwipePages, timeAgo, useDebounced, useLoad, usePullToRefresh, useCollapsingHeader,
 } from '../ui';
 
 type JobsTab = 'all' | 'applied' | 'saved' | 'mine';
@@ -20,14 +20,15 @@ export function JobsScreen() {
   useEffect(() => { setIndex(0); }, [business]);
   const reloads = useRef<Record<string, () => Promise<unknown>>>({});
   const { scroller, Indicator } = usePullToRefresh(() => reloads.current[tabs[index][0]]?.());
+  const { root } = useCollapsingHeader({}, scroller);
   const create = () => {
     if (activeProfile.value?.entitlements.canCreateJobs) push('job-editor', {});
     else showToast('Jobs are published from a business profile — add one in Settings.');
   };
   return (
-    <>
+    <div class="collapsing" ref={root}>
       <div class="scroll" ref={scroller}>
-        <div class="tabs-pin"><PageTabs tabs={tabs.map(([, l]) => l)} index={index} onChange={setIndex} /></div>
+        <div class="tabs-pin" data-collapse-tabs><PageTabs tabs={tabs.map(([, l]) => l)} index={index} onChange={setIndex} /></div>
         <SwipePages index={index} onChange={setIndex}>
           {tabs.map(([t]) => <JobList key={t} tab={t} q={q} register={(fn) => { reloads.current[t] = fn; }} />)}
         </SwipePages>
@@ -36,7 +37,7 @@ export function JobsScreen() {
       <Indicator />
       <Header
         left={searching ? null : <GlassButton name="IconPlus" label="Create job" onClick={create} />}
-        center={searching ? null : <Logo word="job" />}
+        collapsingTitle center={searching ? null : <Logo word="job" />}
         right={searching ? (
           <div class="row" style={{ width: 370, gap: 8 }}>
             <label class="glass search"><img src={icon('IconMagnifyingGlass')} alt="" />
@@ -45,7 +46,7 @@ export function JobsScreen() {
           </div>
         ) : <GlassButton name="IconMagnifyingGlass" label="Search" onClick={() => setSearching(true)} />}
       />
-    </>
+    </div>
   );
 }
 

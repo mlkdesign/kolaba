@@ -5,7 +5,7 @@ import { Card, del, errorText, get, Media, Page, post } from '../api';
 import { activeProfile, badges, openSheet, push, refresh, refreshTick, showToast } from '../state';
 import {
   pickSheet, openContextMenu, useLongPress, Avatar, Empty, fmtDuration, GlassButton, Header, Icon, icon, Logo, openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, SwipePages,
-  useDebounced, useLoad, usePullToRefresh,
+  useDebounced, useLoad, usePullToRefresh, useCollapsingHeader,
 } from '../ui';
 
 type Kind = 'creator' | 'business';
@@ -19,6 +19,7 @@ export function CreatorsScreen() {
   const q = useDebounced(query.trim(), 350);
   const reloadRef = useRef<() => Promise<unknown>>();
   const { scroller, Indicator } = usePullToRefresh(() => reloadRef.current?.());
+  const { root } = useCollapsingHeader({}, scroller);
   const filter = () => openSheet((close) => (
     <SheetFrame title="Show" close={close}>
       {(['creator', 'business'] as Kind[]).map((k) => (
@@ -30,9 +31,9 @@ export function CreatorsScreen() {
     </SheetFrame>
   ));
   return (
-    <>
+    <div class="collapsing" ref={root}>
       <div class="scroll" ref={scroller}>
-        <div class="tabs-pin"><PageTabs tabs={[kind === 'creator' ? 'Creators' : 'Businesses', `My Contacts${badges.value.contactRequests ? ` · ${badges.value.contactRequests}` : ''}`]} index={index} onChange={setIndex} /></div>
+        <div class="tabs-pin" data-collapse-tabs><PageTabs tabs={[kind === 'creator' ? 'Creators' : 'Businesses', `My Contacts${badges.value.contactRequests ? ` · ${badges.value.contactRequests}` : ''}`]} index={index} onChange={setIndex} /></div>
         <SwipePages index={index} onChange={setIndex}>
           <Catalog kind={kind} q={q} register={(fn) => { if (index === 0) reloadRef.current = fn; }} />
           <ContactsList query={q} register={(fn) => { if (index === 1) reloadRef.current = fn; }} />
@@ -42,7 +43,7 @@ export function CreatorsScreen() {
       <Indicator />
       <Header
         left={searching ? null : <GlassButton name="IconCreatorsFilter" label="Filter" onClick={filter} />}
-        center={searching ? null : <Logo word="creators" />}
+        collapsingTitle center={searching ? null : <Logo word="creators" />}
         right={searching ? (
           <div class="row" style={{ width: 370, gap: 8 }}>
             <label class="glass search"><img src={icon('IconMagnifyingGlass')} alt="" />
@@ -51,7 +52,7 @@ export function CreatorsScreen() {
           </div>
         ) : <GlassButton name="IconMagnifyingGlass" label="Search" onClick={() => setSearching(true)} />}
       />
-    </>
+    </div>
   );
 }
 

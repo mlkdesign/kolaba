@@ -5,7 +5,7 @@ import { Card, Conversation, errorText, get, Message, post, uploadFile } from '.
 import { activeProfile, back, badges, chatOpen, openSheet, push, refresh, refreshTick, showToast } from '../state';
 import {
   Icon, Avatar, BackButton, chatTime, clock, daySeparator, Empty, GlassButton, Header, HeaderTitle, icon, Logo, openViewer, ProBadge, SheetFrame, Spinner,
-  useDebounced, useLoad, usePullToRefresh,
+  useDebounced, useLoad, usePullToRefresh, useCollapsingHeader,
 } from '../ui';
 
 export function ChatListScreen() {
@@ -15,6 +15,7 @@ export function ChatListScreen() {
   const { data, error, loading, reload, setData } = useLoad<{ items: Conversation[] }>((s) => get('/v1/conversations?limit=50', s), [refreshTick.value, activeProfile.value?.id]);
   const search = useLoad<any>((s) => (q.length >= 2 ? get(`/v1/search?q=${encodeURIComponent(q)}&scope=all`, s) : Promise.resolve(null)), [q]);
   const { scroller, Indicator } = usePullToRefresh(() => reload());
+  const { root } = useCollapsingHeader({}, scroller);
   const openWith = async (card: Card) => {
     try { const { id } = await post('/v1/conversations', { profileId: card.id }); push('conversation', { id }); }
     catch (e) { showToast(errorText(e), 'error'); }
@@ -35,7 +36,7 @@ export function ChatListScreen() {
   ));
   const local = (data?.items ?? []).filter((c) => !q || `${c.partner?.displayName} ${c.partner?.username} ${c.relatedJobTitle ?? ''}`.toLowerCase().includes(q.toLowerCase()));
   return (
-    <>
+    <div class="collapsing" ref={root}>
       <div class="scroll" ref={scroller}>
         <div class="section-top" />
         {q.length >= 2 && search.data && (
@@ -69,7 +70,7 @@ export function ChatListScreen() {
       <Indicator />
       <Header
         left={searching ? null : <GlassButton name="IconDotsThree" label="Chats menu" onClick={menu} />}
-        center={searching ? null : <Logo word="chat" />}
+        collapsingTitle center={searching ? null : <Logo word="chat" />}
         right={searching ? (
           <div class="row" style={{ width: 370, gap: 8 }}>
             <label class="glass search"><img src={icon('IconMagnifyingGlass')} alt="" />
@@ -78,7 +79,7 @@ export function ChatListScreen() {
           </div>
         ) : <GlassButton name="IconMagnifyingGlass" label="Search" onClick={() => setSearching(true)} />}
       />
-    </>
+    </div>
   );
 }
 

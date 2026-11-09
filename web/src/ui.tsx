@@ -34,15 +34,15 @@ export const BackButton = ({ onClick }: { onClick?: () => void }) => (
 export const Logo = ({ word }: { word: string }) => <div class="logo" role="heading" aria-level={1}>{word}<i>.</i></div>;
 
 /** KolabaHeader: 44 pt controls at the safe area's top − 2, the centre piece between them, the top blur under it. */
-export function Header({ left, center, right, blur = true, blurOpacity = 1 }: {
-  left?: ComponentChildren; center?: ComponentChildren; right?: ComponentChildren; blur?: boolean; blurOpacity?: number;
+export function Header({ left, center, right, blur = true, blurOpacity = 1, collapsingTitle }: {
+  left?: ComponentChildren; center?: ComponentChildren; right?: ComponentChildren; blur?: boolean; blurOpacity?: number; collapsingTitle?: boolean;
 }) {
   return (
     <>
       {blur && <div class="top-blur" style={{ opacity: blurOpacity }} />}
       <header class="header">
         <div class="header__side">{left}</div>
-        {center && <div class="header__center">{center}</div>}
+        {center && <div class={`header__center ${collapsingTitle ? 'is-title' : ''}`}>{center}</div>}
         <div class="header__side is-end">{right}</div>
       </header>
     </>
@@ -362,7 +362,7 @@ export function MediaTile({ media, onOpen, picked, menu, removing }: { media: Me
 
 // ─── pull to refresh: the arrows follow the pull; past 112 pt it refreshes ───
 
-export function usePullToRefresh(onRefresh: () => Promise<unknown> | void) {
+export function usePullToRefresh(onRefresh: () => Promise<unknown> | void, deps: unknown[] = []) {
   const scroller = useRef<HTMLDivElement>(null);
   const indicator = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -402,7 +402,7 @@ export function usePullToRefresh(onRefresh: () => Promise<unknown> | void) {
       el.removeEventListener('touchstart', start); el.removeEventListener('touchmove', move); el.removeEventListener('touchend', end);
       el.removeEventListener('pointerdown', start); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end);
     };
-  }, []);
+  }, deps);
   const Indicator = () => <div class="ptr glass" ref={indicator} aria-hidden="true"><Icon name="IconArrowsClockwise" size={18} /></div>;
   return { scroller, Indicator };
 }
@@ -573,4 +573,74 @@ function AlertView({ title, message, action, danger, close, onConfirm }: { title
       </div>
     </div>
   );
+}
+
+// ─── CollapsingHeader (KolabaTabbedScroll): one scroll offset drives the title, the tabs and their inset ───
+
+/** The header's travel, from KolabaTabbedScroll / StickyTabs: the tabs rest at safe-top + 62 (124 pt) and pin at
+ *  `pinTop` = safe-top − 2 + (44 − 40) / 2 = 62 pt, between the 44 pt controls — inset 16 → 16 + 44 + 8 = 68 pt.
+ *  A section's title moves up with the content and fades over its first 48 pt (`startOfTravel(titleFade)`); a
+ *  released scroll inside the travel ends collapsed or expanded (KolabaHeaderSnapBehavior, fling 150 pt/s). */
+export const COLLAPSE = { restTop: 124, pinTop: 62, restInset: 16, pinnedInset: 68, titleFade: 48, flingSpeed: 150 };
+
+export interface CollapseOptions { distance?: number; insetTravel?: number; snap?: boolean; fade?: number }
+
+/** Writes --collapse-shift, --collapse-title (opacity) and --collapse-approach (0 … 1, the tabs' inset) on `root`
+ *  from `scroller`'s offset — no re-render per frame; returns the refs to attach. */
+export function useCollapsingHeader({ distance = COLLAPSE.restTop - COLLAPSE.pinTop, insetTravel, snap = true, fade = COLLAPSE.titleFade }: CollapseOptions = {},
+  external?: { current: HTMLDivElement | null }, deps: unknown[] = []) {
+  const root = useRef<HTMLDivElement>(null);
+  const own = useRef<HTMLDivElement>(null);
+  const scroller = external ?? own;
+  useLayoutEffect(() => {
+    const el = scroller.current; const host = root.current;
+    if (!el || !host) return;
+    let last = el.scrollTop; let lastT = performance.now(); let v = 0; let timer = 0; let touching = false;
+    const tabsEl = () => host.querySelector<HTMLElement>('[data-collapse-tabs]');
+    void uiScale;
+    const paint = () => {
+      const off = el.scrollTop;
+      const shift = Math.min(off, distance);
+      host.style.setProperty('--collapse-shift', `${Math.max(shift, -200)}px`);
+      host.style.setProperty('--collapse-title', String(1 - Math.min(Math.max(Math.max(shift, 0) / Math.max(fade, 1), 0), 1)));
+      // The tabs' own top on the screen (they may sit lower than the section's rest, e.g. a profile's).
+      const tabs = tabsEl();
+      let approach = Math.min(Math.max(shift / Math.max(distance, 1), 0), 1);
+      if (tabs && insetTravel) {
+        // Arithmetic, not the sticky element's live rect: its natural top (the zero-height anchor before it, plus
+        // its margin) minus the offset, pinned at pinTop.
+        const anchor = tabs.previousElementSibling as HTMLElement | null;
+        const natural = anchor ? anchor.offsetTop + anchor.offsetHeight + parseFloat(getComputedStyle(tabs).marginTop || '0') : tabs.offsetTop;
+        const top = Math.max(natural - off, COLLAPSE.pinTop);
+        approach = Math.min(Math.max(1 - (top - COLLAPSE.pinTop) / insetTravel, 0), 1);
+      }
+      host.style.setProperty('--collapse-approach', approach.toFixed(4));
+    };
+    const settle = () => {
+      if (!snap || touching) return;
+      const off = el.scrollTop;
+      if (off <= 0.5 || off >= distance - 0.5) return;
+      const target = v > COLLAPSE.flingSpeed ? distance : v < -COLLAPSE.flingSpeed ? 0 : off >= distance / 2 ? distance : 0;
+      el.scrollTo({ top: target, behavior: 'smooth' });
+    };
+    const onScroll = () => {
+      const now = performance.now(); const off = el.scrollTop;
+      const dt = Math.max(now - lastT, 1); v = ((off - last) / dt) * 1000 * 0.6 + v * 0.4; last = off; lastT = now;
+      paint();
+      window.clearTimeout(timer); timer = window.setTimeout(settle, 140);
+    };
+    const down = () => { touching = true; };
+    const up = () => { touching = false; window.clearTimeout(timer); timer = window.setTimeout(settle, 140); };
+    paint();
+    el.addEventListener('scroll', onScroll, { passive: true });
+    el.addEventListener('touchstart', down, { passive: true }); el.addEventListener('touchend', up); el.addEventListener('touchcancel', up);
+    el.addEventListener('pointerdown', down); window.addEventListener('pointerup', up);
+    const ro = new ResizeObserver(paint); ro.observe(el);
+    return () => {
+      el.removeEventListener('scroll', onScroll); el.removeEventListener('touchstart', down); el.removeEventListener('touchend', up);
+      el.removeEventListener('touchcancel', up); el.removeEventListener('pointerdown', down); window.removeEventListener('pointerup', up);
+      ro.disconnect(); window.clearTimeout(timer);
+    };
+  }, [distance, insetTravel, snap, fade, ...deps]);
+  return { root, scroller };
 }

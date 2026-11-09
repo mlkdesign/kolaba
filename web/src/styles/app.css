@@ -181,8 +181,12 @@ a { color: inherit; }
   transition: opacity .25s; white-space: nowrap; }
 .ptabs__tab.is-active { opacity: 1; }
 .ptabs__line { position: absolute; left: 0; bottom: 0; height: 2px; border-radius: 1px; background: var(--tint); transition: transform .35s var(--spring); }
-/* pinned under the header (ProjectsView, CreatorsView: "the area under the pinned tabs") */
-.tabs-pin { position: sticky; top: 0; z-index: 15; padding-top: var(--content-top); background: var(--bg); }
+/* CollapsingHeader: the one row of tabs scrolls with the content and pins at 62 pt (z above the top blur, which
+   blurs what passes under it), its sides moving in from 16 to 68 pt with --collapse-approach (0 … 1) */
+.collapsing { position: absolute; inset: 0; }
+.tabs-pin { position: sticky; top: 62px; z-index: 22; margin-top: var(--content-top); }
+.tabs-pin .ptabs { margin: 0 calc(16px + 52px * var(--collapse-approach, 0)); }
+.collapsing .header__center.is-title { pointer-events: none; transform: translate(-50%, calc(-50% - var(--collapse-shift, 0px))); opacity: var(--collapse-title, 1); }
 .ptabs.is-profile .ptabs__tab { font-size: 14px; }
 /* swipeable inner pages */
 .swipe { position: relative; overflow: hidden; touch-action: pan-y; }
@@ -360,7 +364,8 @@ a { color: inherit; }
 .social__circle img { width: 34px; height: 34px; }
 .social__circle.is-filled { background: var(--card); border: 0; }
 .social__circle.is-filled img { width: 24px; height: 24px; }
-.ptab-bar { position: sticky; top: var(--header-h); z-index: 15; background: var(--bg); }
+.ptab-bar { position: sticky; top: 62px; z-index: 22; }
+.ptab-bar .ptabs { margin: 0 calc(16px + 52px * var(--collapse-approach, 0)); }
 .mfilter { display: flex; align-items: center; gap: 8px; padding: 16px var(--side) 16px; }
 .mchip { height: 40px; padding: 0 16px; border-radius: 20px; font-size: 14px; font-weight: 500; color: rgba(255, 255, 255, .5); display: inline-flex; align-items: center; gap: 6px; }
 .mchip.is-on { background: #fff; color: #000; }
@@ -804,3 +809,38 @@ a { color: inherit; }
 .cbtn:disabled { opacity: .6; }
 .ccard__actions > * { flex: 1 1 0; width: auto; min-width: 0; }
 .ccard__actions .btn { height: 40px; border-radius: 16px; padding: 0 12px; font-size: 12px; }
+/* Where the tabs pin (job., creators., profiles) the blur reaches under them: full strength to the tabs' bottom
+   (102 pt), then fading out over 22 pt — two layers so the edge never shows as a line. The band never takes taps. */
+.collapsing .top-blur { height: 128px; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  mask-image: linear-gradient(#000 78%, rgba(0, 0, 0, .5) 90%, transparent); -webkit-mask-image: linear-gradient(#000 78%, rgba(0, 0, 0, .5) 90%, transparent);
+  background: linear-gradient(rgba(11, 11, 11, .7), rgba(11, 11, 11, .55) 50%, rgba(11, 11, 11, .25) 82%, rgba(11, 11, 11, 0)); }
+.collapsing .top-blur::after { content: ""; position: absolute; inset: 0; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  mask-image: linear-gradient(transparent 76%, #000 88%, transparent); -webkit-mask-image: linear-gradient(transparent 76%, #000 88%, transparent); }
+/* pageMinHeight: a page is at least the area under the pinned tabs (874 − 62 − 40), so every page can collapse its
+   header — never more */
+.tabs-pin + .swipe, .ptab-bar + .swipe { min-height: calc(874px - 102px); }
+
+/* ─── business profile (BusinessProfileHeader): centred, 22 pt between blocks, the 120 pt round logo ─── */
+.is-business-profile { --tint: var(--blue); }
+.is-business-profile .show-more { color: var(--blue); }
+.bheader { position: relative; z-index: 3; padding: calc(var(--safe-top) + 25px) var(--side) 0; display: flex; flex-direction: column; align-items: center; gap: 22px; text-align: center; }
+.blogo { width: 120px; height: 120px; border-radius: 50%; overflow: hidden; display: grid; place-items: center; font-size: 44px; font-weight: 800; color: #fff; flex: none; }
+.blogo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.bheader__info { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.bheader__name { display: flex; align-items: center; justify-content: center; gap: 4px; flex-wrap: wrap; font-weight: 700; font-size: 24px; line-height: 30px; color: var(--light); }
+.bheader__place { font-family: "Montserrat"; font-size: 12px; color: #fff; }
+.bheader__add { font-family: "Montserrat"; font-size: 12px; color: var(--blue); text-decoration: underline; min-height: 24px; }
+.bheader__bio { font-size: 14px; line-height: 18px; color: var(--light); white-space: pre-line; }
+.bheader__bio .show-more { margin-top: 2px; }
+.bheader__hint { font-size: 14px; line-height: 18px; color: rgba(236, 237, 239, .5); }
+.bheader__hint u { color: var(--blue); }
+.bchip { height: 40px; padding: 0 12px 0 16px; border-radius: 20px; display: inline-flex; align-items: center; gap: 10px; font-size: 14px;
+  background: rgba(255, 255, 255, .05); color: rgba(255, 255, 255, .5); }
+.bchip.is-on { background: var(--blue-tab); color: #fff; }
+.bchip__count { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; display: grid; place-items: center; font-size: 11px; font-weight: 600;
+  background: rgba(255, 255, 255, .15); color: #fff; }
+.bchip.is-on .bchip__count { background: #fff; color: var(--blue-tab); }
+.babout { padding: 16px var(--side) 0; display: flex; flex-direction: column; gap: 22px; }
+.babout h3 { margin: 0 8px 8px; font-weight: 400; font-size: 14px; color: #fff; }
+.babout p { margin: 0 8px; font-size: 14px; line-height: 18px; color: var(--light); white-space: pre-line; }
+.babout p.is-empty { color: rgba(236, 237, 239, .5); }

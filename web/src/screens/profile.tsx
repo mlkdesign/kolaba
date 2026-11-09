@@ -7,7 +7,7 @@ import { activeProfile, back, isBusiness, openSheet, profiles, push, refresh, re
 import { ProfileGlow } from '../fx';
 import {
   Avatar, BackButton, confirmSheet, Empty, fmtCount, GlassButton, gradientFor, Header, HeaderTitle, Icon, icon, initials, MediaTile,
-  openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, Stars, SwipePages, timeAgo, useLoad, usePullToRefresh, alertDialog, pickSheet,
+  openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, Stars, SwipePages, timeAgo, useLoad, usePullToRefresh, alertDialog, pickSheet, useCollapsingHeader,
 } from '../ui';
 import { JobCard } from './jobs';
 import { CreateProfile, Legal } from './auth';
@@ -23,7 +23,9 @@ export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'rev
   const [tabIndex, setTabIndex] = useState(initialTab === 'reviews' ? 1 : 0);
   const [scrolled, setScrolled] = useState(0);
   const viewed = useRef(false);
-  const { scroller, Indicator } = usePullToRefresh(() => reload());
+  const { scroller, Indicator } = usePullToRefresh(() => reload(), [!!p]);
+  // FIX 109: the profile's tabs follow the scroll freely (no snapping) and pin at 62 pt, moving in over 60 pt.
+  const { root } = useCollapsingHeader({ distance: 100000, insetTravel: 60, snap: false }, scroller, [!!p]);
   useEffect(() => {
     if (p && !own && !viewed.current) { viewed.current = true; post(`/v1/profiles/${p.id}/view`).catch(() => {}); }
   }, [p?.id]);
@@ -36,38 +38,129 @@ export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'rev
   const right = own
     ? <GlassButton name="IconGear" label="Settings" onClick={() => push('settings', {}, 'profile')} />
     : <GlassButton name="IconDotsThree" label="More" onClick={() => profileMenu(p, reload)} />;
-  const tabs = business ? ['Job posts', 'Reviews'] : ['Portfolio', 'Reviews'];
+  const tabs = business ? ['Job posts', 'Reviews', 'About'] : ['Portfolio', 'Reviews'];
   return (
-    <>
+    <div class={`collapsing ${business ? 'is-business-profile' : ''}`} ref={root}>
       <div class="scroll" ref={scroller} onScroll={(e) => setScrolled(e.currentTarget.scrollTop)}>
-        <Hero p={p} own={own} />
-        <div class="pinfo">
-          <div class="pinfo__block">
-            <div class="pname"><span>{p.displayName}</span><ProBadge card={p} /></div>
-            <div class="pmeta">
-              {p.location && <span>{p.flag} {p.location}</span>}
-              {p.category && <span>{p.category}</span>}
-              {!p.location && !p.category && <span>@{p.username}</span>}
+        {business ? <BusinessHeader p={p} own={own} /> : (
+          <>
+            <Hero p={p} own={own} />
+            <div class="pinfo">
+              <div class="pinfo__block">
+                <div class="pname"><span>{p.displayName}</span><ProBadge card={p} /></div>
+                <div class="pmeta">
+                  {p.location && <span>{p.flag} {p.location}</span>}
+                  {p.category && <span>{p.category}</span>}
+                  {!p.location && !p.category && <span>@{p.username}</span>}
+                </div>
+                {p.bio && <Bio text={p.bio} />}
+              </div>
+              <Figures p={p} />
+              {own ? <OwnerActions p={p} /> : <VisitorActions profile={p} />}
+              <Socials p={p} />
             </div>
-            {p.bio && <Bio text={p.bio} />}
-          </div>
-          <Figures p={p} />
-          {own ? <OwnerActions p={p} /> : <VisitorActions profile={p} />}
-          <Socials p={p} />
-        </div>
-        <div class="ptab-bar" style={{ marginTop: 22 }}>
+          </>
+        )}
+        <div class="ptab-bar" data-collapse-tabs style={{ marginTop: 22 }}>
           <PageTabs tabs={tabs} index={tabIndex} onChange={setTabIndex} profile counts={[undefined, p.ratings?.count || undefined]} />
         </div>
         <SwipePages index={tabIndex} onChange={setTabIndex}>
-          {business ? <ProfileJobs profile={p} own={own} /> : <Portfolio profile={p} own={own} onChange={reload} />}
+          {business ? <BusinessJobs profile={p} own={own} /> : <Portfolio profile={p} own={own} onChange={reload} />}
           <Reviews profile={p} own={own} />
+          {business ? <BusinessAbout p={p} own={own} /> : null}
         </SwipePages>
         <div style={{ height: own ? 'var(--tabbar-clear)' : 40 }} />
       </div>
-      <ProfileGlow business={business} />
+      {p.isPro && <ProfileGlow business={business} />}
       <Indicator />
       <Header left={left} right={right} blurOpacity={Math.min(Math.max((scrolled - 200) / 120, 0), 1)} />
+    </div>
+  );
+}
+
+// ─── Business profile (BusinessProfileHeader, Figma 770:5495 / 770:6286): its own top — no 400 pt photo, no intro
+// video, no networks row (FIX 94: a business's links are in About) ───
+
+function BusinessHeader({ p, own }: { p: ProfilePage; own: boolean }) {
+  const [broken, setBroken] = useState(false);
+  return (
+    <div class="bheader">
+      <div class="blogo" style={{ background: p.avatarUrl && !broken ? '#1a1a1a' : gradientFor(p.displayName) }}>
+        {p.avatarUrl && !broken ? <img src={p.avatarUrl} alt="Logo" onError={() => setBroken(true)} /> : <span>{initials(p.displayName)}</span>}
+      </div>
+      <div class="bheader__info">
+        <div class="bheader__name"><span>{p.displayName}</span><ProBadge card={p} /></div>
+        {p.location ? <div class="bheader__place">{p.flag} {p.location}</div>
+          : own ? <button class="bheader__add" onClick={() => push('profile-edit', {}, 'profile')}>Add location</button>
+          : <div class="bheader__place" style={{ opacity: .5 }}>Location not specified</div>}
+      </div>
+      {p.bio ? <BusinessBio text={p.bio} /> : own ? (
+        <button class="bheader__hint" onClick={() => push('profile-edit', {}, 'profile')}>
+          Tell creators about your business and what you're looking for.  <u>Add description</u></button>
+      ) : null}
+      <div style={{ alignSelf: 'stretch' }}><Figures p={p} /></div>
+      <div style={{ alignSelf: 'stretch' }}>{own ? <OwnerActions p={p} /> : <VisitorActions profile={p} />}</div>
+    </div>
+  );
+}
+
+function BusinessBio({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > 140;
+  return (
+    <div class="bheader__bio selectable">
+      <span class={!open && long ? 'lines-3' : ''} style={{ display: !open && long ? '-webkit-box' : 'block' }}>{text}</span>
+      {long && !open && <button class="show-more" onClick={() => setOpen(true)}>Show more</button>}
+    </div>
+  );
+}
+
+/** A business's Job Posts (Figma 770:5638): Active · Archive (the chosen one blue with its count) and Sort, then the
+ *  jobs as the feed shows them. Active: published and open (and the owner's drafts); Archive: closed or past deadline. */
+function BusinessJobs({ profile, own }: { profile: ProfilePage; own: boolean }) {
+  const { data } = useLoad<{ items: Job[] }>((s) => get(`/v1/profiles/${profile.id}/jobs`, s), [profile.id, refreshTick.value]);
+  const [filter, setFilter] = useState<'active' | 'past'>('active');
+  const [newest, setNewest] = useState(true);
+  if (!data) return <Spinner />;
+  if (profile.hideJobPosts && !own) return <Empty title="Job posts are hidden" />;
+  const isPast = (j: Job) => j.status === 'closed' || (j.deadline != null && j.deadline < Date.now());
+  const active = data.items.filter((j) => !isPast(j) && (j.status === 'published' || own));
+  const past = data.items.filter(isPast);
+  const list = (filter === 'active' ? active : past).sort((a, b) => (newest ? 1 : -1) * ((b.publishedAt ?? b.createdAt) - (a.publishedAt ?? a.createdAt)));
+  return (
+    <>
+      <div class="mfilter">
+        <button class={`bchip ${filter === 'active' ? 'is-on' : ''}`} onClick={() => setFilter('active')}>Active<span class="bchip__count">{active.length}</span></button>
+        <button class={`bchip ${filter === 'past' ? 'is-on' : ''}`} onClick={() => setFilter('past')}>Archive<span class="bchip__count">{past.length}</span></button>
+        <span class="grow" />
+        <button class="mchip is-plain" onClick={() => setNewest(!newest)}><img src={icon('IconSortAscending')} alt="" style={{ transform: newest ? undefined : 'scaleY(-1)' }} />Sort</button>
+      </div>
+      {!list.length ? (
+        filter === 'active'
+          ? <Empty title="No active jobs right now.">{own && <button class="btn is-small" onClick={() => push('job-editor', {}, 'jobs')}><img class="btn__icon" src={icon('IconPlus')} alt="" />Add job</button>}</Empty>
+          : <Empty title="No closed jobs yet." />
+      ) : <div class="feed" style={{ paddingTop: 0 }}>{list.map((j, i) => <div key={j.id}>{i > 0 && <div style={{ height: 1, background: 'var(--separator)', margin: '20px 0' }} />}<JobCard job={j} /></div>)}</div>}
     </>
+  );
+}
+
+/** A business's About (FEATURE 19 / FIX 106): Description, Location, then its links. */
+function BusinessAbout({ p, own }: { p: ProfilePage; own: boolean }) {
+  const items = [...p.links, ...(p.website && !p.links.some((l) => l.kind === 'website') ? [{ kind: 'website', url: p.website }] : [])];
+  return (
+    <div class="babout">
+      <section><h3>Description</h3>{p.bio ? <p class="selectable">{p.bio}</p> : <p class="is-empty">{own ? 'Add a description of your business in Edit profile.' : 'No description yet.'}</p>}</section>
+      <section><h3>Location</h3>{p.location ? <p>{p.flag} {p.location}</p> : <p class="is-empty">Location not specified</p>}</section>
+      {items.length > 0 ? (
+        <section><h3>Links</h3><div class="sgroup">{items.map((l) => (
+          <a class="srow" href={l.url} target="_blank" rel="noopener noreferrer nofollow" style={{ textDecoration: 'none' }}>
+            <img class="srow__icon" src={icon(LINK_ICON[l.kind] ?? 'ContactLink')} alt="" style={{ width: 20, height: 20 }} />
+            <span class="grow ellipsis">{l.kind === 'website' || l.kind === 'email' ? l.url.replace(/^(https?:\/\/|mailto:)/, '') : l.kind[0].toUpperCase() + l.kind.slice(1)}</span>
+            <img class="srow__caret" src={icon('IconCaretRight')} alt="" />
+          </a>
+        ))}</div></section>
+      ) : own ? <button class="pbtn" style={{ flex: 'none' }} onClick={() => push('profile-edit', {}, 'profile')}><img src={icon('IconLink')} alt="" />Add links</button> : null}
+    </div>
   );
 }
 
