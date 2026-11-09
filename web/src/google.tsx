@@ -89,7 +89,7 @@ export function GoogleButton({ intent }: { intent: 'Sign Up' | 'Log in' }) {
       });
       box.current.innerHTML = '';
       g.renderButton(box.current, {
-        type: 'standard', theme: 'filled_black', size: 'large', shape: 'pill', logo_alignment: 'left',
+        type: 'standard', theme: 'filled_black', size: 'large', shape: 'pill', logo_alignment: 'left', locale: 'en',
         text: intent === 'Sign Up' ? 'signup_with' : 'signin_with', width: Math.min(400, Math.max(200, box.current.clientWidth)),
       });
     }).catch(() => live && setFailed(true));
