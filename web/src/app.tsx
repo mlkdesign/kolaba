@@ -13,10 +13,20 @@ import {
   activeProfile, applySession, back, badges, booted, isBusiness, leaving, profiles, push, Route, selectTab, setActiveProfile, signOutLocally,
   stacks, startPolling, switcherOpen, Tab, tab, TAB_ORDER, toast, user,
 } from './state';
-import { Avatar, Icon, ProBadge, Sheets, Spinner } from './ui';
+import { Avatar, headerSlots, Icon, ProBadge, SectionSlot, Sheets, Spinner, TopBlur } from './ui';
 import { uiScale } from './scale';
+import { trackScreen } from './analytics';
+
+/** Screens whose text is private (messages, notifications, account forms, reviews being written): masked in Clarity
+ *  recordings. A display: contents wrapper — no box of its own, layout unchanged. */
+const MASKED = new Set(['chat', 'conversation', 'notifications', 'profile-edit', 'settings', 'review-form', 'invite', 'create-profile', 'job-editor', 'applicants']);
 
 function renderRoute(route: Route) {
+  const view = routeView(route);
+  return MASKED.has(route.screen) ? <div data-clarity-mask="True" style={{ display: 'contents' }}>{view}</div> : view;
+}
+
+function routeView(route: Route) {
   const p = route.params ?? {};
   switch (route.screen) {
     case 'jobs': return <JobsScreen />;
@@ -191,13 +201,28 @@ function MainApp() {
   }, []);
   const all = stacks.value;
   const index = TAB_ORDER.indexOf(tab.value);
+  // Clarity: the SPA's screens by name (the section, or the screen pushed on top of it) — never ids or content.
+  const topScreen = all[tab.value][all[tab.value].length - 1]?.screen ?? tab.value;
+  useEffect(() => { trackScreen(topScreen === tab.value ? tab.value : `${tab.value}/${topScreen}`); }, [tab.value, topScreen]);
   const pushed = all[tab.value].slice(1);
   // Instant jump when a section is chosen with screens open elsewhere is not needed: sections slide like iOS.
   return (
     <div class={`app ${isBusiness.value ? 'is-business' : ''}`}>
+      {/* 1 — the sections' scrolling content */}
       <div class="pager" style={{ transform: `translateX(${-index * 100}%)` }}>
         {TAB_ORDER.map((t) => (
-          <section class="pager__page" data-tab={t} aria-hidden={t !== tab.value} key={t}>{renderRoute(all[t][0])}</section>
+          <section class="pager__page" data-tab={t} aria-hidden={t !== tab.value} key={t}>
+            <SectionSlot.Provider value={t}>{renderRoute(all[t][0])}</SectionSlot.Provider>
+          </section>
+        ))}
+      </div>
+      {/* 2 — the one top blur: fixed, from the first frame, never re-created by a slide */}
+      <div class="app-blur"><TopBlur /></div>
+      {/* 3 — every section's header, pinned tabs and photo dots, sliding with the pager over the blur */}
+      <div class="header-layer" style={{ transform: `translateX(${-index * 100}%)` }}>
+        {TAB_ORDER.map((t) => (
+          <div class="header-slot" data-tab={t} aria-hidden={t !== tab.value} key={t}
+            ref={(el) => { if (el && headerSlots.value[t] !== el) headerSlots.value = { ...headerSlots.value, [t]: el }; }} />
         ))}
       </div>
       <div class={`bottom-gradient ${tab.value === 'chat' ? 'is-low' : ''} ${tab.value === 'kolaba' ? 'is-off' : ''}`} />

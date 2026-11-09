@@ -6,6 +6,7 @@ import { Card, del, errorText, get, Media, Notification, post, put } from '../ap
 import { activeProfile, badges, openSheet, push, refresh, refreshTick, showToast, tab } from '../state';
 import { uiScale } from '../scale';
 import { gradientFor, openContextMenu, openViewer, useLongPress, Avatar, BackButton, Dots, Empty, fmtCount, GlassButton, Header, HeaderTitle, Icon, icon, Logo, ProBadge, SheetFrame, Spinner, timeAgo, useLoad } from '../ui';
+import { InHeader } from '../ui';
 
 interface CreatorReels { author: Card; bio: string; isFollowing: boolean; videos: Media[] }
 
@@ -81,7 +82,7 @@ export function ReelsScreen() {
         ))}
       </div>
       <div class="reel__top" />
-      {current && <div class="reel__dots"><Dots count={current.videos.length} index={videoIndex[current.author.id] ?? 0} /></div>}
+      {current && <InHeader><div class="reel__dots"><Dots count={current.videos.length} index={videoIndex[current.author.id] ?? 0} /></div></InHeader>}
       <Header blur={false}
         left={<GlassButton name="IconSlidersHorizontal" label="Feed filter" onClick={filter} />}
         center={<Logo word="kolaba" />}

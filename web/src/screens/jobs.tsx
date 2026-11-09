@@ -6,7 +6,7 @@ import { activeProfile, back, isBusiness, openSheet, profiles, push, refresh, re
 import { offerRoleSwitch } from '../roles';
 import {
   SortButton, pickSheet, Avatar, BackButton, confirmSheet, Empty, Gallery, GlassButton, Header, HeaderTitle, Icon, icon, Logo, MediaTile, openViewer, PageTabs, postDate, price,
-  priceCaption, ProBadge, RatingInline, SheetFrame, Spinner, SwipePages, timeAgo, useDebounced, useLoad, usePullToRefresh, useCollapsingHeader, TopBlur,
+  priceCaption, ProBadge, RatingInline, SheetFrame, Spinner, SwipePages, timeAgo, useDebounced, useLoad, usePullToRefresh, useCollapsingHeader, TopBlur, PinnedTabs,
 } from '../ui';
 
 type JobsTab = 'all' | 'applied' | 'saved' | 'mine';
@@ -31,7 +31,7 @@ export function JobsScreen() {
     <div class="collapsing" ref={root}>
       <div class="scroll" ref={scroller}>
         <TopBlur sticky />
-        <div class="tabs-pin" data-collapse-tabs><PageTabs tabs={tabs.map(([, l]) => l)} index={index} onChange={pick} /></div>
+        <PinnedTabs class="tabs-pin"><PageTabs tabs={tabs.map(([, l]) => l)} index={index} onChange={pick} /></PinnedTabs>
         <SwipePages index={index} onChange={pick}>
           {tabs.map(([t]) => <JobList key={t} tab={t} q={q} register={(fn) => { reloads.current[t] = fn; }} />)}
         </SwipePages>

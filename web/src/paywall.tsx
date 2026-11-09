@@ -8,6 +8,7 @@ import { AmbientBackground } from './fx';
 import { activeProfile, openSheet } from './state';
 import { alertDialog, BASE, icon, SheetFrame } from './ui';
 import { uiScale } from './scale';
+import { trackEvent } from './analytics';
 
 export type PaywallFeature = 'collections' | 'introVideo' | 'pro' | 'jobPosts' | 'businessPro';
 
@@ -32,6 +33,7 @@ let open = false;
 export function openPaywall(feature: PaywallFeature) {
   if (open) return;
   open = true;
+  trackEvent(`paywall_${feature}`);
   openSheet((close) => <Paywall feature={feature} close={() => { open = false; close(); }} />, { raw: true });
 }
 

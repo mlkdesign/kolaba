@@ -3,6 +3,7 @@
 // timer), Welcome back (log in), password reset, the first profile (creator / business) and legal pages.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { LocationField, placeFields, type Place } from '../location';
+import { trackScreen } from '../analytics';
 import { ApiError, errorText, post, ProfileType } from '../api';
 import { applySession, profiles, reloadSession, showToast, user } from '../state';
 import { AmbientBackground, subscribe } from '../fx';
@@ -22,7 +23,9 @@ export function AuthFlow() {
   else if (step === 'forgot') page = <Forgot onBack={() => go('login')} onSent={(e) => { setEmail(e); go('reset'); }} />;
   else if (step === 'reset') page = <Reset email={email} onBack={() => go('forgot')} onDone={() => go('login')} />;
   else page = <Login onBack={() => go('start')} onForgot={() => go('forgot')} onVerify={(e) => { setEmail(e); go('verify'); }} />;
-  return <div class="auth-screen" key={step} style={{ animation: 'fade-in .3s ease' }}>{page}</div>;
+  useEffect(() => { trackScreen(`auth_${step}`); }, [step]);
+  // Every auth form (e-mail, password, the six code cells) is masked in recordings.
+  return <div class="auth-screen" key={step} style={{ animation: 'fade-in .3s ease' }} data-clarity-mask="True">{page}</div>;
 }
 
 // ─── Start Page: the collage (Figma 164:276) — five columns in a 592 × 1164 frame rotated 15°, opacity 20 % ───
@@ -355,7 +358,7 @@ export function CreateProfile({ onDone, onCancel, allowed }: { onDone?: () => vo
     <Field iconName={iconName} value={value} placeholder={placeholder} onInput={set} />
   );
   return (
-    <div class="auth-screen">
+    <div class="auth-screen" data-clarity-mask="True">
       <AmbientBackground business={type === 'business'} />
       <div class="auth-scroll" style={{ zIndex: 2 }}>
         <div class="auth-body" style={{ paddingBottom: 32 }}>

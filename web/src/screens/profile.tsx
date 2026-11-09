@@ -3,6 +3,7 @@
 // review request sheet, the review form and the invite landing.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { LocationField, placeFields, placeOf, type Place } from '../location';
+import { analyticsAllowed, setAnalyticsAllowed } from '../analytics';
 import { api, Card, del, errorText, get, Job, Media, patch, post, posterFrom, ProfilePage, put, Review, uploadFile } from '../api';
 import { activeProfile, back, isBusiness, openSheet, profiles, push, refresh, refreshTick, reloadSession, setActiveProfile, showToast, signOut, signOutLocally, user } from '../state';
 import { ProfileGlow } from '../fx';
@@ -10,7 +11,7 @@ import { openPaywall } from '../paywall';
 import { offerRoleSwitch } from '../roles';
 import {
   BASE, Avatar, BackButton, confirmSheet, Empty, fmtCount, GlassButton, gradientFor, Header, HeaderTitle, Icon, icon, initials, MediaTile,
-  openViewer, Gallery, Dots, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, Stars, SwipePages, timeAgo, useLoad, usePullToRefresh, alertDialog, pickSheet, useCollapsingHeader, TopBlur, Subtab, SortButton, AddButton, ActionPill,
+  openViewer, Gallery, Dots, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, Stars, SwipePages, timeAgo, useLoad, usePullToRefresh, alertDialog, pickSheet, useCollapsingHeader, TopBlur, PinnedTabs, InHeader, Subtab, SortButton, AddButton, ActionPill,
 } from '../ui';
 import { JobCard } from './jobs';
 import { CreateProfile, Legal } from './auth';
@@ -21,7 +22,6 @@ export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'rev
   const { data: p, error, reload } = useLoad<ProfilePage>((s) => get(`/v1/profiles/${profileId}`, s), [profileId, refreshTick.value]);
   const own = !id || !!p?.isOwner;
   const [tabIndex, setTabIndex] = useState(initialTab === 'reviews' ? 1 : 0);
-  const [scrolled, setScrolled] = useState(0);
   const viewed = useRef(false);
   const { scroller, Indicator } = usePullToRefresh(() => reload(), [!!p]);
   // FIX 109: the profile's tabs follow the scroll freely (no snapping) and pin at 62 pt, moving in over 60 pt.
@@ -42,8 +42,8 @@ export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'rev
   const tabs = business ? ['Job posts', 'Reviews', 'About'] : ['Portfolio', 'Reviews'];
   return (
     <div class={`collapsing ${business ? 'is-business-profile' : ''}`} ref={root}>
-      <div class="scroll" ref={scroller} onScroll={(e) => setScrolled(e.currentTarget.scrollTop)}>
-        <TopBlur sticky opacity={Math.min(Math.max((scrolled - 200) / 120, 0), 1)} />
+      <div class="scroll" ref={scroller}>
+        <TopBlur sticky />
         {/* The glow belongs to the page's top (ProfileGlow): it scrolls away with the content, under the top blur. */}
         {p.isPro && <ProfileGlow business={business} />}
         {business ? <BusinessHeader p={p} own={own} /> : (
@@ -67,9 +67,9 @@ export function ProfileScreen({ id, tab: initialTab }: { id?: string; tab?: 'rev
             </div>
           </>
         )}
-        <div class="ptab-bar" data-collapse-tabs style={{ marginTop: 22 }}>
+        <PinnedTabs class="ptab-bar" style={{ marginTop: 22 }}>
           <PageTabs tabs={tabs} index={tabIndex} onChange={pick} profile counts={[undefined, p.ratings?.count || undefined]} />
-        </div>
+        </PinnedTabs>
         <SwipePages index={tabIndex} onChange={pick}>
           {business ? <BusinessJobs profile={p} own={own} /> : <Portfolio profile={p} own={own} onChange={reload} />}
           <Reviews profile={p} own={own} />
@@ -205,7 +205,7 @@ function Hero({ p, own }: { p: ProfilePage; own: boolean }) {
         <div class="phero__track">{p.avatarUrl && !broken ? <img src={p.avatarUrl} alt="" draggable={false} onError={() => setBroken(true)} />
           : <div class="phero__mono" style={{ background: gradientFor(p.displayName) }}>{initials(p.displayName)}</div>}</div>
       )}
-      {photos.length > 1 && <div class="phero__dots"><Dots count={photos.length} index={index} /></div>}
+      {photos.length > 1 && <InHeader><div class="phero__dots"><Dots count={photos.length} index={index} /></div></InHeader>}
       <div class="phero__shade" />
       {empty && own && (
         <div class="phero__add">
@@ -866,6 +866,19 @@ const ToggleRow = ({ title, detail, on, onChange }: { title: string; detail?: st
   </button>
 );
 
+/** This browser's consent to usage analytics (Microsoft Clarity): kept on this device only, applied at once. */
+function AnalyticsToggle() {
+  const [on, setOn] = useState(analyticsAllowed());
+  return (
+    <>
+      <div class="sgroup" style={{ marginTop: 12 }}>
+        <ToggleRow title="Usage analytics" detail="Anonymous screen and tap recordings (Microsoft Clarity) help us improve KOLABA. Passwords, codes, messages and forms are always masked."
+          on={on} onChange={(v) => { setOn(v); setAnalyticsAllowed(v); }} />
+      </div>
+    </>
+  );
+}
+
 /** SettingsView (Figma 654:18389): the account card; Notifications · Privacy & Safety · Language; Switch to Business /
  *  Creator Account; creator.pro / business.pro (Testing) for allowed testers; Help & Support · About; Log out. ⋯: Delete
  *  account. Every row opens its page or does its action. */
@@ -952,6 +965,7 @@ export function SettingsScreen() {
                 <Row title="Report a problem" onClick={() => { window.location.href = 'mailto:mlkdesignweb@gmail.com?subject=KOLABA%20problem'; }} />
               </div>
               <div class="muted" style={{ fontSize: 13, margin: '4px 16px' }}>These settings are saved to your profile on the server.</div>
+              <AnalyticsToggle />
             </>
           ) : <Spinner />)}
           {page === 'language' && (

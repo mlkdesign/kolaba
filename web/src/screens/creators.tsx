@@ -5,7 +5,7 @@ import { Card, del, errorText, get, Media, Page, post } from '../api';
 import { activeProfile, badges, openSheet, push, refresh, refreshTick, showToast } from '../state';
 import {
   Subtab, SortButton, pickSheet, openContextMenu, useLongPress, Avatar, Empty, VideoTime, GlassButton, Header, Icon, icon, Logo, openViewer, PageTabs, ProBadge, SheetFrame, Spinner, StarIcon, SwipePages,
-  useDebounced, useLoad, usePullToRefresh, useCollapsingHeader, TopBlur,
+  useDebounced, useLoad, usePullToRefresh, useCollapsingHeader, TopBlur, PinnedTabs,
 } from '../ui';
 
 type Kind = 'creator' | 'business';
@@ -35,7 +35,7 @@ export function CreatorsScreen() {
     <div class="collapsing" ref={root}>
       <div class="scroll" ref={scroller}>
         <TopBlur sticky />
-        <div class="tabs-pin" data-collapse-tabs><PageTabs tabs={[kind === 'creator' ? 'Creators' : 'Businesses', `My Contacts${badges.value.contactRequests ? ` · ${badges.value.contactRequests}` : ''}`]} index={index} onChange={pick} /></div>
+        <PinnedTabs class="tabs-pin"><PageTabs tabs={[kind === 'creator' ? 'Creators' : 'Businesses', `My Contacts${badges.value.contactRequests ? ` · ${badges.value.contactRequests}` : ''}`]} index={index} onChange={pick} /></PinnedTabs>
         <SwipePages index={index} onChange={pick}>
           <Catalog kind={kind} q={q} register={(fn) => { if (index === 0) reloadRef.current = fn; }} />
           <ContactsList query={q} register={(fn) => { if (index === 1) reloadRef.current = fn; }} />

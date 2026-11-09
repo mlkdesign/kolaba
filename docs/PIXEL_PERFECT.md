@@ -201,3 +201,23 @@ API for internal logic).
 - **Phones**: theme-color / page background #0B0B0B, dark color-scheme.
 - **API**: a login to a not yet verified account sends its code at once (it used to need Resend); PRO test switch also
   for accounts verified through the closed-test inbox; one business photo.
+
+## Round 7 — one fixed top blur, native galleries, paywall glass, Microsoft Clarity (2026-11-09)
+- **Three layers** (`app.tsx`): 1) the sections' scrolling content (the pager); 2) the app's ONE top blur
+  (`.app-blur`, z 30) — there from the first frame, never moving, never re-created by a slide, no scroll dependency
+  (My Profile's scroll ramp is gone); 3) the header layer (z 31): a slot per section, sliding exactly like the pager,
+  into which each section portals its header, pinned tabs (`PinnedTabs`, moved by `--tabs-dy` from the collapsing
+  scroll, a same-size placeholder left in the content) and photo dots (`InHeader`). Titles, Filter, Search and tabs
+  are therefore always over the blur; collapsing moves only their geometry. Pushed screens keep their own blur.
+- **Galleries** are native horizontal scroll views with `scroll-snap` (touch, trackpad and wheel with the browser's
+  inertia) plus mouse drag (settles on the nearest picture, flick to the next); dots follow; drags inside never reach
+  the inner pages or the sections; job photos never open full screen.
+- **Paywall**: the sheet is the glass cards' backdrop root from the first frame (`clip-path`) — before, its fade-in
+  opacity made it one only during the animation, so the cards' blur switched sources (and "popped") when it ended.
+- **Microsoft Clarity** (web project `zaxrlwua97`): the official tag once in `index.html`, only with consent (Settings
+  → Privacy & Safety → Usage analytics; off under GPC / DNT); CSP allows `*.clarity.ms` and `c.bing.com`; SPA screens
+  named via `clarity('set','screen',…)` + events (`src/analytics.ts`), paywall events; auth, chats, notifications,
+  settings, forms and every sheet carry `data-clarity-mask`. No user id or e-mail is sent. Privacy Policy updated.
+- **iOS**: Clarity SDK 4.1.2 (SPM `microsoft/clarity-apps`), `KolabaAnalytics` starts it in `KolabaApp.init()` only with
+  a **mobile** project id in Info.plist `KolabaClarityProjectID` (empty until that project exists) and consent;
+  section / screen names and paywall events; `clarityMask()` on auth, chats, messages, notifications and settings.

@@ -1,7 +1,10 @@
 // Shared UI pieces, each the web counterpart of a component in kolaba/Core/Components: glass buttons, the header with
 // its top blur, the logo, page tabs with the sliding underline, swipeable pages, media galleries, sheets (drag to
 // dismiss), avatars, ratings, PRO badges, empty states, and formatting helpers.
-import { ComponentChildren, toChildArray } from 'preact';
+import { ComponentChildren, createContext, toChildArray } from 'preact';
+import { createPortal } from 'preact/compat';
+import { useContext } from 'preact/hooks';
+import { signal } from '@preact/signals';
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { Card, Media } from './api';
 import { activeProfile, back, closeSheet, openSheet, sheets } from './state';
@@ -35,17 +38,54 @@ export const BackButton = ({ onClick }: { onClick?: () => void }) => (
 export const Logo = ({ word }: { word: string }) => <div class="logo" role="heading" aria-level={1}>{word}<i>.</i></div>;
 
 /** KolabaHeader: 44 pt controls at the safe area's top − 2, the centre piece between them, the top blur under it. */
+// ─── the three layers of a section (iOS KolabaTabbedScroll's ZStack): its scrolling content, ONE fixed top blur for
+// the whole app (never re-created, never moving, no scroll dependency), and the header layer above it. A section's
+// header, pinned tabs and photo dots are portalled into its own slot of the header layer, which slides with the
+// pager — so titles and buttons are drawn over the blur from the first frame of every slide. Pushed screens are
+// their own whole screens and keep header + blur together inside themselves. ───
+
+/** The section (pager page) a component renders in; null on pushed screens, sheets and the auth flow. */
+export const SectionSlot = createContext<string | null>(null);
+/** The header-layer slot elements, by section. */
+export const headerSlots = signal<Record<string, HTMLElement | null>>({});
+
+/** Renders its children in the section's header slot (over the app's top blur); in place elsewhere. */
+export function InHeader({ children }: { children: ComponentChildren }) {
+  const section = useContext(SectionSlot);
+  if (!section) return <>{children}</>;
+  const el = headerSlots.value[section];
+  return el ? createPortal(<>{children}</>, el) : null;
+}
+
+/** Whether this component is inside a section (the shared blur and header layer serve it). */
+export const useInSection = () => !!useContext(SectionSlot);
+
 export function Header({ left, center, right, blur = true, blurOpacity = 1, collapsingTitle }: {
   left?: ComponentChildren; center?: ComponentChildren; right?: ComponentChildren; blur?: boolean; blurOpacity?: number; collapsingTitle?: boolean;
 }) {
+  const inSection = useInSection();
   return (
-    <>
-      {blur && <TopBlur opacity={blurOpacity} />}
+    <InHeader>
+      {blur && !inSection && <TopBlur opacity={blurOpacity} />}
       <header class="header">
         <div class="header__side">{left}</div>
         {center && <div class={`header__center ${collapsingTitle ? 'is-title' : ''}`}>{center}</div>}
         <div class="header__side is-end">{right}</div>
       </header>
+    </InHeader>
+  );
+}
+
+/** A collapsing screen's one row of tabs. In a section it floats in the header layer (over the blur), moved by
+ *  --tabs-dy from the collapsing scroll, and leaves a same-sized placeholder in the content; on a pushed screen it
+ *  stays sticky in the scroll, over that screen's own blur. */
+export function PinnedTabs({ class: cls, style, children }: { class: string; style?: any; children: ComponentChildren }) {
+  const inSection = useInSection();
+  if (!inSection) return <div class={cls} style={style} data-collapse-tabs>{children}</div>;
+  return (
+    <>
+      <div class={`${cls} is-placeholder`} style={style} data-collapse-tabs data-float aria-hidden="true" />
+      <InHeader><div class={`${cls} tabs-float`}>{children}</div></InHeader>
     </>
   );
 }
@@ -56,6 +96,8 @@ export function Header({ left, center, right, blur = true, blurOpacity = 1, coll
  *  scroll view as its first child: then it shares one stacking context with the pinned tabs, which always draw above
  *  it — in every engine, Safari's composited scrolling included. */
 export function TopBlur({ opacity = 1, sticky }: { opacity?: number; sticky?: boolean }) {
+  const inSection = useInSection();
+  if (sticky && inSection) return null; // the app's one blur serves every section
   const band = (
     <div class="top-blur" style={{ opacity }} aria-hidden="true">
       <i class="top-blur__dark" /><i class="top-blur__l1" /><i class="top-blur__l2" /><i class="top-blur__l3" /><i class="top-blur__l4" />
@@ -153,25 +195,54 @@ export function SwipePages({ index, onChange, children }: { index: number; onCha
 export const Dots = ({ count, index }: { count: number; index: number }) =>
   count > 1 ? <div class="dots" aria-hidden="true">{Array.from({ length: Math.min(count, 10) }, (_, i) => <i class={i === Math.min(index, 9) ? 'is-on' : ''} />)}</div> : null;
 
-/** A sideways media pager with ReelsPagination dots (job cards, job details, profile hero). */
+/** A sideways media pager with ReelsPagination dots (job cards, job details, profile photos): a native horizontal
+ *  scroll view snapping to each picture — a finger, a trackpad's sideways swipe or a wheel scroll it with the
+ *  browser's own inertia; a mouse drags it (then it settles on the nearest picture, or the next one on a flick).
+ *  Sideways drags inside it are its own (data-hscroll): the inner pages and the sections never take them. */
 export function Gallery({ media, onOpen, class: cls = 'gallery', dots = true, children, onIndex }: {
   media: Media[]; onOpen?: (m: Media, i: number) => void; class?: string; dots?: boolean; children?: ComponentChildren; onIndex?: (i: number) => void;
 }) {
   const [index, setIndex] = useState(0);
-  const [drag, setDrag] = useState<number | null>(null);
-  const root = useRef<HTMLDivElement>(null);
+  const track = useRef<HTMLDivElement>(null);
+  const dragged = useRef(false);
   const count = media.length;
-  const set = (i: number) => { setIndex(i); onIndex?.(i); };
-  const onPointerDown = useHorizontalSwipe(
-    (dx) => setDrag((index === 0 && dx > 0) || (index === count - 1 && dx < 0) ? dx / 3 : dx),
-    (dx, v) => { setDrag(null); set(settleIndex(index, count, dx, root.current?.clientWidth ?? 370, v)); },
-    true,
-  );
+  const onScroll = () => {
+    const el = track.current; if (!el || !el.clientWidth) return;
+    const i = Math.min(Math.max(Math.round(el.scrollLeft / el.clientWidth), 0), count - 1);
+    if (i !== index) { setIndex(i); onIndex?.(i); }
+  };
+  // A mouse has no native drag-to-scroll: follow it with snapping off, then glide to the settled picture.
+  const onPointerDown = (e: PointerEvent) => {
+    e.stopPropagation();
+    const el = track.current;
+    if (!el || e.pointerType !== 'mouse' || e.button !== 0 || count < 2) return;
+    const k = uiScale(); const x0 = e.clientX; const start = el.scrollLeft; const w = el.clientWidth;
+    let last = x0; let lastT = performance.now(); let v = 0; let moving = false;
+    dragged.current = false;
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - x0) / k;
+      if (!moving) { if (Math.abs(dx) < 6) return; moving = true; dragged.current = true; el.classList.add('is-dragging'); }
+      const t = performance.now(); v = ((ev.clientX - last) / k / Math.max(t - lastT, 1)) * 1000; last = ev.clientX; lastT = t;
+      el.scrollLeft = start - dx;
+    };
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up);
+      if (!moving) return;
+      const from = Math.round(start / w);
+      const dx = (ev.clientX - x0) / k;
+      const target = Math.min(Math.max(v <= -500 || dx < -w / 2 ? from + 1 : v >= 500 || dx > w / 2 ? from - 1 : from, 0), count - 1);
+      el.scrollTo({ left: target * w, behavior: 'smooth' });
+      window.setTimeout(() => el.classList.remove('is-dragging'), 420);
+    };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
+  };
+  const open = (m: Media, i: number) => { if (dragged.current) { dragged.current = false; return; } onOpen?.(m, i); };
   return (
-    <div class={cls} ref={root} data-hscroll={count > 1 ? '' : undefined} onPointerDown={count > 1 ? (e) => { e.stopPropagation(); onPointerDown(e as any); } : undefined}>
-      <div class={`gallery__track ${drag !== null ? 'is-dragging' : ''}`} style={{ transform: `translateX(calc(${-index * 100}% + ${drag ?? 0}px))` }}>
+    <div class={cls} data-hscroll={count > 1 ? '' : undefined}>
+      <div class="gallery__track" ref={track} onScroll={onScroll} onPointerDown={onPointerDown as any}
+        onDragStart={(e) => e.preventDefault()}>
         {media.map((m, i) => (
-          <MediaImage media={m} onClick={onOpen ? () => onOpen(m, i) : undefined} eager={i === 0} />
+          <MediaImage media={m} onClick={onOpen ? () => open(m, i) : undefined} eager={i === 0} />
         ))}
       </div>
       {media[index]?.kind === 'video' && onOpen && (
@@ -350,7 +421,7 @@ function SheetView({ id, tall, closing, render }: { id: number; tall?: boolean; 
     window.addEventListener('pointermove', move, { passive: false }); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
   };
   return (
-    <div class={`sheet-root ${closing ? 'is-closing' : ''}`}>
+    <div class={`sheet-root ${closing ? 'is-closing' : ''}`} data-clarity-mask="True">
       <div class="sheet-backdrop" onClick={close} style={offset ? { opacity: Math.max(0, 1 - offset / 400) } : undefined} />
       <div ref={ref} class={`sheet ${tall ? 'is-tall' : ''} ${offset !== null && !settling ? 'is-dragging' : ''} ${settling ? 'is-settling' : ''}`}
         role="dialog" aria-modal="true" onPointerDown={onPointerDown as any}
@@ -642,26 +713,41 @@ export function useCollapsingHeader({ distance = COLLAPSE.restTop - COLLAPSE.pin
     if (!el || !host) return;
     let last = el.scrollTop; let lastT = performance.now(); let v = 0; let timer = 0; let touching = false;
     const tabsEl = () => host.querySelector<HTMLElement>('[data-collapse-tabs]');
+    // In a section the header, tabs and dots live in its header-layer slot: the same variables go there too.
+    const slot = () => { const t = host.closest('.pager__page')?.getAttribute('data-tab'); return t ? headerSlots.value[t] ?? null : null; };
+    const geometry = (tabs: HTMLElement) => {
+      if (tabs.hasAttribute('data-float')) {
+        // A placeholder in the content (never sticky): its own top is the tabs' natural place; the floating row's
+        // computed top is the pin.
+        const float = slot()?.querySelector<HTMLElement>('.tabs-float');
+        return { natural: tabs.offsetTop, pin: float ? parseFloat(getComputedStyle(float).top) || COLLAPSE.pinTop : COLLAPSE.pinTop };
+      }
+      // Sticky in place: its natural top from the zero-height anchor before it (plus its margin), not its live rect.
+      const anchor = tabs.previousElementSibling as HTMLElement | null;
+      const natural = anchor ? anchor.offsetTop + anchor.offsetHeight + parseFloat(getComputedStyle(tabs).marginTop || '0') : tabs.offsetTop;
+      return { natural, pin: parseFloat(getComputedStyle(tabs).top) || COLLAPSE.pinTop };
+    };
     void uiScale;
     const paint = () => {
       const off = el.scrollTop;
       const shift = Math.min(off, distance);
-      host.style.setProperty('--collapse-shift', `${Math.max(shift, -200)}px`);
-      host.style.setProperty('--collapse-shift-n', String(Math.round(Math.max(shift, -200))));
-      host.style.setProperty('--collapse-title', String(1 - Math.min(Math.max(Math.max(shift, 0) / Math.max(fade, 1), 0), 1)));
-      // The tabs' own top on the screen (they may sit lower than the section's rest, e.g. a profile's).
+      const vars: Record<string, string> = {
+        '--collapse-shift': `${Math.max(shift, -200)}px`,
+        '--collapse-shift-n': String(Math.round(Math.max(shift, -200))),
+        '--collapse-title': String(1 - Math.min(Math.max(Math.max(shift, 0) / Math.max(fade, 1), 0), 1)),
+        '--scroll-y': String(Math.round(off)),
+      };
       const tabs = tabsEl();
       let approach = Math.min(Math.max(shift / Math.max(distance, 1), 0), 1);
-      if (tabs && insetTravel) {
-        // Arithmetic, not the sticky element's live rect: its natural top (the zero-height anchor before it, plus
-        // its margin) minus the offset, pinned at pinTop.
-        const anchor = tabs.previousElementSibling as HTMLElement | null;
-        const natural = anchor ? anchor.offsetTop + anchor.offsetHeight + parseFloat(getComputedStyle(tabs).marginTop || '0') : tabs.offsetTop;
-        const pin = parseFloat(getComputedStyle(tabs).top) || COLLAPSE.pinTop;
+      if (tabs) {
+        const { natural, pin } = geometry(tabs);
         const top = Math.max(natural - off, pin);
-        approach = Math.min(Math.max(1 - (top - pin) / insetTravel, 0), 1);
+        vars['--tabs-dy'] = String(Math.round((top - pin) * 100) / 100);
+        if (insetTravel) approach = Math.min(Math.max(1 - (top - pin) / insetTravel, 0), 1);
       }
-      host.style.setProperty('--collapse-approach', approach.toFixed(4));
+      vars['--collapse-approach'] = approach.toFixed(4);
+      const targets = [host, slot()].filter(Boolean) as HTMLElement[];
+      for (const t of targets) for (const [k, v] of Object.entries(vars)) t.style.setProperty(k, v);
     };
     const settle = () => {
       if (!snap || touching) return;
@@ -688,13 +774,18 @@ export function useCollapsingHeader({ distance = COLLAPSE.restTop - COLLAPSE.pin
       el.removeEventListener('touchcancel', up); el.removeEventListener('pointerdown', down); window.removeEventListener('pointerup', up);
       ro.disconnect(); window.clearTimeout(timer);
     };
-  }, [distance, insetTravel, snap, fade, ...deps]);
+  }, [distance, insetTravel, snap, fade, Object.keys(headerSlots.value).length, ...deps]);
   // A tab change (KolabaTabScrollCoordinator.beginPaging): the header stays where it is; with the header collapsed the
   // new tab shows at its own saved place past the pinned tabs, otherwise at its top. Never a jump to the top.
   const saved = useRef<Record<string, number>>({});
   const travel = () => {
     const tabs = root.current?.querySelector<HTMLElement>('[data-collapse-tabs]');
     if (!insetTravel || !tabs) return distance;
+    if (tabs.hasAttribute('data-float')) {
+      const t = root.current?.closest('.pager__page')?.getAttribute('data-tab');
+      const float = t ? headerSlots.value[t]?.querySelector<HTMLElement>('.tabs-float') : null;
+      return Math.max(0, tabs.offsetTop - (float ? parseFloat(getComputedStyle(float).top) || COLLAPSE.pinTop : COLLAPSE.pinTop));
+    }
     const anchor = tabs.previousElementSibling as HTMLElement | null;
     const natural = anchor ? anchor.offsetTop + anchor.offsetHeight + parseFloat(getComputedStyle(tabs).marginTop || '0') : tabs.offsetTop;
     return Math.max(0, natural - (parseFloat(getComputedStyle(tabs).top) || COLLAPSE.pinTop));
