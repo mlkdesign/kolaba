@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { LocationField, placeFields, type Place } from '../location';
 import { trackScreen } from '../analytics';
-import { GoogleButton } from '../google';
+import { GoogleButton, googleName } from '../google';
 import { ApiError, errorText, post, ProfileType } from '../api';
 import { applySession, profiles, reloadSession, showToast, user } from '../state';
 import { AmbientBackground, subscribe } from '../fx';
@@ -336,11 +336,20 @@ function Reset({ email, onBack, onDone }: { email: string; onBack: () => void; o
 }
 
 /** First profile (and more later from Settings): creator or business. */
+/** A username from the name: Latin letters and digits (accents dropped), dots between words, a few random digits
+ *  so it is free; 3–30 characters like the API asks. */
+function usernameFrom(name: string, attempt: number) {
+  const base = name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '').slice(0, 20) || 'kolaba';
+  const digits = String(Math.floor(Math.random() * (attempt ? 900000 : 9000)) + (attempt ? 100000 : 1000));
+  return `${base.length < 3 ? `${base}.user` : base}.${digits}`.slice(0, 30);
+}
+
 export function CreateProfile({ onDone, onCancel, allowed }: { onDone?: () => void; onCancel?: () => void; allowed?: ProfileType[] }) {
   const types = allowed ?? ['creator', 'business'];
   const [type, setType] = useState<ProfileType>(types[0]);
-  const [displayName, setDisplayName] = useState('');
-  const [username, setUsername] = useState('');
+  // After a Google sign-in the name starts from the Google account's (editable).
+  const [displayName, setDisplayName] = useState(googleName.value ?? '');
   const [place, setPlace] = useState<Place | null>(null);
   const [bio, setBio] = useState('');
   const [busy, setBusy] = useState(false);
@@ -348,9 +357,16 @@ export function CreateProfile({ onDone, onCancel, allowed }: { onDone?: () => vo
   const submit = async (e: Event) => {
     e.preventDefault(); setBusy(true); setError('');
     try {
-      await post('/v1/profiles', { type, displayName, username, ...placeFields(place), bio });
+      // No Username field for now: one is made from the name (edited later in Edit profile), retried if taken.
+      let username = '';
+      for (let attempt = 0; ; attempt++) {
+        username = usernameFrom(displayName, attempt);
+        try { await post('/v1/profiles', { type, displayName, username, ...placeFields(place), bio }); break; }
+        catch (err) { if (!(err instanceof ApiError && err.code === 'username_taken') || attempt >= 4) throw err; }
+      }
+      googleName.value = null;
       await reloadSession();
-      const created = profiles.value.find((p) => p.username === username.toLowerCase());
+      const created = profiles.value.find((p) => p.username === username);
       if (created) (await import('../state')).setActiveProfile(created.id);
       onDone?.();
     } catch (err) { setError(errorText(err)); } finally { setBusy(false); }
@@ -375,11 +391,10 @@ export function CreateProfile({ onDone, onCancel, allowed }: { onDone?: () => vo
           )}
           <form onSubmit={submit} class="form-gap" noValidate>
             {plain(displayName, setDisplayName, type === 'business' ? 'Business name' : 'Your name', 'IconUser')}
-            <Field iconName="IconLink" value={username} placeholder="Username" onInput={(v) => setUsername(v.toLowerCase().replace(/[^a-z0-9._]/g, ''))} />
             <LocationField value={place} onChange={setPlace} />
             <textarea class="textarea" maxLength={1000} placeholder={type === 'business' ? 'Description' : 'Bio'} value={bio} onInput={(e) => setBio(e.currentTarget.value)} />
             {error && <div class="field-error" role="alert">{error}</div>}
-            <NextButton busy={busy} ready={!!displayName && username.length >= 3} label="Create profile" />
+            <NextButton busy={busy} ready={!!displayName.trim()} label="Create profile" />
           </form>
         </div>
       </div>

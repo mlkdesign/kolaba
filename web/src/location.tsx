@@ -111,14 +111,52 @@ export function openLocationPicker(selected: Place | null, onSelect: (p: Place |
   openSheet((close) => <LocationSheet selected={selected} onSelect={onSelect} close={close} />, { tall: true });
 }
 
-/** The form's one Location field (a button styled as the input). */
-export function LocationField({ value, onChange, placeholder = 'Your location' }: { value: Place | null; onChange: (p: Place | null) => void; placeholder?: string }) {
+/** Use my location (PlaceLocator): asks for the position only when tapped, once; the city and country come from a
+ *  reverse lookup (BigDataCloud's free client endpoint). The coordinates are used for that lookup only, never kept. */
+export async function locateMe(): Promise<Place> {
+  if (!('geolocation' in navigator)) throw new Error('unsupported');
+  const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+    navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: false, timeout: 15000, maximumAge: 600000 }));
+  const { latitude, longitude } = pos.coords;
+  const r = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude.toFixed(3)}&longitude=${longitude.toFixed(3)}&localityLanguage=en`);
+  if (!r.ok) throw new Error('lookup');
+  type Admin = { name?: string; adminLevel?: number; description?: string };
+  const j = await r.json() as { countryCode?: string; city?: string; locality?: string; localityInfo?: { administrative?: Admin[] } };
+  if (!j.countryCode || !/^[A-Z]{2}$/i.test(j.countryCode)) throw new Error('lookup');
+  // The city itself, not the district or the region around it ("Kharkiv", not "Kharkiv Raion"): the administrative
+  // level described as a city / town, else level 8, else the lookup's own city without its region suffix.
+  const admin = j.localityInfo?.administrative ?? [];
+  const named = admin.find((a) => a.name && /\b(city|town|capital)\b/i.test(a.description ?? '') && !/district/i.test(a.description ?? ''))
+    ?? admin.find((a) => a.name && a.adminLevel === 8);
+  const strip = (x?: string) => (x ?? '').replace(/\s+(Raion|Oblast|District|Urban Hromada|Hromada|Municipality|Regency|County)$/i, '').trim();
+  const city = (named?.name ?? strip(j.city) ?? strip(j.locality)).trim() || strip(j.locality);
+  return { countryCode: j.countryCode.toUpperCase(), city: city || null };
+}
+
+/** The form's one Location field (a button styled as the input) and, under it, the pink Use my location. */
+export function LocationField({ value, onChange, placeholder = 'Your location', locate = true }: { value: Place | null; onChange: (p: Place | null) => void; placeholder?: string; locate?: boolean }) {
+  const [state, setState] = useState<'idle' | 'locating' | 'denied' | 'failed'>('idle');
+  const useMine = async () => {
+    if (state === 'locating') return;
+    setState('locating');
+    try { const p = await locateMe(); remember(p); onChange(p); setState('idle'); }
+    catch (e: any) { setState(e?.code === 1 ? 'denied' : 'failed'); }
+  };
   return (
-    <button type="button" class="field is-button" onClick={() => openLocationPicker(value, onChange)} aria-label={value ? `Location: ${placeTitle(value)}` : placeholder}>
-      <img src={icon('IconMapPin')} alt="" />
-      <span class={`grow ellipsis ${value ? '' : 'field__placeholder'}`}>{value ? `${flagOf(value.countryCode)} ${placeTitle(value)}` : placeholder}</span>
-      <img src={icon('IconCaretRight')} alt="" style={{ width: 14, height: 14, opacity: .5 }} />
-    </button>
+    <div class="location-field">
+      <button type="button" class="field is-button" onClick={() => openLocationPicker(value, onChange)} aria-label={value ? `Location: ${placeTitle(value)}` : placeholder}>
+        <img src={icon('IconMapPin')} alt="" />
+        <span class={`grow ellipsis ${value ? '' : 'field__placeholder'}`}>{value ? `${flagOf(value.countryCode)} ${placeTitle(value)}` : placeholder}</span>
+        <img src={icon('IconCaretRight')} alt="" style={{ width: 14, height: 14, opacity: .5 }} />
+      </button>
+      {locate && (
+        <button type="button" class="use-location" onClick={useMine} disabled={state === 'locating'}>
+          {state === 'locating' ? 'Finding your location…' : 'Use my location'}
+        </button>
+      )}
+      {state === 'denied' && <div class="field-error" role="alert">Location access is off. Allow it for this site in your browser, or choose a place above.</div>}
+      {state === 'failed' && <div class="field-error" role="alert">Couldn't find your location. Try again or choose a place above.</div>}
+    </div>
   );
 }
 

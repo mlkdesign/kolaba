@@ -192,7 +192,8 @@ auth.post('/google', async (c) => {
   const ua = c.req.header('User-Agent');
   const signIn = async (userId: string, isNew: boolean) => {
     const token = await createSession(c.env.DB, userId, ua);
-    return c.json({ ...(await sessionPayload(c.env, userId, token)), isNew });
+    // The name on the Google account, for the onboarding to start from (shown and editable there, never stored here).
+    return c.json({ ...(await sessionPayload(c.env, userId, token)), isNew, google: { name: claims!.name?.trim().slice(0, 80) || null } });
   };
 
   // 1) Already linked.

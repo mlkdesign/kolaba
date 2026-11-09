@@ -3,9 +3,13 @@
 // account is linked only after its password is entered here (never merged by e-mail alone). No client secret exists
 // on the web: the client id is public, it is the tokens' audience.
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { signal } from '@preact/signals';
 import { ApiError, errorText, post } from './api';
 import { applySession, openSheet, showToast } from './state';
 import { SheetFrame } from './ui';
+
+/** The Google account's name after a Google sign-in — Create profile starts from it. */
+export const googleName = signal<string | null>(null);
 
 export const GOOGLE_CLIENT_ID = '888396863806-et1d0p9h08gaptueupl1c9lhg9dlivqa.apps.googleusercontent.com';
 
@@ -31,7 +35,9 @@ const emailOf = (credential: string) => {
 
 async function finish(credential: string) {
   try {
-    applySession(await post('/v1/auth/google', { credential }));
+    const session = await post<any>('/v1/auth/google', { credential });
+    googleName.value = session.google?.name ?? null;
+    applySession(session);
   } catch (e) {
     if (e instanceof ApiError && e.code === 'google_link_required') { openLink(credential); return; }
     showToast(e instanceof ApiError && e.code === 'google_token_invalid' ? 'Google sign-in failed. Please try again.' : errorText(e), 'error');
@@ -52,7 +58,7 @@ function LinkSheet({ credential, close }: { credential: string; close: () => voi
     e.preventDefault();
     if (!password || busy) return;
     setBusy(true); setError('');
-    try { const session = await post('/v1/auth/google', { credential, password }); close(); applySession(session); showToast('Google is now linked to your account', 'ok'); }
+    try { const session = await post<any>('/v1/auth/google', { credential, password }); close(); googleName.value = session.google?.name ?? null; applySession(session); showToast('Google is now linked to your account', 'ok'); }
     catch (err) {
       setError(err instanceof ApiError && err.code === 'invalid_credentials' ? 'Incorrect password. Please try again.'
         : err instanceof ApiError && err.code === 'google_token_invalid' ? 'The Google sign-in expired. Close this and continue with Google again.' : errorText(err));
@@ -73,7 +79,7 @@ function LinkSheet({ credential, close }: { credential: string; close: () => voi
   );
 }
 
-/** The official "Sign up / Sign in with Google" button (popup), pill-shaped and dark to sit with KOLABA's buttons. */
+/** Sign up / Log in with Google in KOLABA's style; the official GIS button (popup) takes the tap. */
 export function GoogleButton({ intent }: { intent: 'Sign Up' | 'Log in' }) {
   const box = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState(false);
@@ -95,9 +101,14 @@ export function GoogleButton({ intent }: { intent: 'Sign Up' | 'Log in' }) {
     }).catch(() => live && setFailed(true));
     return () => { live = false; };
   }, [intent]);
-  if (failed) {
-    return <button type="button" class="social-btn" onClick={() => showToast('Google sign-in could not load. Check your connection and try again.', 'error')}>
-      <img src={`${import.meta.env.BASE_URL}icons/IconGoogle.svg`} alt="" />{intent} with Google</button>;
-  }
-  return <div class="google-btn" ref={box} aria-label={`${intent} with Google`} />;
+  // KOLABA's own button is what is seen (the same as Sign Up with Apple); Google's button lies exactly over it, almost
+  // transparent, and takes the click — so the popup opens from Google's own button, as Google Identity Services needs.
+  return (
+    <div class="google-wrap">
+      <button type="button" class="social-btn" tabIndex={failed ? 0 : -1} aria-hidden={!failed}
+        onClick={() => failed && showToast('Google sign-in could not load. Check your connection and try again.', 'error')}>
+        <img src={`${import.meta.env.BASE_URL}icons/IconGoogle.svg`} alt="" />{intent} with Google</button>
+      {!failed && <div class="google-btn" ref={box} aria-label={`${intent} with Google`} />}
+    </div>
+  );
 }

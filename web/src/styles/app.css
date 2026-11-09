@@ -1058,7 +1058,17 @@ img.cicon { object-fit: cover; }
 .photo-strip__main { position: absolute; left: 6px; bottom: 6px; padding: 2px 6px; border-radius: 8px; font-size: 10px; font-weight: 600; background: rgba(0, 0, 0, .55); }
 
 /* Sign in with Google: the official GIS button (pill, dark), centred in a 50 pt slot like the other sign-in buttons */
-.google-btn { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 50px; color-scheme: light; }
+.google-wrap { position: relative; width: 100%; height: 50px; border-radius: 99px; overflow: hidden; }
+/* Google's button (40 pt tall) stretched over ours (50 pt) and all but invisible: it receives the tap */
+.google-btn { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; opacity: .011; transform: scaleY(1.3);
+  color-scheme: light; z-index: 1; }
 .google-btn iframe { max-width: 100%; }
+.google-wrap:hover .social-btn, .google-wrap:focus-within .social-btn { background: rgba(255, 255, 255, .1); }
 .link-google__text { margin: 0 0 4px; font-size: 14px; line-height: 20px; color: rgba(236, 237, 239, .7); }
 .link-google__text b { color: #fff; font-weight: 600; }
+
+/* Use my location (ProfileSetupView): pink, projectDescription (14), 8 pt in, 36 pt tall, under the field */
+.location-field { display: flex; flex-direction: column; align-items: flex-start; }
+.location-field > .field { width: 100%; }
+.use-location { min-height: 36px; padding: 0 8px; font-size: 14px; color: var(--pink); }
+.use-location:disabled { opacity: .6; }
