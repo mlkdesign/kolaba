@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, rateLimit, requireAuth, requireProfile } from '../lib/auth';
 import { cardColumns, avatarJoin, card, type CardRow, isPro, loadCards, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/cards';
+import { blockedBetweenUsers, checkText, notBlockedSQL } from '../lib/moderation';
 import { clampLimit, decodeCursor, encodeCursor, fail, newId, now, parseJSON } from '../lib/util';
 
 const jobs = new Hono<AppEnv>();
@@ -43,8 +44,10 @@ async function jobsJSON(env: Env, rows: Record<string, any>[], viewer: string | 
   const marks = ids.map(() => '?').join(',');
   const [owners, mediaRows, stats] = await Promise.all([
     loadCards(env, rows.map((r) => r.owner_profile_id)),
+    // A job's photos: approved ones for everyone; its owner also sees those still waiting for review.
     env.DB.prepare(`SELECT jm.job_id, ${mediaColumns} FROM job_media jm JOIN media m ON m.id = jm.media_id AND m.status = 'ready'
-                    WHERE jm.job_id IN (${marks}) ORDER BY jm.position`).bind(...ids).all<MediaRow & { job_id: string }>(),
+                    AND (m.review_status = 'approved' OR (m.owner_profile_id = ? AND m.review_status IN ('pending', 'flagged')))
+                    WHERE jm.job_id IN (${marks}) ORDER BY jm.position`).bind(viewer, ...ids).all<MediaRow & { job_id: string }>(),
     env.DB.prepare(`SELECT j.id,
         (SELECT COUNT(*) FROM applications a WHERE a.job_id = j.id AND a.status = 'submitted' AND EXISTS (SELECT 1 FROM profiles cp WHERE cp.id = a.creator_profile_id AND cp.status = 'active')) AS applications_count,
         (SELECT a.id FROM applications a WHERE a.job_id = j.id AND a.creator_profile_id = ? AND a.status = 'submitted') AS my_application_id,
@@ -62,7 +65,7 @@ async function jobsJSON(env: Env, rows: Record<string, any>[], viewer: string | 
       countryCode: j.country_code, city: j.city, flag: j.is_worldwide ? '🌍' : j.flag, isWorldwide: j.is_worldwide === 1,
       languages: parseJSON(j.languages, []), compensationType: j.compensation_type, budgetMin: j.budget_min,
       budgetMax: j.budget_max, currency: j.currency, deliverables: parseJSON(j.deliverables, []), deadline: j.deadline,
-      status: j.status, publishedAt: j.published_at, closedAt: j.closed_at, createdAt: j.created_at, viewsCount: j.views_count,
+      status: j.status, reviewStatus: j.review_status ?? 'approved', publishedAt: j.published_at, closedAt: j.closed_at, createdAt: j.created_at, viewsCount: j.views_count,
       isDemo: j.is_demo === 1, media: mediaByJob.get(j.id) ?? [], applicationsCount: s.applications_count ?? 0,
       myApplicationId: s.my_application_id ?? null, isSaved: s.is_saved === 1,
       acceptsApplications: j.status === 'published' && (!j.deadline || j.deadline > now()),
@@ -89,7 +92,9 @@ jobs.get('/', requireAuth, requireProfile, async (c) => {
     where.push(`j.id IN (SELECT job_id FROM saved_jobs WHERE profile_id = ?) AND j.status IN ('published', 'closed')`);
     params.push(profile.id);
   } else {
-    where.push(`j.status = 'published'`);
+    // The public feed: approved posts only, nobody the viewer blocked (or was blocked by).
+    where.push(`j.status = 'published' AND j.review_status = 'approved' AND ${notBlockedSQL('o.owner_user_id', '?')}`);
+    params.push(profile.ownerUserId, profile.ownerUserId); // notBlockedSQL names the viewer twice
   }
   if (q) {
     where.push(`lower(j.title || ' ' || j.description || ' ' || j.location || ' ' || j.tags || ' ' || COALESCE(j.category, '')) LIKE ?`);
@@ -112,7 +117,8 @@ jobs.get('/:id', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c);
   const row = await c.env.DB.prepare(`SELECT j.*, p.owner_user_id FROM jobs j JOIN profiles p ON p.id = j.owner_profile_id WHERE j.id = ?`)
     .bind(c.req.param('id')).first<Record<string, any>>();
-  if (!row || ((row.status === 'draft' || row.status === 'removed') && row.owner_user_id !== profile.ownerUserId)) fail(404, 'job_not_found');
+  if (!row || ((row.status === 'draft' || row.status === 'removed' || !['approved', undefined].includes(row.review_status))
+      && row.owner_user_id !== profile.ownerUserId)) fail(404, 'job_not_found');
   if (row!.owner_user_id !== profile.ownerUserId && row!.status === 'published') {
     c.executionCtx.waitUntil(c.env.DB.prepare(`UPDATE jobs SET views_count = views_count + 1 WHERE id = ?`).bind(row!.id).run());
   }
@@ -151,6 +157,7 @@ jobs.post('/', requireAuth, requireProfile, async (c) => {
           ['fixed', 'range'].includes(body.compensationType) ? body.currency ?? null : null, JSON.stringify(body.deliverables),
           body.deadline ?? null, publish ? 'published' : 'draft', publish ? now() : null, now(), now()).run();
   await setJobMedia(c.env, id, profile.id, body.mediaIds);
+  await screenJob(c.env, id, body.title, body.description, body.tags);
   const row = await c.env.DB.prepare(`SELECT * FROM jobs WHERE id = ?`).bind(id).first<Record<string, any>>();
   return c.json((await jobsJSON(c.env, [row!], profile.id))[0], 201);
 });
@@ -177,9 +184,22 @@ jobs.patch('/:id', requireAuth, requireProfile, async (c) => {
           ['fixed', 'range'].includes(body.compensationType) ? body.currency ?? null : null, JSON.stringify(body.deliverables),
           body.deadline ?? null, now(), job.id).run();
   await setJobMedia(c.env, job.id, profile.id, body.mediaIds);
+  await screenJob(c.env, job.id, body.title, body.description, body.tags);
   const row = await c.env.DB.prepare(`SELECT * FROM jobs WHERE id = ?`).bind(job.id).first<Record<string, any>>();
   return c.json((await jobsJSON(c.env, [row!], profile.id))[0]);
 });
+
+/** Automatic text check of a job post: a flagged post leaves the public feed until a moderator looks at it (it is never
+ *  rejected automatically). A post a moderator rejected / removed stays so after an edit. */
+async function screenJob(env: Env, id: string, title: string, description: string, tags: string[]) {
+  const verdict = checkText(title, description, tags.join(' '));
+  if (verdict.flagged) {
+    await env.DB.prepare(`UPDATE jobs SET review_status = CASE WHEN review_status IN ('rejected', 'removed') THEN review_status ELSE 'flagged' END,
+        auto_flags = ? WHERE id = ?`).bind(JSON.stringify(verdict), id).run();
+  } else {
+    await env.DB.prepare(`UPDATE jobs SET auto_flags = NULL WHERE id = ?`).bind(id).run();
+  }
+}
 
 // POST /v1/jobs/:id/publish | /close — Closed = no more applications (not "work done").
 jobs.post('/:id/:action{publish|close}', requireAuth, requireProfile, async (c) => {
@@ -206,7 +226,8 @@ jobs.delete('/:id', requireAuth, requireProfile, async (c) => {
 // PUT / DELETE /v1/jobs/:id/save — independent of Apply.
 jobs.put('/:id/save', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c);
-  const job = await c.env.DB.prepare(`SELECT 1 AS ok FROM jobs WHERE id = ? AND status IN ('published', 'closed')`).bind(c.req.param('id')).first();
+  const job = await c.env.DB.prepare(`SELECT 1 AS ok FROM jobs WHERE id = ? AND status IN ('published', 'closed') AND review_status = 'approved'`)
+    .bind(c.req.param('id')).first();
   if (!job) fail(404, 'job_not_found');
   await c.env.DB.prepare(`INSERT OR IGNORE INTO saved_jobs (profile_id, job_id, created_at) VALUES (?, ?, ?)`)
     .bind(profile.id, c.req.param('id'), now()).run();
@@ -255,6 +276,8 @@ jobs.post('/:id/apply', requireAuth, requireProfile, async (c) => {
     .bind(c.req.param('id')).first<Record<string, any>>();
   if (!job || job.status === 'draft' || job.status === 'removed') fail(404, 'job_not_found');
   if (job!.owner_user_id === profile.ownerUserId) fail(403, 'own_job');
+  if (job!.review_status !== 'approved') fail(404, 'job_not_found');
+  if (await blockedBetweenUsers(c.env, profile.ownerUserId, job!.owner_user_id)) fail(403, 'blocked');
   if (job!.status !== 'published') fail(409, 'job_closed');
   if (job!.deadline && job!.deadline < now()) fail(409, 'deadline_passed');
   if (body.mediaIds.length) {

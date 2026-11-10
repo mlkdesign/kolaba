@@ -9,6 +9,7 @@ let onUnauthorized: (() => void) | null = null;
 let onMustChange: (() => void) | null = null;
 
 export function setSession(next: string | null) { token = next; }
+export const getSession = () => token;
 export function onSessionLost(handler: () => void, mustChange: () => void) { onUnauthorized = handler; onMustChange = mustChange; }
 
 export class ApiError extends Error {
@@ -58,6 +59,11 @@ const messages: Record<string, string> = {
   invalid_request: 'Some fields are invalid. Check the form and try again.',
   payload_too_large: 'The request is too large.',
   internal_error: 'Server error. Try again in a moment.',
+  confirmation_required: 'Confirm this action in the dialog.',
+  report_not_found: 'This report no longer exists.',
+  no_target_account: 'This report has no account to act on.',
+  not_removable: 'This kind of item can’t be removed from here.',
+  feedback_not_found: 'This feedback no longer exists.',
 };
 
 export function errorText(e: unknown): string {

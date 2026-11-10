@@ -35,8 +35,20 @@
     // Admin panel (/v1/admin): the only administrator, and the only origin that may call the admin API. The first
     // password comes from the secret ADMIN_INITIAL_PASSWORD (wrangler secret put) and must be changed at first sign-in.
     "ADMIN_EMAILS": "milka19051995@gmail.com",
-    "ADMIN_ORIGINS": "https://mlkdesign.github.io"
+    "ADMIN_ORIGINS": "https://mlkdesign.github.io",
+    // Paid plans stay off until StoreKit 2 is built: no PRO anywhere, every feature open to everyone.
+    "MONETIZATION_ENABLED": "false",
+    // Moderation / anti-spam limits (see docs/MODERATION.md).
+    "NEW_CONVERSATIONS_PER_DAY": "25",
+    "MESSAGES_BEFORE_REPLY": "5",
+    "MAX_VOICE_KB": "3072",
+    "MAX_VOICE_SECONDS": "300",
+    "MAX_FEEDBACK_ATTACHMENT_MB": "5",
+    "REVIEW_VIDEO_FRAMES": "6",
+    "EVIDENCE_RETENTION_DAYS": "180"
   },
+  // Daily retention job (src/lib/retention.ts).
+  "triggers": { "crons": ["17 3 * * *"] },
   "env": {
     "local": {
       "vars": {
@@ -50,7 +62,15 @@
         "MAX_VIDEO_SECONDS": "60",
         "ADMIN_EMAILS": "milka19051995@gmail.com",
         "ADMIN_ORIGINS": "http://localhost:5174,http://127.0.0.1:5174",
-        "GOOGLE_CLIENT_ID": "888396863806-et1d0p9h08gaptueupl1c9lhg9dlivqa.apps.googleusercontent.com"
+        "GOOGLE_CLIENT_ID": "888396863806-et1d0p9h08gaptueupl1c9lhg9dlivqa.apps.googleusercontent.com",
+        "MONETIZATION_ENABLED": "false",
+        "NEW_CONVERSATIONS_PER_DAY": "25",
+        "MESSAGES_BEFORE_REPLY": "5",
+        "MAX_VOICE_KB": "3072",
+        "MAX_VOICE_SECONDS": "300",
+        "MAX_FEEDBACK_ATTACHMENT_MB": "5",
+        "REVIEW_VIDEO_FRAMES": "6",
+        "EVIDENCE_RETENTION_DAYS": "180"
       },
       "d1_databases": [
         { "binding": "DB", "database_name": "kolaba-db", "database_id": "880ac093-6e95-43b9-8c39-d42a8f539316", "migrations_dir": "migrations" }

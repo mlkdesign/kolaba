@@ -7,6 +7,9 @@ import navUsers from './assets/icons/nav-users.svg';
 import navJobs from './assets/icons/nav-jobs.svg';
 import navMedia from './assets/icons/nav-media.svg';
 import navLogs from './assets/icons/nav-logs.svg';
+import navModeration from './assets/icons/nav-moderation.svg';
+import navReview from './assets/icons/nav-review.svg';
+import navFeedback from './assets/icons/nav-feedback.svg';
 import logoutIcon from './assets/icons/logout.svg';
 import mailIcon from './assets/icons/mail.svg';
 import keyIcon from './assets/icons/key-round.svg';
@@ -18,8 +21,12 @@ import { UserPage, UsersPage } from './pages/users';
 import { JobPage, JobsPage } from './pages/jobs';
 import { MediaPage } from './pages/media';
 import { LogsPage } from './pages/logs';
+import { ModerationPage, ReportPage } from './pages/moderation';
+import { ContentReviewPage } from './pages/review';
+import { FeedbackPage } from './pages/feedback';
 
 interface Admin { email: string; mustChangePassword: boolean }
+interface Counts { reports: number; urgent: number; contentReview: number; feedback: number }
 
 export function App() {
   const [admin, setAdmin] = useState<Admin | null>(null);
@@ -144,6 +151,9 @@ const NAV = [
   { group: 'Overview', items: [{ key: '', label: 'Dashboard', icon: navDashboard }] },
   { group: 'Management', items: [{ key: 'users', label: 'Users', icon: navUsers }, { key: 'jobs', label: 'Jobs', icon: navJobs },
                                  { key: 'media', label: 'Media', icon: navMedia }] },
+  { group: 'Safety', items: [{ key: 'moderation', label: 'Moderation', icon: navModeration, count: 'reports' as const },
+                             { key: 'review', label: 'Content Review', icon: navReview, count: 'contentReview' as const },
+                             { key: 'feedback', label: 'Feedback', icon: navFeedback, count: 'feedback' as const }] },
   { group: 'System', items: [{ key: 'logs', label: 'Activity Logs', icon: navLogs }] },
 ];
 
@@ -151,13 +161,25 @@ function Shell({ admin, onSignOut }: { admin: Admin; onSignOut: () => void }) {
   const route = useRoute();
   const [section, id] = route.path;
   const [passwordOpen, setPasswordOpen] = useState(false);
+  const [counts, setCounts] = useState<Counts | null>(null);
   useEffect(() => { document.querySelector('.content')?.scrollTo(0, 0); }, [section, id]);
+  // Badges for the Safety section: refreshed on navigation and every minute.
+  useEffect(() => {
+    let alive = true;
+    const load = () => api<Counts>('GET', '/counts').then((c) => { if (alive) setCounts(c); }).catch(() => {});
+    load();
+    const timer = setInterval(load, 60_000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [section, id]);
   let page: ReactNode;
   if (!section) page = <DashboardPage />;
   else if (section === 'users') page = id ? <UserPage id={id} /> : <UsersPage />;
   else if (section === 'jobs') page = id ? <JobPage id={id} /> : <JobsPage owner={route.params.get('owner')} />;
   else if (section === 'media') page = <MediaPage owner={route.params.get('owner')} />;
   else if (section === 'logs') page = <LogsPage />;
+  else if (section === 'moderation') page = id ? <ReportPage id={id} /> : <ModerationPage />;
+  else if (section === 'review') page = <ContentReviewPage />;
+  else if (section === 'feedback') page = <FeedbackPage />;
   else page = <NotFound />;
   return (
     <div className="shell">
@@ -172,6 +194,9 @@ function Shell({ admin, onSignOut }: { admin: Admin; onSignOut: () => void }) {
                 return (
                   <a key={item.key} href={href(`/${item.key}`)} className={`nav__item ${active ? 'is-active' : ''}`} aria-current={active ? 'page' : undefined}>
                     <Icon src={item.icon} size={17} />{item.label}
+                    {'count' in item && counts && counts[item.count] > 0 && (
+                      <span className={`nav__count ${item.count === 'reports' && counts.urgent > 0 ? 'is-urgent' : ''}`}>{counts[item.count]}</span>
+                    )}
                   </a>
                 );
               })}

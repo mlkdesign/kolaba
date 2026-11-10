@@ -6,6 +6,7 @@ import type { AppEnv, Env } from '../env';
 import { actingProfile, currentUser, rateLimit, requireAuth, requireProfile } from '../lib/auth';
 import { isPro, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/cards';
 import { fail, newId, now, sha256Hex } from '../lib/util';
+import { checkImage, PUBLIC_REVIEW_PURPOSES } from '../lib/moderation';
 
 const media = new Hono<AppEnv>();
 
@@ -77,10 +78,13 @@ media.post('/uploads', requireAuth, requireProfile, async (c) => {
   const ext = body.mime.split('/')[1].replace('quicktime', 'mov').replace('jpeg', 'jpg');
   const key = `u/${profile.id}/${body.purpose}/${id}.${ext}`;
   await c.env.DB.prepare(`INSERT INTO media (id, owner_profile_id, kind, purpose, provider, storage_key, mime, bytes, width, height,
-      duration, title, poster_media_id, status, is_public, created_at) VALUES (?, ?, ?, ?, 'r2', ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
+      duration, title, poster_media_id, status, is_public, review_status, created_at)
+      VALUES (?, ?, ?, ?, 'r2', ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
     .bind(id, profile.id, body.kind, body.purpose, key, body.mime, body.bytes, body.width ?? null, body.height ?? null,
           body.duration ?? null, body.title ?? null, body.posterMediaId ?? null,
-          ['chat', 'application'].includes(body.purpose) ? 0 : 1, now()).run();
+          ['chat', 'application'].includes(body.purpose) ? 0 : 1,
+          // New public media waits for a moderator before anyone else sees it (App Review 1.2).
+          PUBLIC_REVIEW_PURPOSES.has(body.purpose) ? 'pending' : 'approved', now()).run();
   return c.json({ mediaId: id, uploadUrl: `${c.env.API_URL}/v1/media/uploads/${id}`, method: 'PUT', maxBytes }, 201);
 });
 
@@ -127,6 +131,22 @@ media.put('/uploads/:id', requireAuth, requireProfile, async (c) => {
     fail(422, 'upload_failed');
   }
   await c.env.DB.prepare(`UPDATE media SET status = 'ready' WHERE id = ?`).bind(row!.id).run();
+  // Optional automatic pre-check (only when configured): a likely-unsafe photo or video poster is marked 'flagged' so
+  // moderators see it first. It never approves anything by itself.
+  if (row!.kind === 'photo' && c.env.GOOGLE_VISION_API_KEY && ['pending', 'flagged'].includes(row!.review_status ?? '')) {
+    c.executionCtx.waitUntil((async () => {
+      const object = await c.env.MEDIA!.get(row!.storage_key);
+      if (!object) return;
+      const verdict = await checkImage(c.env, await object.arrayBuffer());
+      if (!verdict.checked) return;
+      const target = row!.purpose === 'poster'
+        ? await c.env.DB.prepare(`SELECT id FROM media WHERE poster_media_id = ? LIMIT 1`).bind(row!.id).first<{ id: string }>()
+        : null;
+      await c.env.DB.prepare(`UPDATE media SET auto_flags = ?, review_status = CASE WHEN ? AND review_status = 'pending' THEN 'flagged'
+          ELSE review_status END WHERE id IN (?, ?)`)
+        .bind(JSON.stringify({ vision: verdict.detail }), verdict.flagged ? 1 : 0, row!.id, target?.id ?? row!.id).run();
+    })().catch(() => {}));
+  }
   return c.json(mediaJSON(c.env, { ...row!, status: 'ready' } as MediaRow));
 });
 
@@ -140,16 +160,59 @@ export async function signedMediaURL(env: Env, id: string): Promise<string> {
   return `${env.API_URL}/v1/media/${id}/file?exp=${expires}&sig=${await signature(env, id, expires)}`;
 }
 
+/** A time-limited URL for a voice message (participants only receive it). */
+export async function signedVoiceURL(env: Env, messageId: string): Promise<string> {
+  const expires = now() + 3_600_000;
+  return `${env.API_URL}/v1/media/voice/${messageId}?exp=${expires}&sig=${await signature(env, `voice:${messageId}`, expires)}`;
+}
+
+// GET /v1/media/voice/:messageId?exp&sig — a voice message's audio (signed URL, Range for AVPlayer).
+media.get('/voice/:messageId', async (c) => {
+  const id = c.req.param('messageId');
+  const exp = Number(c.req.query('exp'));
+  if (!exp || exp < now() || c.req.query('sig') !== (await signature(c.env, `voice:${id}`, exp))) fail(403, 'forbidden');
+  const row = await c.env.DB.prepare(`SELECT v.storage_key, v.mime FROM message_voice v JOIN messages m ON m.id = v.message_id
+      WHERE v.message_id = ? AND m.deleted_at IS NULL`).bind(id).first<{ storage_key: string; mime: string }>();
+  if (!row || !c.env.MEDIA) fail(404, 'media_not_found');
+  const rangeHeader = c.req.header('Range');
+  const m = rangeHeader ? /^bytes=(\d*)-(\d*)$/.exec(rangeHeader) : null;
+  let range: R2Range | undefined;
+  if (m) {
+    if (m[1] === '' && m[2] !== '') range = { suffix: Number(m[2]) };
+    else if (m[2] === '') range = { offset: Number(m[1]) };
+    else range = { offset: Number(m[1]), length: Number(m[2]) - Number(m[1]) + 1 };
+  }
+  const object = await c.env.MEDIA!.get(row!.storage_key, range ? { range } : undefined);
+  if (!object) fail(404, 'media_not_found');
+  const headers = new Headers({ 'Content-Type': row!.mime, 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=3600',
+                                'X-Content-Type-Options': 'nosniff' });
+  if (range && object!.range) {
+    const r = object!.range as { offset?: number; length?: number; suffix?: number };
+    const size = object!.size;
+    const start = r.suffix !== undefined ? size - r.suffix : (r.offset ?? 0);
+    const length = r.suffix !== undefined ? r.suffix : (r.length ?? size - start);
+    headers.set('Content-Range', `bytes ${start}-${start + length - 1}/${size}`);
+    headers.set('Content-Length', String(length));
+    return new Response(object!.body, { status: 206, headers });
+  }
+  headers.set('Content-Length', String(object!.size));
+  return new Response(object!.body, { status: 200, headers });
+});
+
 // GET /v1/media/:id/file — the bytes, with Range support. Public files are cacheable; private ones need a signature.
 media.get('/:id/file', async (c) => {
-  const row = await c.env.DB.prepare(`SELECT storage_key, provider, url, mime, is_public, status FROM media WHERE id = ?`)
-    .bind(c.req.param('id')).first<{ storage_key: string | null; provider: string; url: string | null; mime: string; is_public: number; status: string }>();
+  const row = await c.env.DB.prepare(`SELECT storage_key, provider, url, mime, is_public, status, review_status FROM media WHERE id = ?`)
+    .bind(c.req.param('id')).first<{ storage_key: string | null; provider: string; url: string | null; mime: string; is_public: number;
+                                     status: string; review_status: string }>();
   if (!row || row.status !== 'ready') fail(404, 'media_not_found');
-  if (row!.provider === 'external') return c.redirect(row!.url!, 302);
-  if (!row!.is_public) {
+  // Rejected / removed files are evidence only: served to the admin panel through signed URLs, never publicly.
+  const restricted = !row!.is_public || ['rejected', 'removed'].includes(row!.review_status);
+  if (row!.provider === 'external' && !restricted) return c.redirect(row!.url!, 302);
+  if (restricted) {
     const exp = Number(c.req.query('exp'));
     if (!exp || exp < now() || c.req.query('sig') !== (await signature(c.env, c.req.param('id'), exp))) fail(403, 'forbidden');
   }
+  if (row!.provider === 'external') return c.redirect(row!.url!, 302);
   if (!c.env.MEDIA) fail(503, 'storage_unavailable');
   const rangeHeader = c.req.header('Range');
   let range: R2Range | undefined;
@@ -165,7 +228,7 @@ media.get('/:id/file', async (c) => {
   object!.writeHttpMetadata(headers);
   headers.set('Accept-Ranges', 'bytes');
   headers.set('ETag', object!.httpEtag);
-  headers.set('Cache-Control', row!.is_public ? 'public, max-age=86400' : 'private, max-age=3600');
+  headers.set('Cache-Control', !restricted && row!.review_status === 'approved' ? 'public, max-age=86400' : 'private, max-age=3600');
   headers.set('X-Content-Type-Options', 'nosniff');
   if (range && 'range' in object! && object!.range) {
     const r = object!.range as { offset?: number; length?: number; suffix?: number };
@@ -209,7 +272,8 @@ media.delete('/:id', requireAuth, requireProfile, async (c) => {
 media.put('/:id/like', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c);
   const id = c.req.param('id');
-  const target = await c.env.DB.prepare(`SELECT owner_profile_id FROM media WHERE id = ? AND status = 'ready' AND is_public = 1`)
+  const target = await c.env.DB.prepare(`SELECT owner_profile_id FROM media WHERE id = ? AND status = 'ready' AND is_public = 1
+      AND review_status = 'approved'`)
     .bind(id).first<{ owner_profile_id: string }>();
   if (!target) fail(404, 'media_not_found');
   const res = await c.env.DB.prepare(`INSERT OR IGNORE INTO likes (media_id, profile_id, created_at) VALUES (?, ?, ?)`)
@@ -313,7 +377,9 @@ media.get('/collections/:id/items', async (c) => {
       WHERE col.id = ?`).bind(id).first<Record<string, any>>();
   if (!col || (col.visibility !== 'public' && col.owner_user_id !== c.get('user')?.id)) fail(404, 'collection_not_found');
   const rows = await c.env.DB.prepare(`SELECT ${mediaColumns} FROM collection_items ci JOIN media m ON m.id = ci.media_id
-      WHERE ci.collection_id = ? AND m.status = 'ready' ORDER BY ci.position`).bind(id).all<MediaRow>();
+      WHERE ci.collection_id = ? AND m.status = 'ready'
+        AND ${col!.owner_user_id === c.get('user')?.id ? "m.review_status IN ('approved', 'pending', 'flagged')" : "m.review_status = 'approved'"}
+      ORDER BY ci.position`).bind(id).all<MediaRow>();
   return c.json({ collection: { id: col!.id, title: col!.title, description: col!.description, visibility: col!.visibility },
                   items: rows.results.map((m) => mediaJSON(c.env, m)) });
 });

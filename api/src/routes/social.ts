@@ -6,6 +6,7 @@ import { actingProfile, currentUser, rateLimit, requireAuth, requireProfile } fr
 import { audit, avatarJoin, card, cardColumns, type CardRow, loadCards, mediaColumns, mediaJSON, type MediaRow } from '../lib/cards';
 import { clampLimit, decodeCursor, encodeCursor, fail, newId, now } from '../lib/util';
 import { conversationList } from './messages';
+import { notBlockedSQL } from '../lib/moderation';
 import { jobsJSON } from './jobs';
 
 export const notifications = new Hono<AppEnv>();
@@ -29,7 +30,7 @@ notifications.get('/', async (c) => {
   const mediaIds = [...new Set(payloads.map((p) => p.mediaId).filter(Boolean))] as string[];
   const actorIds = [...new Set(page.map((n) => n.actor_profile_id).filter(Boolean))] as string[];
   const [mediaRows, followRows] = await Promise.all([
-    mediaIds.length ? c.env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.id IN (${mediaIds.map(() => '?').join(',')}) AND m.status = 'ready'`)
+    mediaIds.length ? c.env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.id IN (${mediaIds.map(() => '?').join(',')}) AND m.status = 'ready' AND m.review_status = 'approved'`)
       .bind(...mediaIds).all<MediaRow>() : Promise.resolve({ results: [] as MediaRow[] }),
     actorIds.length ? c.env.DB.prepare(`SELECT followee_profile_id AS id FROM follows WHERE follower_profile_id = ? AND followee_profile_id IN (${actorIds.map(() => '?').join(',')})`)
       .bind(profile.id, ...actorIds).all<{ id: string }>() : Promise.resolve({ results: [] as { id: string }[] }),
@@ -88,9 +89,10 @@ reels.get('/', requireAuth, requireProfile, async (c) => {
         EXISTS (SELECT 1 FROM likes l WHERE l.media_id = m.id AND l.profile_id = ?1) AS is_liked
       FROM media m JOIN profiles p ON p.id = m.owner_profile_id AND p.status = 'active' AND p.type = 'creator'
       WHERE m.kind = 'video' AND m.purpose IN ('portfolio', 'intro') AND m.status = 'ready' AND m.is_public = 1
+        AND m.review_status = 'approved' AND ${notBlockedSQL('p.owner_user_id', '?5')}
         AND (?2 IS NULL OR (m.created_at, m.id) < (?2, ?3))
       ORDER BY m.created_at DESC, m.id DESC LIMIT ?4`)
-    .bind(profile.id, cursor?.t ?? null, cursor?.id ?? null, limit + 1).all<MediaRow & { is_liked: number }>();
+    .bind(profile.id, cursor?.t ?? null, cursor?.id ?? null, limit + 1, profile.ownerUserId).all<MediaRow & { is_liked: number }>();
   const page = rows.results.slice(0, limit);
   const authors = await loadCards(c.env, page.map((m) => m.owner_profile_id));
   const last = rows.results.length > limit ? page[page.length - 1] : null;
@@ -108,7 +110,9 @@ reels.get('/creators', requireAuth, requireProfile, async (c) => {
   const cursor = decodeCursor<{ t: number; id: string }>(c.req.query('cursor'));
   const creators = await c.env.DB.prepare(`SELECT p.id, MAX(m.created_at) AS latest FROM profiles p
       JOIN media m ON m.owner_profile_id = p.id AND m.kind = 'video' AND m.purpose IN ('portfolio', 'intro') AND m.status = 'ready' AND m.is_public = 1
+        AND m.review_status = 'approved'
       WHERE p.type = 'creator' AND p.status = 'active' AND p.visibility = 'public' AND p.owner_user_id <> ?4
+        AND ${notBlockedSQL('p.owner_user_id', '?4')}
       GROUP BY p.id HAVING (?1 IS NULL OR (MAX(m.created_at), p.id) < (?1, ?2))
       ORDER BY latest DESC, p.id DESC LIMIT ?3`).bind(cursor?.t ?? null, cursor?.id ?? null, limit + 1, profile.ownerUserId).all<{ id: string; latest: number }>();
   const page = creators.results.slice(0, limit);
@@ -119,7 +123,7 @@ reels.get('/creators', requireAuth, requireProfile, async (c) => {
     loadCards(c.env, ids),
     c.env.DB.prepare(`SELECT ${mediaColumns}, EXISTS (SELECT 1 FROM likes l WHERE l.media_id = m.id AND l.profile_id = ?) AS is_liked
         FROM media m WHERE m.owner_profile_id IN (${marks}) AND m.kind = 'video' AND m.purpose IN ('portfolio', 'intro')
-        AND m.status = 'ready' AND m.is_public = 1 ORDER BY m.position, m.created_at DESC`).bind(profile.id, ...ids).all<MediaRow & { is_liked: number }>(),
+        AND m.status = 'ready' AND m.is_public = 1 AND m.review_status = 'approved' ORDER BY m.position, m.created_at DESC`).bind(profile.id, ...ids).all<MediaRow & { is_liked: number }>(),
     c.env.DB.prepare(`SELECT followee_profile_id FROM follows WHERE follower_profile_id = ? AND followee_profile_id IN (${marks})`)
       .bind(profile.id, ...ids).all<{ followee_profile_id: string }>(),
     c.env.DB.prepare(`SELECT id, bio FROM profiles WHERE id IN (${marks})`).bind(...ids).all<{ id: string; bio: string }>(),
@@ -158,15 +162,15 @@ search.get('/', requireAuth, requireProfile, async (c) => {
   const like = `%${q}%`;
   const want = (s: string) => scope === 'all' || scope === s;
   const profilesOf = async (type: string) => want(`${type}s`)
-    ? (await c.env.DB.prepare(`SELECT ${cardColumns} FROM profiles p ${avatarJoin} WHERE p.type = ? AND p.status = 'active'
-          AND p.visibility = 'public' AND lower(p.display_name || ' ' || p.username || ' ' || COALESCE(p.category, '') || ' ' ||
-          COALESCE(p.city, '') || ' ' || COALESCE(p.country, '')) LIKE ? ORDER BY lower(p.display_name) LIMIT 20`)
-        .bind(type, like).all<CardRow>()).results.map((r) => card(c.env, r))
+    ? (await c.env.DB.prepare(`SELECT ${cardColumns} FROM profiles p ${avatarJoin} WHERE p.type = ?1 AND p.status = 'active'
+          AND p.visibility = 'public' AND ${notBlockedSQL('p.owner_user_id', '?3')} AND lower(p.display_name || ' ' || p.username || ' ' || COALESCE(p.category, '') || ' ' ||
+          COALESCE(p.city, '') || ' ' || COALESCE(p.country, '')) LIKE ?2 ORDER BY lower(p.display_name) LIMIT 20`)
+        .bind(type, like, profile.ownerUserId).all<CardRow>()).results.map((r) => card(c.env, r))
     : [];
   const [creators, businesses, jobRows, contactRows, messageRows] = await Promise.all([
     profilesOf('creator'),
     profilesOf('business'),
-    want('jobs') ? c.env.DB.prepare(`SELECT * FROM jobs WHERE status = 'published' AND lower(title || ' ' || description || ' ' ||
+    want('jobs') ? c.env.DB.prepare(`SELECT * FROM jobs WHERE status = 'published' AND review_status = 'approved' AND lower(title || ' ' || description || ' ' ||
         location || ' ' || tags) LIKE ? ORDER BY published_at DESC LIMIT 20`).bind(like).all<Record<string, any>>() : null,
     want('contacts') ? c.env.DB.prepare(`SELECT CASE WHEN cr.sender_profile_id = ?1 THEN cr.recipient_profile_id ELSE cr.sender_profile_id END AS id
         FROM contact_requests cr JOIN profiles p ON p.id = CASE WHEN cr.sender_profile_id = ?1 THEN cr.recipient_profile_id ELSE cr.sender_profile_id END
@@ -210,20 +214,5 @@ sync.get('/', requireAuth, requireProfile, async (c) => {
 export async function chatListFor(env: any, profileId: string) {
   return conversationList(env, profileId, 50, null);
 }
-
-// ─── Reports ───
-
-export const reports = new Hono<AppEnv>();
-reports.post('/', requireAuth, requireProfile, async (c) => {
-  const profile = actingProfile(c);
-  await rateLimit(c, 'RL_WRITE', `report:${profile.ownerUserId}`);
-  const body = z.object({ targetType: z.enum(['profile', 'media', 'job', 'message', 'review']), targetId: z.string().max(80),
-                          reason: z.enum(['spam', 'scam', 'inappropriate', 'harassment', 'other']), details: z.string().max(1000).optional() })
-    .parse(await c.req.json());
-  const id = newId('rep');
-  await c.env.DB.prepare(`INSERT INTO reports (id, reporter_profile_id, target_type, target_id, reason, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, profile.id, body.targetType, body.targetId, body.reason, body.details ?? null, now()).run();
-  return c.json({ id, status: 'open' }, 201);
-});
 
 // Admin: see routes/admin.ts (separate admin accounts and sessions).

@@ -3,7 +3,8 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, currentUser, rateLimit, requireAuth, requireProfile } from '../lib/auth';
-import { avatarJoin, card, cardColumns, type CardRow, isPro, loadCard, mediaColumns, mediaJSON, type MediaRow } from '../lib/cards';
+import { avatarJoin, avatarJoinOwner, card, cardColumns, type CardRow, isPro, loadCard, mediaColumns, mediaJSON, type MediaRow } from '../lib/cards';
+import { assertCanPost, autoReport, checkText, monetizationEnabled, notBlockedSQL, visibleMediaSQL } from '../lib/moderation';
 import { clampLimit, decodeCursor, encodeCursor, fail, newId, now, parseJSON } from '../lib/util';
 
 const profiles = new Hono<AppEnv>();
@@ -11,16 +12,20 @@ export const MAX_BUSINESS_PROFILES = 5;
 
 /** The account's profiles (creator first), each with its entitlements. */
 export async function profilesOf(env: Env, userId: string) {
-  const rows = await env.DB.prepare(`SELECT ${cardColumns} FROM profiles p ${avatarJoin}
+  const rows = await env.DB.prepare(`SELECT ${cardColumns} FROM profiles p ${avatarJoinOwner}
       WHERE p.owner_user_id = ? AND p.status <> 'deleted' ORDER BY p.type = 'business', p.created_at`).bind(userId).all<CardRow>();
-  return rows.results.map((r) => ({ ...card(env, r), entitlements: entitlements(r.type as 'creator' | 'business', r.is_pro === 1) }));
+  return rows.results.map((r) => ({ ...card(env, r),
+    entitlements: entitlements(r.type as 'creator' | 'business', r.is_pro === 1, monetizationEnabled(env)) }));
 }
 
 /** What a profile may do (AccountCapabilities in the iOS app), decided here. */
-export function entitlements(type: 'creator' | 'business', pro: boolean) {
+export function entitlements(type: 'creator' | 'business', subscribed: boolean, monetization: boolean) {
+  // While paid plans are off, nothing is PRO and every feature is open (there is nothing to buy).
+  const pro = monetization ? subscribed : true;
   return {
     plan: type === 'creator' ? 'creator_pro' : 'business_pro',
-    isPro: pro,
+    isPro: monetization && subscribed,
+    monetizationEnabled: monetization,
     canCreateJobs: type === 'business',
     canApply: type === 'creator',
     canAttachMediaToApplications: type === 'creator' && pro,
@@ -100,7 +105,9 @@ profiles.post('/', requireAuth, async (c) => {
     c.env.DB.prepare(`INSERT INTO profile_settings (profile_id) VALUES (?)`).bind(id),
   ]);
   await saveLinks(c.env, id, body.links);
-  return c.json(await loadCard(c.env, id), 201);
+  const verdict = checkText(body.displayName, body.bio);
+  if (verdict.flagged) await autoReport(c.env, { type: 'user', id, profileId: id }, verdict, `${body.displayName}\n${body.bio ?? ''}`);
+  return c.json(await loadCard(c.env, id, true), 201);
 });
 
 // PATCH /v1/profiles/:id — the owner edits; only the given fields change.
@@ -142,6 +149,12 @@ profiles.patch('/:id', requireAuth, async (c) => {
   // A business replacing its logo: the previous photo is retired (one photo only — FEATURE 19).
   const previous = body.avatarMediaId ? await c.env.DB.prepare(`SELECT type, avatar_media_id FROM profiles WHERE id = ?`).bind(id)
     .first<{ type: string; avatar_media_id: string | null }>() : null;
+  if (body.bio !== undefined || body.displayName !== undefined) {
+    const verdict = checkText(body.displayName, body.bio);
+    if (verdict.flagged) {
+      await autoReport(c.env, { type: 'user', id, profileId: id }, verdict, `${body.displayName ?? ''}\n${body.bio ?? ''}`);
+    }
+  }
   const set = Object.entries(columns).filter(([, v]) => v !== undefined);
   if (set.length) {
     await c.env.DB.prepare(`UPDATE profiles SET ${set.map(([k]) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`)
@@ -197,8 +210,10 @@ profiles.get('/', async (c) => {
         AND (?2 = '' OR lower(p.display_name || ' ' || p.username || ' ' || COALESCE(p.category, '') || ' ' ||
              COALESCE(p.city, '') || ' ' || COALESCE(p.country, '')) LIKE '%' || ?2 || '%')
         AND (?3 IS NULL OR (lower(p.display_name), p.id) > (?3, ?4))
+        AND (?6 IS NULL OR ${notBlockedSQL('p.owner_user_id', '?6')})
       ORDER BY lower(p.display_name), p.id LIMIT ?5`)
-    .bind(type === 'creator' || type === 'business' ? type : null, q, cursor?.n ?? null, cursor?.id ?? null, limit + 1).all<CardRow & { bio: string | null }>();
+    .bind(type === 'creator' || type === 'business' ? type : null, q, cursor?.n ?? null, cursor?.id ?? null, limit + 1,
+          c.get('user')?.id ?? null).all<CardRow & { bio: string | null }>();
   const items = rows.results.slice(0, limit).map((r) => ({ ...card(c.env, r), bio: r.bio ?? '' }));
   const last = rows.results.length > limit ? rows.results[limit - 1] : null;
   return c.json({ items, nextCursor: last ? encodeCursor({ n: last.display_name.toLowerCase(), id: last.id }) : null });
@@ -212,21 +227,23 @@ export async function profilePage(env: Env, id: string, viewerUserId: string | n
   if (!p || p.status === 'deleted') fail(404, 'profile_not_found');
   const isOwner = p!.owner_user_id === viewerUserId;
   if (!isOwner && p!.status !== 'active') fail(404, 'profile_not_found');
-  const base = (await loadCard(env, id))!;
+  const base = (await loadCard(env, id, isOwner))!;
   const [links, social, ratings, intro, counts] = await Promise.all([
     env.DB.prepare(`SELECT kind, url FROM profile_links WHERE profile_id = ? ORDER BY position`).bind(id).all<{ kind: string; url: string }>(),
     env.DB.prepare(`SELECT platform, handle, followers FROM profile_social_accounts WHERE profile_id = ?`).bind(id).all(),
     env.DB.prepare(`SELECT AVG((quality + speed + contact) / 3.0) AS rating, AVG(quality) AS quality, AVG(speed) AS speed,
-                    AVG(contact) AS contact, COUNT(*) AS count FROM reviews WHERE recipient_profile_id = ? AND status = 'published'`)
+                    AVG(contact) AS contact, COUNT(*) AS count FROM reviews WHERE recipient_profile_id = ? AND status = 'published' AND review_status = 'approved'`)
       .bind(id).first(),
     p!.intro_video_media_id
-      ? env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.id = ? AND m.status = 'ready'`).bind(p!.intro_video_media_id).first<MediaRow>()
+      ? env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.id = ? AND m.status = 'ready'
+          AND ${isOwner ? "m.review_status IN ('approved', 'pending', 'flagged')" : "m.review_status = 'approved'"}`)
+          .bind(p!.intro_video_media_id).first<MediaRow>()
       : Promise.resolve(null),
     env.DB.prepare(`SELECT
-        (SELECT COUNT(*) FROM media WHERE owner_profile_id = ?1 AND purpose = 'portfolio' AND status = 'ready') AS portfolio,
+        (SELECT COUNT(*) FROM media WHERE owner_profile_id = ?1 AND purpose = 'portfolio' AND status = 'ready' AND review_status = 'approved') AS portfolio,
         (SELECT COUNT(*) FROM jobs WHERE owner_profile_id = ?1 AND status = 'published') AS jobs,
         (SELECT COUNT(*) FROM contact_requests WHERE status = 'accepted' AND (sender_profile_id = ?1 OR recipient_profile_id = ?1)) AS contacts,
-        (SELECT COALESCE(SUM(likes_count), 0) FROM media WHERE owner_profile_id = ?1 AND status = 'ready') AS likes,
+        (SELECT COALESCE(SUM(likes_count), 0) FROM media WHERE owner_profile_id = ?1 AND status = 'ready' AND review_status = 'approved') AS likes,
         (SELECT COUNT(*) FROM follows WHERE followee_profile_id = ?1) AS followers,
         (SELECT COUNT(*) FROM follows WHERE follower_profile_id = ?1) AS following`)
       .bind(id).first(),
@@ -251,20 +268,23 @@ export async function profilePage(env: Env, id: string, viewerUserId: string | n
     isOwner,
     settings: isOwner ? { showLocation: p!.show_location === 1, whoCanMessage: p!.who_can_message, showLinks: p!.show_links === 1,
                           hideJobPosts: p!.hide_job_posts === 1 } : undefined,
-    entitlements: isOwner ? entitlements(p!.type, base.isPro) : undefined,
+    entitlements: isOwner ? entitlements(p!.type, await isSubscribed(env, id), monetizationEnabled(env)) : undefined,
   };
 }
 
 // GET /v1/profiles/:id
 profiles.get('/:id', async (c) => c.json(await profilePage(c.env, c.req.param('id'), c.get('user')?.id ?? null)));
 
-// GET /v1/profiles/:id/media?purpose=portfolio&kind=video — a profile's public media grid, newest first.
+// GET /v1/profiles/:id/media?purpose=portfolio&kind=video — a profile's public media grid, newest first. Others see
+// approved items only; the owner also sees what waits for review (reviewStatus pending / flagged → "Pending review").
 profiles.get('/:id/media', async (c) => {
   const id = c.req.param('id');
   const purpose = c.req.query('purpose') ?? 'portfolio';
   const kind = c.req.query('kind');
-  const rows = await c.env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.owner_profile_id = ? AND m.purpose = ?
-      AND m.status = 'ready' AND m.is_public = 1 AND (?3 IS NULL OR m.kind = ?3) ORDER BY m.position, m.created_at DESC LIMIT 100`)
+  const isOwner = await ownedByViewer(c.env, id, c.get('user')?.id);
+  const rows = await c.env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.owner_profile_id = ?1 AND m.purpose = ?2
+      AND m.status = 'ready' AND m.is_public = 1 AND (?3 IS NULL OR m.kind = ?3) AND ${visibleMediaSQL('m', isOwner ? '?1' : undefined)}
+      ORDER BY m.position, m.created_at DESC LIMIT 100`)
     .bind(id, purpose, kind === 'photo' || kind === 'video' ? kind : null).all<MediaRow>();
   return c.json({ items: rows.results.map((m) => mediaJSON(c.env, m)) });
 });
@@ -275,13 +295,14 @@ profiles.get('/:id/collections', async (c) => {
   const isOwner = c.get('user') ? (await c.env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(id)
     .first<{ owner_user_id: string }>())?.owner_user_id === c.get('user')!.id : false;
   const rows = await c.env.DB.prepare(`SELECT col.*, (SELECT COUNT(*) FROM collection_items ci JOIN media m ON m.id = ci.media_id
-        AND m.status = 'ready' WHERE ci.collection_id = col.id) AS items_count,
+        AND m.status = 'ready' AND ${visibleMediaSQL('m', isOwner ? 'col.owner_profile_id' : undefined)} WHERE ci.collection_id = col.id) AS items_count,
       COALESCE(col.cover_media_id, (SELECT ci.media_id FROM collection_items ci WHERE ci.collection_id = col.id ORDER BY ci.position LIMIT 1)) AS cover_id
       FROM collections col WHERE col.owner_profile_id = ? AND (? OR col.visibility = 'public') ORDER BY col.sort_order, col.created_at`)
     .bind(id, isOwner ? 1 : 0).all<Record<string, any>>();
   const coverIds = rows.results.map((r) => r.cover_id).filter(Boolean);
   const covers = coverIds.length
-    ? await c.env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.id IN (${coverIds.map(() => '?').join(',')})`)
+    ? await c.env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.id IN (${coverIds.map(() => '?').join(',')})
+        AND ${isOwner ? "m.review_status IN ('approved', 'pending', 'flagged')" : "m.review_status = 'approved'"}`)
         .bind(...coverIds).all<MediaRow>()
     : { results: [] as MediaRow[] };
   const coverMap = new Map(covers.results.map((m) => [m.id, mediaJSON(c.env, m)]));
@@ -352,3 +373,15 @@ profiles.get('/:id/follow', requireAuth, requireProfile, async (c) => {
 });
 
 export default profiles;
+
+async function isSubscribed(env: Env, profileId: string): Promise<boolean> {
+  const row = await env.DB.prepare(`SELECT 1 AS ok FROM subscriptions WHERE profile_id = ? AND status = 'active'
+      AND (expires_at IS NULL OR expires_at > ?)`).bind(profileId, now()).first();
+  return Boolean(row);
+}
+
+async function ownedByViewer(env: Env, profileId: string, userId: string | undefined): Promise<boolean> {
+  if (!userId) return false;
+  const row = await env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(profileId).first<{ owner_user_id: string }>();
+  return row?.owner_user_id === userId;
+}

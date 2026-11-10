@@ -39,6 +39,24 @@ export interface Env {
   /** Secret: the first administrator password. Used once to create the admins row, then never read again. */
   ADMIN_INITIAL_PASSWORD?: string;
 
+  /** "true" switches paid plans on (StoreKit 2 not built yet). Anything else: no PRO anywhere, every feature open. */
+  MONETIZATION_ENABLED?: string;
+  /** Secret, optional: Google Cloud Vision key for automatic SafeSearch pre-checks of public photos. Unset = off
+   *  (everything still goes to manual review). Setting it requires a Privacy Policy update first. */
+  GOOGLE_VISION_API_KEY?: string;
+  /** Messaging anti-spam: new conversations an account may open per day; messages before the other side replies. */
+  NEW_CONVERSATIONS_PER_DAY?: string;
+  MESSAGES_BEFORE_REPLY?: string;
+  /** Voice messages: size and length limits. */
+  MAX_VOICE_KB?: string;
+  MAX_VOICE_SECONDS?: string;
+  /** Feedback screenshots: size limit. */
+  MAX_FEEDBACK_ATTACHMENT_MB?: string;
+  /** Video review frames the admin panel extracts for a quick look (the video itself is always reviewed manually). */
+  REVIEW_VIDEO_FRAMES?: string;
+  /** Days a closed report's shared messages are kept before they are purged (scheduled job). */
+  EVIDENCE_RETENTION_DAYS?: string;
+
   /** Secrets. */
   RESEND_API_KEY?: string;
   /** HMAC key for signed media URLs of private files. */

@@ -6,6 +6,8 @@ import type { AppEnv, Env } from '../env';
 import { actingProfile, currentUser, requireAuth, requireProfile } from '../lib/auth';
 import { fail, newId, now } from '../lib/util';
 import { canTestPro } from './auth';
+import { monetizationEnabled } from '../lib/moderation';
+import { verifyPassword } from '../lib/password';
 
 const me = new Hono<AppEnv>();
 me.use('*', requireAuth);
@@ -42,6 +44,7 @@ me.put('/pro-test', requireProfile, async (c) => {
   const profile = actingProfile(c);
   const row = await c.env.DB.prepare(`SELECT role, email, email_verification FROM users WHERE id = ?`).bind(user.id)
     .first<{ role: string; email: string; email_verification: string | null }>();
+  if (!monetizationEnabled(c.env)) fail(403, 'monetization_disabled');
   if (!row || !canTestPro(c.env, row)) fail(403, 'pro_test_not_allowed');
   const { pro } = z.object({ pro: z.boolean() }).parse(await c.req.json());
   await c.env.DB.prepare(`UPDATE subscriptions SET status = 'cancelled', expires_at = ? WHERE profile_id = ? AND status = 'active'`)
@@ -58,7 +61,9 @@ me.put('/pro-test', requireProfile, async (c) => {
  *  files are deleted after the rows; a file that fails is reported, never blocks the deletion. */
 export async function deleteAccount(env: Env, userId: string): Promise<{ profiles: number; files: number; filesFailed: string[] }> {
   const P = `(SELECT id FROM profiles WHERE owner_user_id = ?1)`;
-  const files = await env.DB.prepare(`SELECT storage_key FROM media WHERE owner_profile_id IN ${P} AND provider = 'r2' AND storage_key IS NOT NULL`)
+  const files = await env.DB.prepare(`SELECT storage_key FROM media WHERE owner_profile_id IN ${P} AND provider = 'r2' AND storage_key IS NOT NULL
+      UNION ALL SELECT storage_key FROM message_voice WHERE message_id IN (SELECT id FROM messages WHERE sender_profile_id IN ${P})
+      UNION ALL SELECT attachment_key FROM feedback WHERE user_id = ?1 AND attachment_key IS NOT NULL`)
     .bind(userId).all<{ storage_key: string }>();
   const count = await env.DB.prepare(`SELECT COUNT(*) AS n FROM profiles WHERE owner_user_id = ?`).bind(userId).first<{ n: number }>();
   const statements = [
@@ -82,7 +87,12 @@ export async function deleteAccount(env: Env, userId: string): Promise<{ profile
     `DELETE FROM reviews WHERE author_user_id = ?1 OR author_profile_id IN ${P} OR recipient_profile_id IN ${P}`,
     `DELETE FROM review_invites WHERE owner_profile_id IN ${P} OR accepted_by_profile_id IN ${P}`,
     `DELETE FROM notifications WHERE recipient_profile_id IN ${P} OR actor_profile_id IN ${P}`,
-    `DELETE FROM reports WHERE reporter_profile_id IN ${P}`,
+    // Reports this account filed stay for the moderators, without the reporter (DATA_RETENTION.md).
+    `UPDATE reports SET reporter_user_id = NULL, reporter_profile_id = NULL WHERE reporter_user_id = ?1 OR reporter_profile_id IN ${P}`,
+    `DELETE FROM message_reactions WHERE profile_id IN ${P} OR message_id IN (SELECT id FROM messages WHERE sender_profile_id IN ${P})`,
+    `DELETE FROM message_voice WHERE message_id IN (SELECT id FROM messages WHERE sender_profile_id IN ${P})`,
+    `DELETE FROM blocks WHERE blocker_user_id = ?1 OR blocked_user_id = ?1`,
+    `DELETE FROM feedback WHERE user_id = ?1`,
     `DELETE FROM conversation_read_state WHERE profile_id IN ${P}`,
     `DELETE FROM conversation_participants WHERE profile_id IN ${P}`,
     // A conversation nobody is left in goes too.
@@ -111,12 +121,18 @@ export async function deleteAccount(env: Env, userId: string): Promise<{ profile
   return { profiles: count?.n ?? 0, files: files.results.length - failed.length, filesFailed: failed };
 }
 
-// DELETE /v1/me {confirm: "DELETE"} — the account and everything it owns; the sessions end with it.
+// DELETE /v1/me {confirm: "DELETE", password?} — the account and everything it owns; the sessions end with it. An account
+// with a password confirms it again here (re-authentication); a Google-only account confirms with "DELETE".
 me.delete('/', async (c) => {
   const user = currentUser(c);
-  const { confirm } = z.object({ confirm: z.literal('DELETE') }).parse(await c.req.json());
-  void confirm;
+  const body = z.object({ confirm: z.literal('DELETE'), password: z.string().min(1).max(200).optional() }).parse(await c.req.json());
   if (user.isDemo) fail(403, 'demo_account');
+  const creds = await c.env.DB.prepare(`SELECT password_hash, password_salt, password_scheme FROM users WHERE id = ?`).bind(user.id)
+    .first<{ password_hash: string | null; password_salt: string | null; password_scheme: string | null }>();
+  if (creds?.password_hash && creds.password_salt && creds.password_scheme) {
+    if (!body.password) fail(401, 'password_required');
+    if (!(await verifyPassword(body.password!, creds.password_hash, creds.password_salt, creds.password_scheme))) fail(401, 'invalid_credentials');
+  }
   const result = await deleteAccount(c.env, user.id);
   await c.env.DB.prepare(`INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, detail, created_at)
       VALUES (NULL, 'account.deleted', 'user', ?, ?, ?)`).bind(user.id, JSON.stringify(result), now()).run();

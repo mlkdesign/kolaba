@@ -1,5 +1,6 @@
 // Contacts: request → accept / decline; cancel; remove. Between profiles of different accounts only.
 import { Hono } from 'hono';
+import { blockedBetweenUsers } from '../lib/moderation';
 import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, rateLimit, requireAuth, requireProfile } from '../lib/auth';
@@ -63,6 +64,7 @@ contacts.post('/requests', async (c) => {
     .first<{ owner_user_id: string; status: string }>();
   if (!target || target.status !== 'active') fail(404, 'profile_not_found');
   if (target!.owner_user_id === profile.ownerUserId) fail(422, 'same_account');
+  if (await blockedBetweenUsers(c.env, profile.ownerUserId, target!.owner_user_id)) fail(403, 'blocked');
   const current = await relation(c.env, profile.id, profile.ownerUserId, profileId);
   if (current.relation === 'incoming') {
     await c.env.DB.prepare(`UPDATE contact_requests SET status = 'accepted', responded_at = ? WHERE id = ?`).bind(now(), current.requestId).run();

@@ -6,6 +6,10 @@ import { clientIP, createSession, currentUser, rateLimit, requireAuth } from '..
 import { hashPassword, passwordProblem, verifyPassword } from '../lib/password';
 import { fail, newId, now, sha256Hex, timingSafeEqual } from '../lib/util';
 import { profilesOf } from './profiles';
+import { isBannedEmail, monetizationEnabled } from '../lib/moderation';
+
+/** The Terms of Service / Privacy Policy version a new account accepts (bump when the documents change). */
+export const TERMS_VERSION = '2026-11-09';
 import { GoogleTokenError, verifyGoogleIdToken } from '../lib/google';
 
 const auth = new Hono<AppEnv>();
@@ -77,16 +81,20 @@ async function sessionPayload(env: Env, userId: string, token: string) {
     token,
     user: { id: user!.id, email: user!.email, role: user!.role, isDemo: user!.is_demo === 1, verified: Boolean(user!.email_verified_at),
             emailProof: user!.email_verification ?? (user!.email_verified_at ? 'owner' : null),
-            canTestPro: canTestPro(env, user!) },
+            canTestPro: monetizationEnabled(env) && canTestPro(env, user!), monetizationEnabled: monetizationEnabled(env) },
     profiles: await profilesOf(env, userId),
   };
 }
 
 auth.post('/signup', async (c) => {
   await rateLimit(c, 'RL_AUTH', `signup:${clientIP(c)}`);
-  const { email, password } = Credentials.parse(await c.req.json());
+  const raw = await c.req.json();
+  const { email, password } = Credentials.parse(raw);
+  // Creating an account means accepting the Terms of Service and acknowledging the Privacy Policy (both linked on the form).
+  if (raw?.acceptTerms !== true) fail(422, 'terms_not_accepted');
   const problem = passwordProblem(password);
   if (problem) fail(422, problem);
+  if (await isBannedEmail(c.env, email)) fail(403, 'registration_blocked');
   if (!c.env.RESEND_API_KEY) fail(503, 'registration_closed', 'Registration opens once e-mail delivery is configured.');
   // Closed test: any address may sign up — its code goes to the test inbox, so only the team can complete it.
   const allowed = (c.env.SIGNUP_ALLOWED_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
@@ -104,12 +112,13 @@ auth.post('/signup', async (c) => {
   let userId = existing?.id;
   if (userId) {
     // An unverified sign-up again: new password, new code (the address owner proves it with the code).
-    await c.env.DB.prepare(`UPDATE users SET password_hash = ?, password_salt = ?, password_scheme = ?, updated_at = ? WHERE id = ?`)
-      .bind(hash, salt, scheme, now(), userId).run();
+    await c.env.DB.prepare(`UPDATE users SET password_hash = ?, password_salt = ?, password_scheme = ?, terms_accepted_at = ?, terms_version = ?,
+        updated_at = ? WHERE id = ?`).bind(hash, salt, scheme, now(), TERMS_VERSION, now(), userId).run();
   } else {
     userId = newId('usr');
-    await c.env.DB.prepare(`INSERT INTO users (id, email, password_hash, password_salt, password_scheme, created_at, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(userId, email, hash, salt, scheme, now(), now()).run();
+    await c.env.DB.prepare(`INSERT INTO users (id, email, password_hash, password_salt, password_scheme, terms_accepted_at, terms_version,
+                            created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(userId, email, hash, salt, scheme, now(), TERMS_VERSION, now(), now()).run();
   }
   await issueCode(c.env, userId, email, 'verify');
   return c.json({ status: 'verification_sent', email }, 201);
@@ -184,7 +193,8 @@ auth.post('/google', async (c) => {
   await rateLimit(c, 'RL_AUTH', `google:${clientIP(c)}`);
   const clientId = c.env.GOOGLE_CLIENT_ID?.trim();
   if (!clientId) fail(503, 'google_unavailable', 'Google sign-in is not configured.');
-  const body = z.object({ credential: z.string().min(20).max(8192), password: z.string().min(1).max(200).optional() }).parse(await c.req.json());
+  const body = z.object({ credential: z.string().min(20).max(8192), password: z.string().min(1).max(200).optional(),
+                          acceptTerms: z.boolean().optional() }).parse(await c.req.json());
   let claims;
   try { claims = await verifyGoogleIdToken(body.credential, clientId!, c.env.GOOGLE_JWKS_URL || undefined); }
   catch (e) { fail(401, 'google_token_invalid', e instanceof GoogleTokenError ? e.message : 'invalid'); }
@@ -245,7 +255,9 @@ auth.post('/google', async (c) => {
     return signIn(existing.id, false);
   }
 
-  // 3) A new person.
+  // 3) A new person: only with the Terms accepted on the sign-up screen, never a banned address.
+  if (await isBannedEmail(c.env, email)) fail(403, 'registration_blocked');
+  if (body.acceptTerms !== true) fail(422, 'terms_not_accepted');
   const allowed = (c.env.SIGNUP_ALLOWED_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
   if (!c.env.TEST_CODE_INBOX && allowed.length && !allowed.includes(email)) fail(403, 'registration_invite_only');
   const dayStart = Math.floor(now() / 86_400_000) * 86_400_000;
@@ -253,8 +265,8 @@ auth.post('/google', async (c) => {
   if ((today?.n ?? 0) >= Number(c.env.SIGNUPS_PER_DAY || 50)) fail(429, 'signups_paused');
   const userId = newId('usr');
   await c.env.DB.batch([
-    c.env.DB.prepare(`INSERT INTO users (id, email, email_verified_at, email_verification, created_at, updated_at) VALUES (?, ?, ?, 'google', ?, ?)`)
-      .bind(userId, email, now(), now(), now()),
+    c.env.DB.prepare(`INSERT INTO users (id, email, email_verified_at, email_verification, terms_accepted_at, terms_version, created_at, updated_at)
+        VALUES (?, ?, ?, 'google', ?, ?, ?, ?)`).bind(userId, email, now(), now(), TERMS_VERSION, now(), now()),
     c.env.DB.prepare(`INSERT INTO auth_identities (id, user_id, provider, provider_user_id, email, created_at) VALUES (?, ?, 'google', ?, ?, ?)`)
       .bind(newId('aid'), userId, sub, email, now()),
   ]);

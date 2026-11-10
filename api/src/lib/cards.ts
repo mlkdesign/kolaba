@@ -1,5 +1,6 @@
 // JSON shapes shared by every endpoint — built in SQL (one query per list, no N+1).
 import type { Env } from '../env';
+import { blockedBetweenProfiles, monetizationEnabled } from './moderation';
 
 /** Absolute URL of a media file: external demo URL, or this API's file endpoint for R2 objects. */
 export function mediaURL(env: Env, row: { id: string; provider: string; url: string | null }): string | null {
@@ -10,15 +11,18 @@ export function mediaURL(env: Env, row: { id: string; provider: string; url: str
 /** SQL expression: the profile's published-review rating (unrounded) and count, for profile alias `p`. */
 export const ratingColumns = `
   (SELECT AVG((r.quality + r.speed + r.contact) / 3.0) FROM reviews r
-    WHERE r.recipient_profile_id = p.id AND r.status = 'published') AS rating,
-  (SELECT COUNT(*) FROM reviews r WHERE r.recipient_profile_id = p.id AND r.status = 'published') AS reviews_count,
+    WHERE r.recipient_profile_id = p.id AND r.status = 'published' AND r.review_status = 'approved') AS rating,
+  (SELECT COUNT(*) FROM reviews r WHERE r.recipient_profile_id = p.id AND r.status = 'published' AND r.review_status = 'approved') AS reviews_count,
   EXISTS (SELECT 1 FROM subscriptions s WHERE s.profile_id = p.id AND s.status = 'active'
             AND (s.expires_at IS NULL OR s.expires_at > unixepoch() * 1000)) AS is_pro`;
 
 /** SQL: the avatar's provider/url for profile alias `p`. */
 export const avatarColumns = `
   am.id AS avatar_id, am.provider AS avatar_provider, am.url AS avatar_url`;
-export const avatarJoin = `LEFT JOIN media am ON am.id = p.avatar_media_id AND am.status = 'ready'`;
+// Others see an avatar only once a moderator approved it; its owner sees it while it waits (avatarJoinOwner).
+export const avatarJoin = `LEFT JOIN media am ON am.id = p.avatar_media_id AND am.status = 'ready' AND am.review_status = 'approved'`;
+export const avatarJoinOwner = `LEFT JOIN media am ON am.id = p.avatar_media_id AND am.status = 'ready'
+  AND am.review_status IN ('approved', 'pending', 'flagged')`;
 
 export const cardColumns = `p.id, p.type, p.display_name, p.username, p.city, p.country, p.country_code, p.flag,
   p.category, p.is_demo, p.status, ${avatarColumns}, ${ratingColumns}`;
@@ -47,14 +51,16 @@ export function card(env: Env, row: CardRow, prefix = '') {
     avatarUrl: avatarId ? mediaURL(env, { id: avatarId, provider: get('avatar_provider')!, url: get('avatar_url') }) : null,
     rating: get('rating') ?? null,
     reviewsCount: get('reviews_count') ?? 0,
-    isPro: get('is_pro') === 1,
+    // Paid plans are off for now (moderation.ts): no PRO badge anywhere.
+    isPro: monetizationEnabled(env) && get('is_pro') === 1,
     isDemo: get('is_demo') === 1,
   };
 }
 
-/** One profile card by id. */
-export async function loadCard(env: Env, id: string) {
-  const row = await env.DB.prepare(`SELECT ${cardColumns} FROM profiles p ${avatarJoin} WHERE p.id = ?`).bind(id).first<CardRow>();
+/** One profile card by id (`asOwner`: the avatar even while it waits for review). */
+export async function loadCard(env: Env, id: string, asOwner = false) {
+  const row = await env.DB.prepare(`SELECT ${cardColumns} FROM profiles p ${asOwner ? avatarJoinOwner : avatarJoin} WHERE p.id = ?`)
+    .bind(id).first<CardRow>();
   return row ? card(env, row) : null;
 }
 
@@ -73,12 +79,12 @@ export interface MediaRow {
   fallback_url: string | null; poster_url: string | null; poster_media_id: string | null; mime: string | null;
   width: number | null; height: number | null; duration: number | null; title: string | null; likes_count: number;
   views_count: number; source_provider: string | null; source_url: string | null; license: string | null;
-  attribution: string | null; created_at: number; position: number;
+  attribution: string | null; created_at: number; position: number; review_status?: string;
 }
 
 export const mediaColumns = `m.id, m.owner_profile_id, m.kind, m.purpose, m.provider, m.url, m.fallback_url, m.poster_url,
   m.poster_media_id, m.mime, m.width, m.height, m.duration, m.title, m.likes_count, m.views_count, m.source_provider,
-  m.source_url, m.license, m.attribution, m.created_at, m.position`;
+  m.source_url, m.license, m.attribution, m.created_at, m.position, m.review_status`;
 
 export function mediaJSON(env: Env, m: MediaRow, extra: Record<string, unknown> = {}) {
   return {
@@ -88,6 +94,7 @@ export function mediaJSON(env: Env, m: MediaRow, extra: Record<string, unknown> 
     purpose: m.purpose,
     url: mediaURL(env, m),
     fallbackUrl: m.fallback_url,
+    reviewStatus: m.review_status ?? 'approved',
     posterUrl: m.poster_media_id ? `${env.API_URL}/v1/media/${m.poster_media_id}/file` : m.poster_url,
     mime: m.mime,
     width: m.width,
@@ -105,6 +112,8 @@ export function mediaJSON(env: Env, m: MediaRow, extra: Record<string, unknown> 
 /** A notification for a profile (in-app only at this stage). */
 export async function notify(env: Env, recipient: string, type: string, actor: string | null, payload: Record<string, unknown> = {}) {
   if (!recipient || recipient === actor) return;
+  // Nothing from someone the recipient blocked (or who blocked them).
+  if (actor && (await blockedBetweenProfiles(env, recipient, actor))) return;
   await env.DB.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at)
                         VALUES (?, ?, ?, ?, ?, ?)`)
     .bind(`ntf_${crypto.randomUUID()}`, recipient, type, actor, JSON.stringify(payload), Date.now()).run();
@@ -123,7 +132,9 @@ export async function ownerOf(env: Env, profileId: string): Promise<string | nul
   return row?.owner_user_id ?? null;
 }
 
+/** May this profile use a PRO feature? While paid plans are off, everyone may (nothing can be bought). */
 export async function isPro(env: Env, profileId: string): Promise<boolean> {
+  if (!monetizationEnabled(env)) return true;
   const row = await env.DB.prepare(`SELECT 1 AS ok FROM subscriptions WHERE profile_id = ? AND status = 'active'
                                     AND (expires_at IS NULL OR expires_at > ?)`).bind(profileId, Date.now()).first();
   return Boolean(row);

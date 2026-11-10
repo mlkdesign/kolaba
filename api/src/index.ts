@@ -13,7 +13,10 @@ import contacts from './routes/contacts';
 import messages from './routes/messages';
 import reviews from './routes/reviews';
 import me from './routes/me';
-import { notifications, reels, reports, search, sync } from './routes/social';
+import { notifications, reels, search, sync } from './routes/social';
+import { blocks, feedback, reports } from './routes/safety';
+import { assertCanPost, monetizationEnabled } from './lib/moderation';
+import { purgeExpired } from './lib/retention';
 import admin from './routes/admin';
 
 const app = new Hono<AppEnv>();
@@ -47,6 +50,19 @@ app.use('*', async (c, next) => {
 // App sessions only — the admin API has its own (routes/admin.ts) and never reads app sessions.
 app.use('/v1/*', async (c, next) => (c.req.path.startsWith('/v1/admin') ? next() : optionalAuth(c, next)));
 
+// A moderator's restriction stops publishing (jobs, uploads, messages, applications, reviews, contact requests) while
+// it lasts; reading, reporting, blocking, feedback and account deletion keep working.
+const POSTING = /^\/v1\/(jobs(\/[^/]+(\/(apply|publish))?)?|media\/uploads.*|conversations(\/[^/]+\/(messages|voice))?|reviews|contacts\/requests)$/;
+app.use('/v1/*', async (c, next) => {
+  if (['POST', 'PUT', 'PATCH'].includes(c.req.method) && POSTING.test(c.req.path)) await assertCanPost(c);
+  await next();
+});
+
+// Public app configuration (no auth): what the clients may show.
+app.get('/v1/config', (c) => c.json({ monetizationEnabled: monetizationEnabled(c.env),
+  legal: { privacy: `${c.env.APP_URL.replace(/\/?$/, '/')}legal/privacy.html`, terms: `${c.env.APP_URL.replace(/\/?$/, '/')}legal/terms.html`,
+           guidelines: `${c.env.APP_URL.replace(/\/?$/, '/')}legal/community-guidelines.html`, support: `${c.env.APP_URL.replace(/\/?$/, '/')}legal/support.html` } }));
+
 app.get('/v1/health', async (c) => {
   const db = await c.env.DB.prepare(`SELECT COUNT(*) AS profiles FROM profiles`).first<{ profiles: number }>().catch(() => null);
   const seed = await c.env.DB.prepare(`SELECT version FROM demo_seed_versions ORDER BY applied_at DESC LIMIT 1`).first<{ version: string }>()
@@ -68,6 +84,8 @@ app.route('/v1/reels', reels);
 app.route('/v1/search', search);
 app.route('/v1/sync', sync);
 app.route('/v1/reports', reports);
+app.route('/v1/blocks', blocks);
+app.route('/v1/feedback', feedback);
 app.route('/v1/admin', admin);
 
 app.notFound((c) => c.json({ error: { code: 'not_found' } }, 404));
@@ -83,4 +101,10 @@ app.onError((error, c) => {
   return c.json({ error: { code: 'internal_error' } }, 500);
 });
 
-export default app;
+export default {
+  fetch: app.fetch,
+  // Daily (wrangler.jsonc triggers): shared report messages past their retention, expired sessions.
+  async scheduled(_event: ScheduledEvent, env: AppEnv['Bindings'], ctx: ExecutionContext) {
+    ctx.waitUntil(purgeExpired(env));
+  },
+};

@@ -128,13 +128,20 @@ await test('H: creator cannot publish a job, business cannot apply, nobody acts 
   expectError(await call(null, 'GET', '/v1/notifications'), 401, 'not_signed_in');
 });
 
-await test('H: FREE creator cannot attach media or create collections (server decides PRO)', async () => {
+await test('H: the server decides features — while paid plans are off (MONETIZATION_ENABLED=false) everything is open', async () => {
+  const config = (await call(null, 'GET', '/v1/config')).json;
   const media = await call(free, 'GET', `/v1/profiles/${free.profileId}/media?purpose=portfolio`);
   const mediaId = media.json.items[0]?.id;
   expect(mediaId, 'free creator has no media in seed');
-  expectError(await call(free, 'POST', `/v1/jobs/${jobId}/apply`, { message: 'with media', mediaIds: [mediaId] }), 403, 'pro_required');
-  expectError(await call(free, 'POST', '/v1/media/collections', { title: 'Mine' }), 403, 'pro_required');
-  expectError(await call(free, 'PATCH', `/v1/admin/profiles/${free.profileId}/pro`, { enabled: true }), 401, 'admin_auth_required'); // app sessions never reach the admin API
+  if (config.monetizationEnabled) {
+    expectError(await call(free, 'POST', `/v1/jobs/${jobId}/apply`, { message: 'with media', mediaIds: [mediaId] }), 403, 'pro_required');
+    expectError(await call(free, 'POST', '/v1/media/collections', { title: 'Mine' }), 403, 'pro_required');
+  } else {
+    const session = (await call(free, 'GET', '/v1/auth/session')).json;
+    expect(session.profiles.every((p) => !p.isPro && p.entitlements.collections !== 'locked'), 'a feature is still locked behind PRO');
+  }
+  const viaApp = await call(free, 'PATCH', `/v1/admin/profiles/${free.profileId}/pro`, { enabled: true });
+  expect(viaApp.status === 401, `app session reached the admin API: ${viaApp.status}`); // app sessions never reach the admin API
 });
 
 await test('C: contact request → notification → accept → both see it', async () => {
@@ -224,8 +231,11 @@ await test('E: uploads need R2 — honest 503 until it is enabled, or a full upl
   const jpeg = new Uint8Array(1000); jpeg.set([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70, 0, 1]);
   const put = await call(creator, 'PUT', `/v1/media/uploads/${req.json.mediaId}`, jpeg, undefined, { 'Content-Type': 'image/jpeg' });
   expect(put.status === 200, `put ${put.status} ${put.text}`);
+  // New public media waits for a moderator: its owner sees it (Pending review), nobody else does yet.
+  const own = await call(creator, 'GET', `/v1/profiles/${creator.profileId}/media?purpose=portfolio&kind=photo`);
+  expect(own.json.items.some((m) => m.id === req.json.mediaId && m.reviewStatus === 'pending'), 'owner cannot see the pending photo');
   const seen = await call(free, 'GET', `/v1/profiles/${creator.profileId}/media?purpose=portfolio&kind=photo`);
-  expect(seen.json.items.some((m) => m.id === req.json.mediaId), 'other user cannot see the photo');
+  expect(!seen.json.items.some((m) => m.id === req.json.mediaId), 'an unreviewed photo is public');
   expectError(await call(free, 'DELETE', `/v1/media/${req.json.mediaId}`), 404, 'media_not_found');
   const bad = await call(creator, 'POST', '/v1/media/uploads', { purpose: 'portfolio', kind: 'photo', mime: 'application/x-msdownload', bytes: 10 });
   expectError(bad, 415, 'invalid_mime_type');
@@ -317,7 +327,8 @@ await test('L: notification settings persist; PRO test switch and account deleti
   expect((await call(free, 'PUT', '/v1/me/settings', { notifications: flipped })).status === 200, 'settings save');
   expect((await call(free, 'GET', '/v1/me/settings')).json.notifications.newMessages === flipped.newMessages, 'settings not persisted');
   await call(free, 'PUT', '/v1/me/settings', { notifications: before });
-  expectError(await call(free, 'PUT', '/v1/me/pro-test', { pro: true }), 403, 'pro_test_not_allowed');
+  const proTest = await call(free, 'PUT', '/v1/me/pro-test', { pro: true });
+  expect(proTest.status === 403 && ['pro_test_not_allowed', 'monetization_disabled'].includes(proTest.json?.error?.code), `pro-test ${proTest.text}`);
   expectError(await call(free, 'DELETE', '/v1/me', { confirm: 'DELETE' }), 403, 'demo_account');
   // Delete chat: hidden and cleared for me only; the other side keeps every message; a new message brings it back empty.
   const conv = await call(free, 'POST', '/v1/conversations', { profileId: multiBusiness.id });

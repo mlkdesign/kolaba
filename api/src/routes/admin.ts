@@ -6,10 +6,12 @@ import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import type { AdminSession, AppEnv, Env } from '../env';
 import { clientIP, rateLimit } from '../lib/auth';
-import { avatarJoin, card, cardColumns, type CardRow, mediaColumns, mediaJSON, type MediaRow } from '../lib/cards';
+import { avatarJoin, card, cardColumns, type CardRow, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/cards';
 import { hashPassword, verifyPassword } from '../lib/password';
 import { fail, newId, newToken, now, sha256Hex, timingSafeEqual } from '../lib/util';
 import { jobsJSON } from './jobs';
+import { signedMediaURL, signedVoiceURL } from './media';
+import { emailHash } from '../lib/moderation';
 
 const SESSION_MS = 8 * 3_600_000;
 const IDLE_MS = 60 * 60_000;
@@ -642,6 +644,464 @@ admin.get('/logs', async (c) => {
     items: rows.results.map((r) => ({ id: r.id, adminEmail: r.admin_email, action: r.action, entityType: r.entity_type, entityId: r.entity_id,
                                       result: r.result, reason: r.reason, detail: r.detail ? JSON.parse(r.detail) : null, createdAt: r.created_at })),
   });
+});
+
+// ─── moderation (reports, sanctions) ───
+// Moderators see only what a report shares: the reported item, and for messages only the copy the reporter agreed to
+// share (report_evidence) — never a conversation itself. Opening shared messages is written to admin_logs.
+
+const TAB_TYPES: Record<string, string[]> = {
+  profiles: ['user'], posts: ['post'], media: ['media'], messages: ['message', 'conversation'], reviews: ['review'],
+};
+const REPORT_CATEGORIES = ['spam', 'sexual', 'violence', 'harassment', 'hate', 'scam', 'impersonation', 'copyright', 'illegal', 'other'];
+
+admin.get('/moderation/stats', async (c) => {
+  const t = now();
+  const s = await c.env.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM reports WHERE status = 'pending') AS pending,
+      (SELECT COUNT(*) FROM reports WHERE status = 'under_review') AS under_review,
+      (SELECT COUNT(*) FROM reports WHERE status = 'resolved') AS resolved,
+      (SELECT COUNT(*) FROM reports WHERE status = 'dismissed') AS dismissed,
+      (SELECT COUNT(*) FROM reports WHERE status IN ('pending', 'under_review') AND priority = 'urgent') AS urgent,
+      (SELECT COUNT(*) FROM users WHERE (restricted_until > ?1) OR status = 'suspended') AS restricted_users,
+      (SELECT COUNT(*) FROM media WHERE status = 'ready' AND review_status = 'pending') AS pending_media,
+      (SELECT COUNT(*) FROM media WHERE status = 'ready' AND review_status = 'flagged') AS flagged_media,
+      (SELECT COUNT(*) FROM jobs WHERE review_status = 'flagged' AND status <> 'removed') AS flagged_posts,
+      (SELECT COUNT(*) FROM reviews WHERE review_status = 'flagged') AS flagged_reviews,
+      (SELECT COUNT(*) FROM feedback WHERE status = 'open') AS open_feedback`).bind(t).first<Record<string, number>>();
+  return c.json({
+    pendingReports: s!.pending, underReview: s!.under_review, resolved: s!.resolved, rejectedReports: s!.dismissed, urgent: s!.urgent,
+    restrictedUsers: s!.restricted_users, pendingMedia: s!.pending_media, flaggedMedia: s!.flagged_media,
+    flaggedPosts: s!.flagged_posts, flaggedReviews: s!.flagged_reviews, openFeedback: s!.open_feedback,
+  });
+});
+
+async function reportCards(env: Env, rows: Record<string, any>[]) {
+  const ids = [...new Set(rows.flatMap((r) => [r.reporter_profile_id, r.target_profile_id]).filter(Boolean))] as string[];
+  if (!ids.length) return new Map<string, Record<string, unknown>>();
+  const res = await env.DB.prepare(`SELECT ${cardColumns}, p.owner_user_id FROM profiles p ${avatarJoin} WHERE p.id IN (${ids.map(() => '?').join(',')})`)
+    .bind(...ids).all<CardRow & { owner_user_id: string }>();
+  return new Map(res.results.map((r) => [r.id, { ...card(env, r), userId: r.owner_user_id }]));
+}
+
+function reportJSON(r: Record<string, any>, cards: Map<string, Record<string, unknown>>) {
+  return {
+    id: r.id, source: r.source, targetType: r.target_type, targetId: r.target_id, category: r.category, details: r.details,
+    priority: r.priority, status: r.status, resolution: r.resolution, createdAt: r.created_at, updatedAt: r.updated_at,
+    handledAt: r.handled_at, handledBy: r.handled_by, context: JSON.parse(r.context || '{}'),
+    reporter: r.reporter_profile_id ? cards.get(r.reporter_profile_id) ?? { id: r.reporter_profile_id } : null,
+    reportedUser: r.target_profile_id ? cards.get(r.target_profile_id) ?? { id: r.target_profile_id } : null,
+    targetUserId: r.target_user_id, sharedMessages: r.consent_shared_messages === 1,
+  };
+}
+
+admin.get('/reports', async (c) => {
+  const { limit, offset, page: pageNo } = page(c, 25);
+  const where: string[] = ['1 = 1'];
+  const params: unknown[] = [];
+  const types = TAB_TYPES[c.req.query('tab') ?? ''];
+  if (types) { where.push(`r.target_type IN (${types.map(() => '?').join(',')})`); params.push(...types); }
+  const category = c.req.query('category');
+  if (category && REPORT_CATEGORIES.includes(category)) { where.push(`r.category = ?`); params.push(category); }
+  const status = c.req.query('status');
+  if (status && ['pending', 'under_review', 'resolved', 'dismissed'].includes(status)) { where.push(`r.status = ?`); params.push(status); }
+  else if (status === 'open') where.push(`r.status IN ('pending', 'under_review')`);
+  const from = Number(c.req.query('from') ?? 0);
+  if (from > 0) { where.push(`r.created_at >= ?`); params.push(from); }
+  const to = Number(c.req.query('to') ?? 0);
+  if (to > 0) { where.push(`r.created_at <= ?`); params.push(to); }
+  const userId = c.req.query('user');
+  if (userId) { where.push(`(r.target_user_id = ? OR r.reporter_user_id = ? OR r.target_profile_id = ? OR r.reporter_profile_id = ?)`); params.push(userId, userId, userId, userId); }
+  const text = q(c);
+  if (text) {
+    where.push(`(r.id = ? OR r.target_id = ? OR r.target_user_id = ? OR r.reporter_user_id = ? OR EXISTS (SELECT 1 FROM profiles p
+        WHERE p.id IN (r.target_profile_id, r.reporter_profile_id) AND (lower(p.display_name) LIKE ? ESCAPE '\\' OR lower(p.username) LIKE ? ESCAPE '\\')))`);
+    params.push(text, text, text, text, like(text), like(text.replace(/^@/, '')));
+  }
+  const sort = c.req.query('sort');
+  const order = sort === 'oldest' ? 'r.created_at ASC'
+    : sort === 'priority' ? `CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 ELSE 2 END, r.created_at ASC` : 'r.created_at DESC';
+  const base = `FROM reports r WHERE ${where.join(' AND ')}`;
+  const [total, rows] = await Promise.all([
+    c.env.DB.prepare(`SELECT COUNT(*) AS n ${base}`).bind(...params).first<{ n: number }>(),
+    c.env.DB.prepare(`SELECT r.* ${base} ORDER BY ${order}, r.id LIMIT ? OFFSET ?`).bind(...params, limit, offset).all<Record<string, any>>(),
+  ]);
+  const cards = await reportCards(c.env, rows.results);
+  return c.json({ total: total?.n ?? 0, page: pageNo, limit, items: rows.results.map((r) => reportJSON(r, cards)) });
+});
+
+/** What the moderator needs to judge the target (only the reported item). */
+async function targetDetail(env: Env, type: string, id: string) {
+  switch (type) {
+    case 'user': {
+      const p = await env.DB.prepare(`SELECT ${cardColumns}, p.bio, p.owner_user_id, u.email, u.status AS user_status, u.restricted_until,
+          u.warnings_count, u.banned_at FROM profiles p ${avatarJoin} JOIN users u ON u.id = p.owner_user_id WHERE p.id = ?`).bind(id)
+        .first<CardRow & Record<string, any>>();
+      return p ? { kind: 'profile', profile: { ...card(env, p), bio: p.bio, status: p.status }, publicUrl: p.status === 'active' ? appLink(env, 'profile', id) : null } : null;
+    }
+    case 'post': {
+      const j = await env.DB.prepare(`SELECT * FROM jobs WHERE id = ?`).bind(id).first<Record<string, any>>();
+      if (!j) return null;
+      const [json] = await jobsJSON(env, [j], null);
+      return { kind: 'post', post: { ...json, reviewStatus: j.review_status, autoFlags: j.auto_flags ? JSON.parse(j.auto_flags) : null },
+               publicUrl: j.status === 'published' && j.review_status === 'approved' ? appLink(env, 'job', id) : null };
+    }
+    case 'media': {
+      const m = await env.DB.prepare(`SELECT ${mediaColumns}, m.status, m.is_public FROM media m WHERE m.id = ?`).bind(id).first<MediaRow & Record<string, any>>();
+      if (!m) return null;
+      const json = mediaJSON(env, m);
+      if (m.provider === 'r2') json.url = await signedMediaURL(env, m.id);
+      return { kind: 'media', media: { ...json, status: m.status }, publicUrl: appLink(env, 'profile', m.owner_profile_id) };
+    }
+    case 'review': {
+      const r = await env.DB.prepare(`SELECT * FROM reviews WHERE id = ?`).bind(id).first<Record<string, any>>();
+      return r ? { kind: 'review', review: { id: r.id, comment: r.comment, quality: r.quality, speed: r.speed, contact: r.contact,
+                   authorProfileId: r.author_profile_id, recipientProfileId: r.recipient_profile_id, reviewStatus: r.review_status,
+                   createdAt: r.created_at }, publicUrl: appLink(env, 'profile', r.recipient_profile_id) } : null;
+    }
+    default:
+      return { kind: type };  // message / conversation: only the shared copy (evidence) is shown
+  }
+}
+
+admin.get('/reports/:id', async (c) => {
+  const id = c.req.param('id');
+  const r = await c.env.DB.prepare(`SELECT * FROM reports WHERE id = ?`).bind(id).first<Record<string, any>>();
+  if (!r) fail(404, 'report_not_found');
+  const [cards, target, history, actions, evidenceRows] = await Promise.all([
+    reportCards(c.env, [r!]),
+    targetDetail(c.env, r!.target_type, r!.target_id),
+    c.env.DB.prepare(`SELECT id, category, status, created_at, source FROM reports WHERE id <> ? AND ((target_type = ? AND target_id = ?)
+        OR (target_user_id IS NOT NULL AND target_user_id = ?)) ORDER BY created_at DESC LIMIT 20`)
+      .bind(id, r!.target_type, r!.target_id, r!.target_user_id ?? '').all<Record<string, any>>(),
+    c.env.DB.prepare(`SELECT * FROM moderation_actions WHERE report_id = ? OR (target_type = ? AND target_id = ?)
+        OR (target_user_id IS NOT NULL AND target_user_id = ?) ORDER BY created_at DESC LIMIT 30`)
+      .bind(id, r!.target_type, r!.target_id, r!.target_user_id ?? '').all<Record<string, any>>(),
+    c.env.DB.prepare(`SELECT * FROM report_evidence WHERE report_id = ? ORDER BY sent_at`).bind(id).all<Record<string, any>>(),
+  ]);
+  let evidence: unknown[] = [];
+  if (evidenceRows.results.length) {
+    const senders = await reportCards(c.env, evidenceRows.results.map((e) => ({ reporter_profile_id: e.sender_profile_id })));
+    evidence = await Promise.all(evidenceRows.results.map(async (e) => ({
+      messageId: e.message_id, isReported: e.is_reported === 1, body: e.body, sentAt: e.sent_at,
+      sender: senders.get(e.sender_profile_id) ?? { id: e.sender_profile_id },
+      attachments: await Promise.all((JSON.parse(e.attachments || '[]') as { mediaId?: string; voiceMessageId?: string; kind: string }[])
+        .map(async (a) => ({ kind: a.kind, url: a.mediaId ? await signedMediaURL(c.env, a.mediaId) : a.voiceMessageId ? await signedVoiceURL(c.env, a.voiceMessageId) : null }))),
+    })));
+    // Access to shared private messages is always on record.
+    await audit(c, 'report.evidence_view', 'report', id, null, { messages: evidence.length });
+  }
+  return c.json({
+    report: reportJSON(r!, cards), target, evidence,
+    history: history.results.map((h) => ({ id: h.id, category: h.category, status: h.status, source: h.source, createdAt: h.created_at })),
+    actions: actions.results.map((a) => ({ id: a.id, reportId: a.report_id, action: a.action, reason: a.reason, adminEmail: a.admin_email,
+                                           detail: a.detail ? JSON.parse(a.detail) : null, createdAt: a.created_at })),
+  });
+});
+
+type Sanction = 'warn' | 'restrict' | 'unrestrict' | 'suspend' | 'unsuspend' | 'ban';
+
+/** Hides / restores the reported item itself (nothing is erased: rows and files stay for appeals and evidence). */
+async function setContentRemoved(env: Env, type: string, id: string, removed: boolean, reason: string | null) {
+  const t = now();
+  switch (type) {
+    case 'post':
+      await env.DB.prepare(`UPDATE jobs SET review_status = ?, review_reason = ?, updated_at = ? WHERE id = ?`)
+        .bind(removed ? 'removed' : 'approved', removed ? reason : null, t, id).run(); return;
+    case 'media':
+      await env.DB.prepare(`UPDATE media SET review_status = ?, review_reason = ?, reviewed_at = ? WHERE id = ?`)
+        .bind(removed ? 'removed' : 'approved', removed ? reason : null, t, id).run(); return;
+    case 'review':
+      await env.DB.prepare(`UPDATE reviews SET review_status = ?, review_reason = ? WHERE id = ?`).bind(removed ? 'removed' : 'approved', removed ? reason : null, id).run(); return;
+    case 'message':
+      await env.DB.prepare(`UPDATE messages SET deleted_at = ? WHERE id = ?`).bind(removed ? t : null, id).run(); return;
+    case 'user':
+      if (removed) await env.DB.prepare(`UPDATE profiles SET status = 'hidden', admin_hidden_at = ?, updated_at = ? WHERE id = ? AND status = 'active'`).bind(t, t, id).run();
+      else await env.DB.prepare(`UPDATE profiles SET status = 'active', admin_hidden_at = NULL, updated_at = ? WHERE id = ? AND admin_hidden_at IS NOT NULL`).bind(t, id).run();
+      return;
+    default:
+      fail(422, 'not_removable');
+  }
+}
+
+/** An account sanction. Irreversible effects (a ban) only ever follow a moderator's decision, never an automatic one. */
+async function sanction(c: Context<AppEnv>, userId: string, kind: Sanction, reason: string | null, days: number | undefined,
+                        notifyProfileId: string | null) {
+  const db = c.env.DB;
+  const t = now();
+  const u = await db.prepare(`SELECT id, email, status FROM users WHERE id = ?`).bind(userId).first<{ id: string; email: string; status: string }>();
+  if (!u) fail(404, 'user_not_found');
+  switch (kind) {
+    case 'warn':
+      await db.prepare(`UPDATE users SET warnings_count = warnings_count + 1, updated_at = ? WHERE id = ?`).bind(t, userId).run();
+      if (notifyProfileId) {
+        await db.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at) VALUES (?, ?, 'moderation_warning', NULL, ?, ?)`)
+          .bind(`ntf_${crypto.randomUUID()}`, notifyProfileId, JSON.stringify({ reason }), t).run();
+      }
+      return;
+    case 'restrict':
+      await db.prepare(`UPDATE users SET restricted_until = ?, restriction_reason = ?, updated_at = ? WHERE id = ?`)
+        .bind(t + Math.min(Math.max(days ?? 7, 1), 365) * 86_400_000, reason, t, userId).run();
+      if (notifyProfileId) {
+        await db.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at) VALUES (?, ?, 'moderation_restriction', NULL, ?, ?)`)
+          .bind(`ntf_${crypto.randomUUID()}`, notifyProfileId, JSON.stringify({ reason, days: days ?? 7 }), t).run();
+      }
+      return;
+    case 'unrestrict':
+      await db.prepare(`UPDATE users SET restricted_until = NULL, restriction_reason = NULL, updated_at = ? WHERE id = ?`).bind(t, userId).run();
+      return;
+    case 'suspend':
+      if (u!.status === 'deleted') fail(409, 'invalid_transition');
+      await db.batch([
+        db.prepare(`UPDATE users SET status = 'suspended', blocked_reason = ?, blocked_at = ?, updated_at = ? WHERE id = ?`).bind(reason, t, t, userId),
+        db.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(userId),
+      ]);
+      return;
+    case 'unsuspend':
+      await db.prepare(`UPDATE users SET status = 'active', blocked_reason = NULL, blocked_at = NULL, banned_at = NULL, updated_at = ?
+          WHERE id = ? AND status = 'suspended'`).bind(t, userId).run();
+      await db.prepare(`DELETE FROM banned_identities WHERE email_hash = ?`).bind(await emailHash(u!.email)).run();
+      return;
+    case 'ban':
+      await db.batch([
+        db.prepare(`UPDATE users SET status = 'suspended', blocked_reason = ?, blocked_at = ?, banned_at = ?, updated_at = ? WHERE id = ?`)
+          .bind(reason, t, t, t, userId),
+        db.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(userId),
+        db.prepare(`UPDATE profiles SET status = 'hidden', admin_hidden_at = ?, updated_at = ? WHERE owner_user_id = ? AND status = 'active'`).bind(t, t, userId),
+        db.prepare(`INSERT OR REPLACE INTO banned_identities (email_hash, reason, created_at) VALUES (?, ?, ?)`).bind(await emailHash(u!.email), reason, t),
+      ]);
+      return;
+  }
+}
+
+async function recordAction(c: Context<AppEnv>, entry: { reportId?: string | null; targetType: string; targetId: string; targetUserId?: string | null;
+  action: string; reason?: string | null; detail?: Record<string, unknown> }) {
+  const a = current(c);
+  await c.env.DB.prepare(`INSERT INTO moderation_actions (id, report_id, target_type, target_id, target_user_id, action, reason, detail,
+      admin_id, admin_email, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(newId('mda'), entry.reportId ?? null, entry.targetType, entry.targetId, entry.targetUserId ?? null, entry.action,
+          entry.reason ?? null, entry.detail ? JSON.stringify(entry.detail) : null, a.id, a.email, now()).run();
+  await audit(c, `moderation.${entry.action}`, entry.targetType, entry.targetId, entry.reason ?? null,
+              { reportId: entry.reportId ?? null, ...(entry.detail ?? {}) });
+}
+
+const ReportAction = z.object({
+  action: z.enum(['review', 'dismiss', 'resolve', 'remove_content', 'restore_content', 'warn', 'restrict', 'unrestrict', 'suspend', 'unsuspend', 'ban']),
+  reason: z.string().trim().max(500).optional(),
+  days: z.number().int().min(1).max(365).optional(),
+  /** The admin panel's confirmation dialog for dangerous actions. */
+  confirm: z.boolean().optional(),
+});
+const DANGEROUS = new Set(['remove_content', 'suspend', 'ban', 'restrict']);
+
+// POST /v1/admin/reports/:id/action
+admin.post('/reports/:id/action', async (c) => {
+  const id = c.req.param('id');
+  const body = ReportAction.parse(await c.req.json());
+  const r = await c.env.DB.prepare(`SELECT * FROM reports WHERE id = ?`).bind(id).first<Record<string, any>>();
+  if (!r) fail(404, 'report_not_found');
+  if (DANGEROUS.has(body.action) && body.confirm !== true) fail(422, 'confirmation_required');
+  if (DANGEROUS.has(body.action) || body.action === 'warn') {
+    if (!body.reason || body.reason.length < 3) fail(422, 'reason_required');
+  }
+  const t = now();
+  let status: string = r!.status;
+  switch (body.action) {
+    case 'review': status = 'under_review'; break;
+    case 'dismiss': status = 'dismissed'; break;
+    case 'resolve': status = 'resolved'; break;
+    case 'remove_content': await setContentRemoved(c.env, r!.target_type, r!.target_id, true, body.reason ?? null); status = 'resolved'; break;
+    case 'restore_content': await setContentRemoved(c.env, r!.target_type, r!.target_id, false, null); break;
+    default: {
+      if (!r!.target_user_id) fail(422, 'no_target_account');
+      await sanction(c, r!.target_user_id, body.action as Sanction, body.reason ?? null, body.days, r!.target_profile_id);
+      if (!['unrestrict', 'unsuspend'].includes(body.action)) status = 'resolved';
+    }
+  }
+  await c.env.DB.prepare(`UPDATE reports SET status = ?, resolution = CASE WHEN ? IN ('resolved', 'dismissed') THEN ? ELSE resolution END,
+      handled_by = ?, handled_at = ?, updated_at = ? WHERE id = ?`)
+    .bind(status, status, body.action, current(c).email, t, t, id).run();
+  // Other open reports about the same item are closed with it (their reporters' identities are never shown to anyone).
+  if (['remove_content', 'dismiss', 'resolve'].includes(body.action) || DANGEROUS.has(body.action)) {
+    await c.env.DB.prepare(`UPDATE reports SET status = ?, resolution = ?, handled_by = ?, handled_at = ?, updated_at = ?
+        WHERE target_type = ? AND target_id = ? AND status IN ('pending', 'under_review') AND id <> ?`)
+      .bind(status === 'dismissed' ? 'dismissed' : 'resolved', `${body.action} (with ${id})`, current(c).email, t, t, r!.target_type, r!.target_id, id).run();
+  }
+  await recordAction(c, { reportId: id, targetType: r!.target_type, targetId: r!.target_id, targetUserId: r!.target_user_id,
+                          action: body.action, reason: body.reason ?? null, detail: body.days ? { days: body.days } : undefined });
+  return c.json({ status });
+});
+
+// POST /v1/admin/users/:id/sanction — the same sanctions from a user's page (no report).
+admin.post('/users/:id/sanction', async (c) => {
+  const id = c.req.param('id');
+  const body = ReportAction.parse(await c.req.json());
+  if (!['warn', 'restrict', 'unrestrict', 'suspend', 'unsuspend', 'ban'].includes(body.action)) fail(422, 'invalid_action');
+  if (DANGEROUS.has(body.action) && body.confirm !== true) fail(422, 'confirmation_required');
+  if ((DANGEROUS.has(body.action) || body.action === 'warn') && (!body.reason || body.reason.length < 3)) fail(422, 'reason_required');
+  const profile = await c.env.DB.prepare(`SELECT id FROM profiles WHERE owner_user_id = ? AND status <> 'deleted' ORDER BY created_at LIMIT 1`)
+    .bind(id).first<{ id: string }>();
+  await sanction(c, id, body.action as Sanction, body.reason ?? null, body.days, profile?.id ?? null);
+  await recordAction(c, { targetType: 'user', targetId: id, targetUserId: id, action: body.action, reason: body.reason ?? null,
+                          detail: body.days ? { days: body.days } : undefined });
+  return c.json({ status: 'done' });
+});
+
+// ─── content review (new public media, flagged posts and reviews) ───
+
+admin.get('/content-review', async (c) => {
+  const { limit, offset, page: pageNo } = page(c, 24);
+  const kind = c.req.query('type') ?? 'media';
+  const status = c.req.query('status') ?? 'pending';
+  if (!['pending', 'flagged', 'approved', 'rejected', 'removed'].includes(status)) fail(400, 'invalid_status');
+  if (kind === 'posts') {
+    const [total, rows] = await Promise.all([
+      c.env.DB.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE review_status = ? AND status <> 'draft'`).bind(status).first<{ n: number }>(),
+      c.env.DB.prepare(`SELECT * FROM jobs WHERE review_status = ? AND status <> 'draft' ORDER BY updated_at DESC LIMIT ? OFFSET ?`)
+        .bind(status, limit, offset).all<Record<string, any>>(),
+    ]);
+    const items = await jobsJSON(c.env, rows.results, null);
+    return c.json({ total: total?.n ?? 0, page: pageNo, limit, items: items.map((j, i) => ({ ...j, reviewReason: rows.results[i].review_reason,
+      autoFlags: rows.results[i].auto_flags ? JSON.parse(rows.results[i].auto_flags) : null })) });
+  }
+  if (kind === 'reviews') {
+    const [total, rows] = await Promise.all([
+      c.env.DB.prepare(`SELECT COUNT(*) AS n FROM reviews WHERE review_status = ?`).bind(status).first<{ n: number }>(),
+      c.env.DB.prepare(`SELECT * FROM reviews WHERE review_status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`).bind(status, limit, offset).all<Record<string, any>>(),
+    ]);
+    const cards = await reportCards(c.env, rows.results.map((r) => ({ reporter_profile_id: r.author_profile_id, target_profile_id: r.recipient_profile_id })));
+    return c.json({ total: total?.n ?? 0, page: pageNo, limit, items: rows.results.map((r) => ({ id: r.id, comment: r.comment, createdAt: r.created_at,
+      reviewReason: r.review_reason, author: cards.get(r.author_profile_id) ?? null, recipient: cards.get(r.recipient_profile_id) ?? null })) });
+  }
+  const mediaKind = c.req.query('kind');
+  const where = [`m.status = 'ready'`, `m.review_status = ?`, `m.purpose NOT IN ('chat', 'application', 'poster')`];
+  const params: unknown[] = [status];
+  if (mediaKind === 'photo' || mediaKind === 'video') { where.push(`m.kind = ?`); params.push(mediaKind); }
+  const base = `FROM media m WHERE ${where.join(' AND ')}`;
+  const [total, rows] = await Promise.all([
+    c.env.DB.prepare(`SELECT COUNT(*) AS n ${base}`).bind(...params).first<{ n: number }>(),
+    c.env.DB.prepare(`SELECT ${mediaColumns}, m.review_reason, m.auto_flags, m.bytes ${base} ORDER BY m.created_at ${status === 'pending' || status === 'flagged' ? 'ASC' : 'DESC'}
+        LIMIT ? OFFSET ?`).bind(...params, limit, offset).all<MediaRow & Record<string, any>>(),
+  ]);
+  const owners = await reportCards(c.env, rows.results.map((m) => ({ reporter_profile_id: m.owner_profile_id })));
+  const items = await Promise.all(rows.results.map(async (m) => {
+    const json = mediaJSON(c.env, m);
+    // Previews always through signed URLs (the files aren't public until approved).
+    if (m.provider === 'r2') json.url = await signedMediaURL(c.env, m.id);
+    if (m.poster_media_id) json.posterUrl = await signedMediaURL(c.env, m.poster_media_id);
+    return { ...json, reviewReason: m.review_reason, autoFlags: m.auto_flags ? JSON.parse(m.auto_flags) : null, bytes: m.bytes,
+             owner: owners.get(m.owner_profile_id) ?? null };
+  }));
+  return c.json({ total: total?.n ?? 0, page: pageNo, limit, items, videoFrames: Number(c.env.REVIEW_VIDEO_FRAMES ?? 6) });
+});
+
+// POST /v1/admin/content-review/:type/:id {decision: approve|reject, reason}
+admin.post('/content-review/:type{media|posts|reviews}/:id', async (c) => {
+  const type = c.req.param('type');
+  const id = c.req.param('id');
+  const body = z.object({ decision: z.enum(['approve', 'reject']), reason: z.string().trim().max(500).optional() }).parse(await c.req.json());
+  if (body.decision === 'reject' && (!body.reason || body.reason.length < 3)) fail(422, 'reason_required');
+  const value = body.decision === 'approve' ? 'approved' : 'rejected';
+  const t = now();
+  let ownerProfile: string | null = null;
+  if (type === 'media') {
+    const m = await c.env.DB.prepare(`SELECT owner_profile_id, poster_media_id FROM media WHERE id = ?`).bind(id).first<{ owner_profile_id: string; poster_media_id: string | null }>();
+    if (!m) fail(404, 'media_not_found');
+    ownerProfile = m!.owner_profile_id;
+    await c.env.DB.prepare(`UPDATE media SET review_status = ?, review_reason = ?, reviewed_at = ? WHERE id IN (?, ?)`)
+      .bind(value, body.reason ?? null, t, id, m!.poster_media_id ?? id).run();
+  } else if (type === 'posts') {
+    const j = await c.env.DB.prepare(`SELECT owner_profile_id FROM jobs WHERE id = ?`).bind(id).first<{ owner_profile_id: string }>();
+    if (!j) fail(404, 'job_not_found');
+    ownerProfile = j!.owner_profile_id;
+    await c.env.DB.prepare(`UPDATE jobs SET review_status = ?, review_reason = ?, updated_at = ? WHERE id = ?`).bind(value, body.reason ?? null, t, id).run();
+  } else {
+    const r = await c.env.DB.prepare(`SELECT author_profile_id, recipient_profile_id FROM reviews WHERE id = ?`).bind(id).first<{ author_profile_id: string; recipient_profile_id: string }>();
+    if (!r) fail(404, 'review_not_found');
+    ownerProfile = r!.author_profile_id;
+    await c.env.DB.prepare(`UPDATE reviews SET review_status = ?, review_reason = ? WHERE id = ?`).bind(value, body.reason ?? null, id).run();
+    if (value === 'approved') await notify(c.env, r!.recipient_profile_id, 'new_review', r!.author_profile_id, { reviewId: id });
+  }
+  // The owner learns the outcome in the app (Notifications) — with the reason when it was rejected.
+  if (ownerProfile) {
+    await c.env.DB.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at) VALUES (?, ?, ?, NULL, ?, ?)`)
+      .bind(`ntf_${crypto.randomUUID()}`, ownerProfile, value === 'approved' ? 'content_approved' : 'content_rejected',
+            JSON.stringify({ targetType: type, targetId: id, reason: body.reason ?? null }), t).run();
+  }
+  const owner = ownerProfile ? await c.env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(ownerProfile).first<{ owner_user_id: string }>() : null;
+  await recordAction(c, { targetType: type === 'posts' ? 'post' : type === 'reviews' ? 'review' : 'media', targetId: id,
+                          targetUserId: owner?.owner_user_id ?? null, action: body.decision, reason: body.reason ?? null });
+  return c.json({ reviewStatus: value });
+});
+
+// ─── feedback (kept apart from reports) ───
+
+admin.get('/feedback', async (c) => {
+  const { limit, offset, page: pageNo } = page(c, 25);
+  const where: string[] = ['1 = 1'];
+  const params: unknown[] = [];
+  const category = c.req.query('category');
+  if (category && ['suggestion', 'bug', 'general', 'other'].includes(category)) { where.push(`f.category = ?`); params.push(category); }
+  const status = c.req.query('status');
+  if (status && ['open', 'in_progress', 'resolved'].includes(status)) { where.push(`f.status = ?`); params.push(status); }
+  const text = q(c);
+  if (text) { where.push(`(f.id = ? OR lower(f.message) LIKE ? ESCAPE '\\' OR f.user_id = ?)`); params.push(text, like(text), text); }
+  const base = `FROM feedback f LEFT JOIN users u ON u.id = f.user_id WHERE ${where.join(' AND ')}`;
+  const [total, rows, open] = await Promise.all([
+    c.env.DB.prepare(`SELECT COUNT(*) AS n ${base}`).bind(...params).first<{ n: number }>(),
+    c.env.DB.prepare(`SELECT f.*, u.email ${base} ORDER BY f.created_at DESC LIMIT ? OFFSET ?`).bind(...params, limit, offset).all<Record<string, any>>(),
+    c.env.DB.prepare(`SELECT COUNT(*) AS n FROM feedback WHERE status = 'open'`).first<{ n: number }>(),
+  ]);
+  return c.json({ total: total?.n ?? 0, open: open?.n ?? 0, page: pageNo, limit, items: rows.results.map(feedbackJSON) });
+});
+
+function feedbackJSON(f: Record<string, any>) {
+  return { id: f.id, userId: f.user_id, email: f.email ?? null, profileId: f.profile_id, category: f.category, message: f.message,
+           hasAttachment: Boolean(f.attachment_key), attachmentMime: f.attachment_mime, appVersion: f.app_version, osVersion: f.os_version,
+           platform: f.platform, status: f.status, adminNote: f.admin_note, createdAt: f.created_at, updatedAt: f.updated_at, resolvedAt: f.resolved_at };
+}
+
+admin.get('/feedback/:id', async (c) => {
+  const f = await c.env.DB.prepare(`SELECT f.*, u.email FROM feedback f LEFT JOIN users u ON u.id = f.user_id WHERE f.id = ?`)
+    .bind(c.req.param('id')).first<Record<string, any>>();
+  if (!f) fail(404, 'feedback_not_found');
+  return c.json(feedbackJSON(f!));
+});
+
+// The screenshot (fetched by the admin panel with its bearer token, never a public URL).
+admin.get('/feedback/:id/attachment', async (c) => {
+  const f = await c.env.DB.prepare(`SELECT attachment_key, attachment_mime FROM feedback WHERE id = ?`).bind(c.req.param('id'))
+    .first<{ attachment_key: string | null; attachment_mime: string | null }>();
+  if (!f?.attachment_key || !c.env.MEDIA) fail(404, 'attachment_not_found');
+  const object = await c.env.MEDIA!.get(f!.attachment_key!);
+  if (!object) fail(404, 'attachment_not_found');
+  return new Response(object!.body, { headers: { 'Content-Type': f!.attachment_mime ?? 'application/octet-stream', 'Cache-Control': 'private, no-store',
+                                                  'X-Content-Type-Options': 'nosniff' } });
+});
+
+admin.patch('/feedback/:id', async (c) => {
+  const id = c.req.param('id');
+  const body = z.object({ status: z.enum(['open', 'in_progress', 'resolved']).optional(), adminNote: z.string().max(2000).optional() })
+    .parse(await c.req.json());
+  const t = now();
+  const res = await c.env.DB.prepare(`UPDATE feedback SET status = COALESCE(?, status), admin_note = COALESCE(?, admin_note), updated_at = ?,
+      resolved_at = CASE WHEN ? = 'resolved' THEN ? WHEN ? IS NOT NULL THEN NULL ELSE resolved_at END WHERE id = ?`)
+    .bind(body.status ?? null, body.adminNote ?? null, t, body.status ?? '', t, body.status ?? null, id).run();
+  if (!res.meta.changes) fail(404, 'feedback_not_found');
+  await audit(c, 'feedback.update', 'feedback', id, null, { status: body.status ?? null, note: body.adminNote !== undefined });
+  const f = await c.env.DB.prepare(`SELECT f.*, u.email FROM feedback f LEFT JOIN users u ON u.id = f.user_id WHERE f.id = ?`).bind(id).first<Record<string, any>>();
+  return c.json(feedbackJSON(f!));
+});
+
+// Navigation badges (polled by the admin panel).
+admin.get('/counts', async (c) => {
+  const s = await c.env.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM reports WHERE status IN ('pending', 'under_review')) AS reports,
+      (SELECT COUNT(*) FROM reports WHERE status IN ('pending', 'under_review') AND priority = 'urgent') AS urgent,
+      (SELECT COUNT(*) FROM media WHERE status = 'ready' AND review_status IN ('pending', 'flagged') AND purpose NOT IN ('chat', 'application', 'poster'))
+        + (SELECT COUNT(*) FROM jobs WHERE review_status = 'flagged' AND status <> 'removed') + (SELECT COUNT(*) FROM reviews WHERE review_status = 'flagged') AS review,
+      (SELECT COUNT(*) FROM feedback WHERE status = 'open') AS feedback`).first<Record<string, number>>();
+  return c.json({ reports: s!.reports, urgent: s!.urgent, contentReview: s!.review, feedback: s!.feedback });
 });
 
 export default admin;

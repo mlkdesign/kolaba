@@ -31,6 +31,9 @@ const COPY: Record<PaywallFeature, [string, string]> = {
 let open = false;
 /** One paywall at a time, over the current screen (its context stays under it). */
 export function openPaywall(feature: PaywallFeature) {
+  // Paid plans are off (server MONETIZATION_ENABLED): nothing can be bought, so no paywall opens anywhere. The server
+  // already returns every feature as available and no PRO badges; this is the second guard.
+  if (!(activeProfile.value?.entitlements as { monetizationEnabled?: boolean } | undefined)?.monetizationEnabled) return;
   if (open) return;
   open = true;
   trackEvent(`paywall_${feature}`);

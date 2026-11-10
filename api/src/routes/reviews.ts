@@ -1,5 +1,6 @@
 // Reviews between confirmed contacts; Request a Review; external invite links (server tokens, expiry, one use).
 import { Hono } from 'hono';
+import { autoReport, blockedBetweenProfiles, checkText } from '../lib/moderation';
 import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, clientIP, rateLimit, requireAuth, requireProfile } from '../lib/auth';
@@ -17,6 +18,7 @@ async function hasReviewed(env: Env, authorUserId: string, recipient: string) {
 async function checkCanReview(env: Env, author: string, authorUser: string, recipient: string) {
   if (author === recipient || (await ownerOf(env, recipient)) === authorUser) fail(403, 'self_review');
   if (!(await areContacts(env, author, recipient))) fail(403, 'not_contact');
+  if (await blockedBetweenProfiles(env, author, recipient)) fail(403, 'blocked');
   if (await hasReviewed(env, authorUser, recipient)) fail(409, 'already_reviewed');
 }
 
@@ -28,10 +30,11 @@ reviews.get('/', async (c) => {
   const limit = clampLimit(c.req.query('limit'), 30, 100);
   const offset = Math.max(0, Number(c.req.query('offset') ?? 0) || 0);
   const [rows, summary] = await Promise.all([
-    c.env.DB.prepare(`SELECT r.* FROM reviews r WHERE r.recipient_profile_id = ? AND r.status = 'published' ORDER BY ${order} LIMIT ? OFFSET ?`)
+    c.env.DB.prepare(`SELECT r.* FROM reviews r WHERE r.recipient_profile_id = ? AND r.status = 'published' AND r.review_status = 'approved' ORDER BY ${order} LIMIT ? OFFSET ?`)
       .bind(profileId, limit, offset).all<Record<string, any>>(),
     c.env.DB.prepare(`SELECT AVG((quality + speed + contact) / 3.0) AS rating, AVG(quality) AS quality, AVG(speed) AS speed,
-        AVG(contact) AS contact, COUNT(*) AS count FROM reviews WHERE recipient_profile_id = ? AND status = 'published'`).bind(profileId).first(),
+        AVG(contact) AS contact, COUNT(*) AS count FROM reviews WHERE recipient_profile_id = ? AND status = 'published'
+        AND review_status = 'approved'`).bind(profileId).first(),
   ]);
   const authors = await loadCards(c.env, rows.results.map((r) => r.author_profile_id));
   return c.json({
@@ -72,8 +75,16 @@ reviews.post('/', requireAuth, requireProfile, async (c) => {
     if (String(error).includes('UNIQUE')) fail(409, 'already_reviewed');
     throw error;
   }
+  // A review whose text the automatic check flags waits for a moderator before it is shown.
+  const verdict = checkText(body.comment);
+  if (verdict.flagged) {
+    await c.env.DB.prepare(`UPDATE reviews SET review_status = 'flagged', review_reason = ? WHERE id = ?`)
+      .bind(verdict.reasons.join(', ').slice(0, 300), id).run();
+    await autoReport(c.env, { type: 'review', id, profileId: profile.id }, verdict, body.comment);
+    return c.json({ id, reviewStatus: 'flagged' }, 201);
+  }
   await notify(c.env, body.recipientProfileId, 'new_review', profile.id, { reviewId: id });
-  return c.json({ id }, 201);
+  return c.json({ id, reviewStatus: 'approved' }, 201);
 });
 
 // POST /v1/reviews/requests {contactProfileId} — idempotent: a repeated tap returns the waiting request.

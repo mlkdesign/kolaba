@@ -35,7 +35,8 @@ const emailOf = (credential: string) => {
 
 async function finish(credential: string) {
   try {
-    const session = await post<any>('/v1/auth/google', { credential });
+    // The sign-in screens say that continuing with Google accepts the Terms (shown next to the button).
+    const session = await post<any>('/v1/auth/google', { credential, acceptTerms: true });
     googleName.value = session.google?.name ?? null;
     applySession(session);
   } catch (e) {

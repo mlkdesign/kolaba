@@ -64,7 +64,7 @@ function Collage() {
 function LegalLinks() {
   return (
     <nav class="legal-links" aria-label="Legal documents">
-      <a href={`${BASE}privacy.html`}>Privacy Policy</a><i aria-hidden="true" /><a href={`${BASE}terms.html`}>Terms and Conditions</a>
+      <a href={`${BASE}legal/privacy.html`}>Privacy Policy</a><i aria-hidden="true" /><a href={`${BASE}legal/terms.html`}>Terms of Service</a>
     </nav>
   );
 }
@@ -144,8 +144,8 @@ function Socials({ intent }: { intent: 'Sign Up' | 'Log in' }) {
       <div class="auth-or">Or</div>
       <div class="form-gap">
         <GoogleButton intent={intent} />
-        <button type="button" class="social-btn" onClick={() => showToast(`${intent} with Apple is available in the iOS app`)}><img src={icon('IconApple')} alt="" />{intent} with Apple</button>
       </div>
+      <p class="auth-consent">By continuing with Google you agree to the <a href={`${BASE}legal/terms.html`} target="_blank" rel="noopener">Terms of Service</a> and have read the <a href={`${BASE}legal/privacy.html`} target="_blank" rel="noopener">Privacy Policy</a>.</p>
     </>
   );
 }
@@ -160,14 +160,17 @@ function Signup({ onBack, onSent, onLogin }: { onBack: () => void; onSent: (emai
   const [passError, setPassError] = useState(false);
   const [shake, setShake] = useState(0);
   const [busy, setBusy] = useState(false);
-  const ready = validEmail(email) && password.length >= 8;
+  const [accepted, setAccepted] = useState(false);
+  const [termsError, setTermsError] = useState(false);
+  const ready = validEmail(email) && password.length >= 8 && accepted;
   const submit = async (e: Event) => {
     e.preventDefault();
     if (busy) return;
     if (!validEmail(email)) { setEmailError('invalid'); setShake((s) => s + 1); return; }
     if (password.length < 8) { setPassError(true); setShake((s) => s + 1); return; }
+    if (!accepted) { setTermsError(true); setShake((s) => s + 1); return; }
     setBusy(true);
-    try { await post('/v1/auth/signup', { email, password }); onSent(email.trim().toLowerCase()); }
+    try { await post('/v1/auth/signup', { email, password, acceptTerms: true }); onSent(email.trim().toLowerCase()); }
     catch (err) {
       const code = err instanceof ApiError ? err.code : '';
       if (code === 'email_taken') setEmailError('taken');
@@ -191,6 +194,11 @@ function Signup({ onBack, onSent, onLogin }: { onBack: () => void; onSent: (emai
         <Field iconName="IconKey" type="password" value={password} placeholder="Your password" autoComplete="new-password"
           error={passError} shake={passError ? shake : 0} onInput={(v) => { setPassword(v); setPassError(false); }} />
         {passError && <div class="field-error" role="alert">Password must be at least 8 characters long.</div>}
+        <label class="auth-terms">
+          <input type="checkbox" checked={accepted} onChange={(e) => { setAccepted((e.target as HTMLInputElement).checked); setTermsError(false); }} />
+          <span>I agree to the <a href={`${BASE}legal/terms.html`} target="_blank" rel="noopener">Terms of Service</a> and have read the <a href={`${BASE}legal/privacy.html`} target="_blank" rel="noopener">Privacy Policy</a>.</span>
+        </label>
+        {termsError && <div class="field-error" role="alert">Accept the Terms of Service to create an account.</div>}
         <NextButton busy={busy} ready={ready} />
       </form>
       <Socials intent="Sign Up" />
@@ -411,8 +419,8 @@ export function Legal({ onBack }: { onBack: () => void }) {
           <h2>KOLABA web test version</h2>
           <p>KOLABA connects creators and businesses. This is a test version: no payments are charged.</p>
           <h2>Legal documents</h2>
-          <p><a href={`${BASE}privacy.html`}>Read the Privacy Policy</a></p>
-          <p><a href={`${BASE}terms.html`}>Read the Terms of Use</a></p>
+          <p><a href={`${BASE}legal/privacy.html`}>Read the Privacy Policy</a></p>
+          <p><a href={`${BASE}legal/terms.html`}>Read the Terms of Service</a></p><p><a href={`${BASE}legal/community-guidelines.html`}>Read the Community Guidelines</a></p>
           <h2>Operator and contact</h2>
           <p>Milka Yevhenii, Ukraine · <a href="mailto:mlkdesignweb@gmail.com">mlkdesignweb@gmail.com</a></p>
         </div>

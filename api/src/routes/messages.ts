@@ -5,7 +5,8 @@ import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, rateLimit, requireAuth, requireProfile } from '../lib/auth';
 import { areContacts, loadCards, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/cards';
-import { signedMediaURL } from './media';
+import { signedMediaURL, signedVoiceURL } from './media';
+import { blockedBetweenUsers } from '../lib/moderation';
 import { clampLimit, decodeCursor, encodeCursor, fail, newId, now, pairKey } from '../lib/util';
 
 const messages = new Hono<AppEnv>();
@@ -20,9 +21,22 @@ async function participant(env: Env, conversationId: string, profileId: string) 
 async function messagesJSON(env: Env, rows: Record<string, any>[], viewer: string) {
   if (!rows.length) return [];
   const ids = rows.map((r) => r.id);
-  const attachments = await env.DB.prepare(`SELECT ma.message_id, ${mediaColumns} FROM message_attachments ma
-      JOIN media m ON m.id = ma.media_id AND m.status = 'ready' WHERE ma.message_id IN (${ids.map(() => '?').join(',')})
-      ORDER BY ma.position`).bind(...ids).all<MediaRow & { message_id: string }>();
+  const marks = ids.map(() => '?').join(',');
+  const [attachments, reactions, voices] = await Promise.all([
+    env.DB.prepare(`SELECT ma.message_id, ${mediaColumns} FROM message_attachments ma
+      JOIN media m ON m.id = ma.media_id AND m.status = 'ready' AND m.review_status NOT IN ('rejected', 'removed')
+      WHERE ma.message_id IN (${marks}) ORDER BY ma.position`).bind(...ids).all<MediaRow & { message_id: string }>(),
+    env.DB.prepare(`SELECT message_id, COUNT(*) AS n, SUM(profile_id = ?) AS mine FROM message_reactions
+      WHERE message_id IN (${marks}) AND kind = 'like' GROUP BY message_id`).bind(viewer, ...ids).all<{ message_id: string; n: number; mine: number }>(),
+    env.DB.prepare(`SELECT message_id, mime, bytes, duration, waveform FROM message_voice WHERE message_id IN (${marks})`)
+      .bind(...ids).all<{ message_id: string; mime: string; bytes: number; duration: number; waveform: string }>(),
+  ]);
+  const likes = new Map(reactions.results.map((r) => [r.message_id, r]));
+  const voiceBy = new Map<string, Record<string, unknown>>();
+  for (const v of voices.results) {
+    voiceBy.set(v.message_id, { url: await signedVoiceURL(env, v.message_id), mime: v.mime, bytes: v.bytes, duration: v.duration,
+                                waveform: JSON.parse(v.waveform || '[]') });
+  }
   const byMessage = new Map<string, unknown[]>();
   for (const m of attachments.results) {
     const json = mediaJSON(env, m);
@@ -33,6 +47,10 @@ async function messagesJSON(env: Env, rows: Record<string, any>[], viewer: strin
     id: m.id, conversationId: m.conversation_id, senderProfileId: m.sender_profile_id, isOutgoing: m.sender_profile_id === viewer,
     kind: m.kind, body: m.deleted_at ? '' : m.body, createdAt: m.created_at, editedAt: m.edited_at, deletedAt: m.deleted_at,
     attachments: m.deleted_at ? [] : byMessage.get(m.id) ?? [],
+    voice: m.deleted_at ? null : voiceBy.get(m.id) ?? null,
+    likesCount: likes.get(m.id)?.n ?? 0,
+    isLikedByMe: (likes.get(m.id)?.mine ?? 0) > 0,
+    clientId: m.sender_profile_id === viewer ? m.client_id ?? null : null,
     isReadByOther: m.other_read_at != null ? m.other_read_at >= m.created_at : undefined,
   }));
 }
@@ -88,6 +106,7 @@ messages.post('/', async (c) => {
     .first<{ owner_user_id: string; status: string; who: string }>();
   if (!other || other.status !== 'active') fail(404, 'profile_not_found');
   if (other!.owner_user_id === profile.ownerUserId) fail(422, 'same_account');
+  if (await blockedBetweenUsers(c.env, profile.ownerUserId, other!.owner_user_id)) fail(403, 'blocked');
   if (jobId) {
     const job = await c.env.DB.prepare(`SELECT owner_profile_id FROM jobs WHERE id = ?`).bind(jobId).first<{ owner_profile_id: string }>();
     if (!job || ![profile.id, profileId].includes(job.owner_profile_id)) fail(404, 'job_not_found');
@@ -103,11 +122,15 @@ messages.post('/', async (c) => {
   if (other!.who === 'nobody' || (other!.who === 'contacts' && !(await areContacts(c.env, profile.id, profileId)))) {
     fail(403, 'messaging_not_allowed');
   }
+  // Anti-spam: an account opens at most NEW_CONVERSATIONS_PER_DAY new conversations a day.
+  const opened = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM conversations WHERE created_at > ? AND created_by_profile_id IN
+      (SELECT id FROM profiles WHERE owner_user_id = ?)`).bind(now() - 86_400_000, profile.ownerUserId).first<{ n: number }>();
+  if ((opened?.n ?? 0) >= Number(c.env.NEW_CONVERSATIONS_PER_DAY ?? 25)) fail(429, 'too_many_new_conversations');
   const id = newId('cnv');
   try {
     await c.env.DB.batch([
-      c.env.DB.prepare(`INSERT INTO conversations (id, kind, pair_key, related_job_id, created_at) VALUES (?, ?, ?, ?, ?)`)
-        .bind(id, jobId ? 'job' : 'direct', key, jobId ?? '', now()),
+      c.env.DB.prepare(`INSERT INTO conversations (id, kind, pair_key, related_job_id, created_at, created_by_profile_id) VALUES (?, ?, ?, ?, ?, ?)`)
+        .bind(id, jobId ? 'job' : 'direct', key, jobId ?? '', now(), profile.id),
       c.env.DB.prepare(`INSERT INTO conversation_participants (conversation_id, profile_id, joined_at) VALUES (?, ?, ?), (?, ?, ?)`)
         .bind(id, profile.id, now(), id, profileId, now()),
       c.env.DB.prepare(`INSERT INTO conversation_read_state (conversation_id, profile_id, last_read_at) VALUES (?, ?, ?), (?, ?, 0)`)
@@ -143,9 +166,10 @@ messages.get('/:id/messages', async (c) => {
       (SELECT muted FROM conversation_participants WHERE conversation_id = c.id AND profile_id = ?) AS muted
       FROM conversations c WHERE c.id = ?`).bind(profile.id, profile.id, id).first<Record<string, any>>();
   const cards = await loadCards(c.env, [conv!.other_id]);
+  const block = await blockState(c.env, profile.ownerUserId, conv!.other_id);
   return c.json({
     conversation: { id, relatedJobId: conv!.related_job_id || null, relatedJobTitle: conv!.job_title, muted: conv!.muted === 1,
-                    partner: cards.get(conv!.other_id) ?? null },
+                    partner: cards.get(conv!.other_id) ?? null, blockedByMe: block.byMe, blockedByThem: block.byThem },
     items: await messagesJSON(c.env, page, profile.id),
     nextCursor: last ? encodeCursor({ t: last.created_at, id: last.id }) : null,
   });
@@ -157,10 +181,18 @@ messages.post('/:id/messages', async (c) => {
   const id = c.req.param('id');
   await participant(c.env, id, profile.id);
   await rateLimit(c, 'RL_WRITE', `msg:${profile.ownerUserId}`);
-  const body = z.object({ body: z.string().max(4000).default(''), mediaIds: z.array(z.string()).max(10).default([]) })
+  const body = z.object({ body: z.string().max(4000).default(''), mediaIds: z.array(z.string()).max(10).default([]),
+                          clientId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional() })
     .parse(await c.req.json());
   const text = body.body.trim();
   if (!text && !body.mediaIds.length) fail(422, 'empty_message');
+  // A retry of a message that already arrived returns that message (never a second copy).
+  if (body.clientId) {
+    const existing = await c.env.DB.prepare(`SELECT m.*, NULL AS other_read_at FROM messages m WHERE conversation_id = ? AND sender_profile_id = ?
+        AND client_id = ?`).bind(id, profile.id, body.clientId).first<Record<string, any>>();
+    if (existing) return c.json((await messagesJSON(c.env, [existing], profile.id))[0], 200);
+  }
+  await checkCanSend(c.env, id, profile);
   if (body.mediaIds.length) {
     const owned = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE owner_profile_id = ? AND status = 'ready'
         AND id IN (${body.mediaIds.map(() => '?').join(',')})`).bind(profile.id, ...body.mediaIds).first<{ n: number }>();
@@ -169,8 +201,8 @@ messages.post('/:id/messages', async (c) => {
   const messageId = newId('msg');
   const t = now();
   await c.env.DB.batch([
-    c.env.DB.prepare(`INSERT INTO messages (id, conversation_id, sender_profile_id, kind, body, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .bind(messageId, id, profile.id, text ? 'text' : 'media', text, t),
+    c.env.DB.prepare(`INSERT INTO messages (id, conversation_id, sender_profile_id, kind, body, created_at, client_id) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .bind(messageId, id, profile.id, text ? 'text' : 'media', text, t, body.clientId ?? null),
     ...[...new Set(body.mediaIds)].map((mid, i) =>
       c.env.DB.prepare(`INSERT INTO message_attachments (message_id, media_id, position) VALUES (?, ?, ?)`).bind(messageId, mid, i)),
     c.env.DB.prepare(`UPDATE conversations SET last_message_id = ?, last_message_at = ? WHERE id = ?`).bind(messageId, t, id),
@@ -179,19 +211,142 @@ messages.post('/:id/messages', async (c) => {
       last_read_message_id = excluded.last_read_message_id`).bind(id, profile.id, t, messageId),
     c.env.DB.prepare(`UPDATE conversation_participants SET hidden_at = NULL WHERE conversation_id = ?`).bind(id),
   ]);
+  await afterSend(c.env, id, profile.id, messageId, t);
+  const row = await c.env.DB.prepare(`SELECT m.*, NULL AS other_read_at FROM messages m WHERE id = ?`).bind(messageId).first<Record<string, any>>();
+  return c.json((await messagesJSON(c.env, [row!], profile.id))[0], 201);
+});
+
+/** Who blocked whom between the viewer's account and a profile's account. */
+async function blockState(env: Env, viewerUserId: string, otherProfileId: string) {
+  const owner = await env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(otherProfileId).first<{ owner_user_id: string }>();
+  if (!owner) return { byMe: false, byThem: false, otherUserId: null as string | null };
+  const rows = await env.DB.prepare(`SELECT blocker_user_id FROM blocks WHERE (blocker_user_id = ?1 AND blocked_user_id = ?2)
+      OR (blocker_user_id = ?2 AND blocked_user_id = ?1)`).bind(viewerUserId, owner.owner_user_id).all<{ blocker_user_id: string }>();
+  return { byMe: rows.results.some((r) => r.blocker_user_id === viewerUserId),
+           byThem: rows.results.some((r) => r.blocker_user_id === owner.owner_user_id), otherUserId: owner.owner_user_id };
+}
+
+/** Sending is refused between blocked accounts, and to a stranger who hasn't answered after MESSAGES_BEFORE_REPLY
+ *  messages (new-contact anti-spam). Confirmed contacts are never limited this way. */
+async function checkCanSend(env: Env, conversationId: string, profile: { id: string; ownerUserId: string }) {
+  const other = await env.DB.prepare(`SELECT profile_id FROM conversation_participants WHERE conversation_id = ? AND profile_id <> ? LIMIT 1`)
+    .bind(conversationId, profile.id).first<{ profile_id: string }>();
+  if (!other) fail(404, 'conversation_not_found');
+  const block = await blockState(env, profile.ownerUserId, other!.profile_id);
+  if (block.byMe) fail(403, 'blocked_by_you');
+  if (block.byThem) fail(403, 'blocked');
+  if (await areContacts(env, profile.id, other!.profile_id)) return;
+  const counts = await env.DB.prepare(`SELECT SUM(sender_profile_id = ?1) AS mine, SUM(sender_profile_id <> ?1) AS theirs
+      FROM messages WHERE conversation_id = ?2 AND deleted_at IS NULL`).bind(profile.id, conversationId).first<{ mine: number; theirs: number }>();
+  const limit = Number(env.MESSAGES_BEFORE_REPLY ?? 5);
+  if ((counts?.theirs ?? 0) === 0 && (counts?.mine ?? 0) >= limit) fail(429, 'awaiting_reply');
+}
+
+/** After a message: one unread notification per chat for each unmuted partner. */
+async function afterSend(env: Env, id: string, senderId: string, messageId: string, t: number) {
+  void messageId;
   // One unread "new message" notification per chat for an unmuted partner.
-  const others = await c.env.DB.prepare(`SELECT profile_id, muted FROM conversation_participants WHERE conversation_id = ? AND profile_id <> ?`)
-    .bind(id, profile.id).all<{ profile_id: string; muted: number }>();
+  const others = await env.DB.prepare(`SELECT profile_id, muted FROM conversation_participants WHERE conversation_id = ? AND profile_id <> ?`)
+    .bind(id, senderId).all<{ profile_id: string; muted: number }>();
   for (const o of others.results) {
     if (o.muted) continue;
-    const pending = await c.env.DB.prepare(`SELECT id FROM notifications WHERE recipient_profile_id = ? AND type = 'new_message'
+    const pending = await env.DB.prepare(`SELECT id FROM notifications WHERE recipient_profile_id = ? AND type = 'new_message'
         AND read_at IS NULL AND json_extract(payload, '$.conversationId') = ?`).bind(o.profile_id, id).first<{ id: string }>();
     if (pending) {
-      await c.env.DB.prepare(`UPDATE notifications SET created_at = ?, actor_profile_id = ? WHERE id = ?`).bind(t, profile.id, pending.id).run();
+      await env.DB.prepare(`UPDATE notifications SET created_at = ?, actor_profile_id = ? WHERE id = ?`).bind(t, senderId, pending.id).run();
     } else {
-      await notify(c.env, o.profile_id, 'new_message', profile.id, { conversationId: id });
+      await notify(env, o.profile_id, 'new_message', senderId, { conversationId: id });
     }
   }
+}
+
+/** The message, if the profile takes part in its conversation (and hasn't cleared it away). */
+async function visibleMessage(env: Env, conversationId: string, messageId: string, profileId: string) {
+  await participant(env, conversationId, profileId);
+  const row = await env.DB.prepare(`SELECT m.id FROM messages m WHERE m.id = ? AND m.conversation_id = ? AND m.deleted_at IS NULL
+      AND m.created_at > COALESCE((SELECT cleared_at FROM conversation_participants WHERE conversation_id = ? AND profile_id = ?), 0)`)
+    .bind(messageId, conversationId, conversationId, profileId).first();
+  if (!row) fail(404, 'message_not_found');
+}
+
+// PUT / DELETE /v1/conversations/:id/messages/:messageId/like — a message's like (one per profile; idempotent).
+messages.put('/:id/messages/:messageId/like', async (c) => {
+  const profile = actingProfile(c);
+  await rateLimit(c, 'RL_WRITE', `react:${profile.ownerUserId}`);
+  await visibleMessage(c.env, c.req.param('id'), c.req.param('messageId'), profile.id);
+  await c.env.DB.prepare(`INSERT OR IGNORE INTO message_reactions (message_id, profile_id, kind, created_at) VALUES (?, ?, 'like', ?)`)
+    .bind(c.req.param('messageId'), profile.id, now()).run();
+  return c.json(await likeState(c.env, c.req.param('messageId'), profile.id));
+});
+
+messages.delete('/:id/messages/:messageId/like', async (c) => {
+  const profile = actingProfile(c);
+  await visibleMessage(c.env, c.req.param('id'), c.req.param('messageId'), profile.id);
+  await c.env.DB.prepare(`DELETE FROM message_reactions WHERE message_id = ? AND profile_id = ? AND kind = 'like'`)
+    .bind(c.req.param('messageId'), profile.id).run();
+  return c.json(await likeState(c.env, c.req.param('messageId'), profile.id));
+});
+
+async function likeState(env: Env, messageId: string, profileId: string) {
+  const row = await env.DB.prepare(`SELECT COUNT(*) AS n, SUM(profile_id = ?) AS mine FROM message_reactions WHERE message_id = ? AND kind = 'like'`)
+    .bind(profileId, messageId).first<{ n: number; mine: number | null }>();
+  return { messageId, likesCount: row?.n ?? 0, isLikedByMe: (row?.mine ?? 0) > 0 };
+}
+
+const VOICE_TYPES: Record<string, string> = { 'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a', 'audio/m4a': 'm4a', 'audio/aac': 'aac' };
+
+// POST /v1/conversations/:id/voice — multipart: file (AAC / M4A), duration (s), waveform (JSON), clientId. Stored
+// privately in R2; participants get signed URLs only.
+messages.post('/:id/voice', async (c) => {
+  const profile = actingProfile(c);
+  const id = c.req.param('id');
+  await participant(c.env, id, profile.id);
+  await rateLimit(c, 'RL_WRITE', `msg:${profile.ownerUserId}`);
+  if (!c.env.MEDIA) fail(503, 'storage_unavailable');
+  const maxBytes = Number(c.env.MAX_VOICE_KB ?? 3072) * 1024;
+  const declared = Number(c.req.header('Content-Length') ?? 0);
+  if (declared > maxBytes + 16 * 1024) fail(413, 'file_too_large');
+  const form = await c.req.formData().catch(() => fail(400, 'invalid_form'));
+  const file = form.get('file');
+  if (!(file instanceof File)) fail(400, 'file_required');
+  const audio = file as File;
+  const mime = (audio.type || '').toLowerCase();
+  const ext = VOICE_TYPES[mime] ?? fail(415, 'invalid_mime_type');
+  if (audio.size === 0 || audio.size > maxBytes) fail(413, 'file_too_large');
+  const duration = Number(form.get('duration'));
+  if (!Number.isFinite(duration) || duration <= 0 || duration > Number(c.env.MAX_VOICE_SECONDS ?? 300)) fail(422, 'invalid_duration');
+  const clientId = String(form.get('clientId') ?? '');
+  if (clientId && !/^[A-Za-z0-9_-]{8,64}$/.test(clientId)) fail(422, 'invalid_client_id');
+  let waveform: number[] = [];
+  try {
+    waveform = z.array(z.number().min(0).max(1)).max(64).parse(JSON.parse(String(form.get('waveform') ?? '[]')));
+  } catch { waveform = []; }
+  if (clientId) {
+    const existing = await c.env.DB.prepare(`SELECT m.*, NULL AS other_read_at FROM messages m WHERE conversation_id = ? AND sender_profile_id = ?
+        AND client_id = ?`).bind(id, profile.id, clientId).first<Record<string, any>>();
+    if (existing) return c.json((await messagesJSON(c.env, [existing], profile.id))[0], 200);
+  }
+  await checkCanSend(c.env, id, profile);
+  const bytes = new Uint8Array(await audio.arrayBuffer());
+  // MPEG-4 audio ("ftyp") or raw ADTS AAC (0xFFF sync word) — never anything else under an audio name.
+  const ascii = String.fromCharCode(...bytes.slice(4, 8));
+  if (!(ascii === 'ftyp' || (bytes[0] === 0xff && (bytes[1] & 0xf0) === 0xf0))) fail(415, 'invalid_file');
+  const messageId = newId('msg');
+  const key = `voice/${id}/${messageId}.${ext}`;
+  await c.env.MEDIA!.put(key, bytes, { httpMetadata: { contentType: ext === 'aac' ? 'audio/aac' : 'audio/mp4' } });
+  const t = now();
+  await c.env.DB.batch([
+    c.env.DB.prepare(`INSERT INTO messages (id, conversation_id, sender_profile_id, kind, body, created_at, client_id) VALUES (?, ?, ?, 'media', '', ?, ?)`)
+      .bind(messageId, id, profile.id, t, clientId || null),
+    c.env.DB.prepare(`INSERT INTO message_voice (message_id, storage_key, mime, bytes, duration, waveform, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .bind(messageId, key, ext === 'aac' ? 'audio/aac' : 'audio/mp4', bytes.length, duration, JSON.stringify(waveform), t),
+    c.env.DB.prepare(`UPDATE conversations SET last_message_id = ?, last_message_at = ? WHERE id = ?`).bind(messageId, t, id),
+    c.env.DB.prepare(`INSERT INTO conversation_read_state (conversation_id, profile_id, last_read_at, last_read_message_id) VALUES (?, ?, ?, ?)
+      ON CONFLICT (conversation_id, profile_id) DO UPDATE SET last_read_at = excluded.last_read_at,
+      last_read_message_id = excluded.last_read_message_id`).bind(id, profile.id, t, messageId),
+    c.env.DB.prepare(`UPDATE conversation_participants SET hidden_at = NULL WHERE conversation_id = ?`).bind(id),
+  ]);
+  await afterSend(c.env, id, profile.id, messageId, t);
   const row = await c.env.DB.prepare(`SELECT m.*, NULL AS other_read_at FROM messages m WHERE id = ?`).bind(messageId).first<Record<string, any>>();
   return c.json((await messagesJSON(c.env, [row!], profile.id))[0], 201);
 });
