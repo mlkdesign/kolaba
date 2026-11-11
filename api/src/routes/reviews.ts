@@ -1,10 +1,10 @@
-// Reviews between confirmed contacts; Request a Review; external invite links (server tokens, expiry, one use).
+// Open reviews (FIX 114: any signed-in account, no contact needed); Request a Review; external invite links (server tokens, expiry, one use).
 import { Hono } from 'hono';
 import { autoReport, blockedBetweenProfiles, checkText } from '../lib/moderation';
 import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, clientIP, rateLimit, requireAuth, requireProfile } from '../lib/auth';
-import { areContacts, loadCard, loadCards, notify, ownerOf } from '../lib/cards';
+import { loadCard, loadCards, notify, ownerOf } from '../lib/cards';
 import { clampLimit, fail, newId, newToken, now, pairKey, sha256Hex } from '../lib/util';
 
 const reviews = new Hono<AppEnv>();
@@ -17,7 +17,6 @@ async function hasReviewed(env: Env, authorUserId: string, recipient: string) {
 /** ReviewPermissions.canReview on the server. */
 async function checkCanReview(env: Env, author: string, authorUser: string, recipient: string) {
   if (author === recipient || (await ownerOf(env, recipient)) === authorUser) fail(403, 'self_review');
-  if (!(await areContacts(env, author, recipient))) fail(403, 'not_contact');
   if (await blockedBetweenProfiles(env, author, recipient)) fail(403, 'blocked');
   if (await hasReviewed(env, authorUser, recipient)) fail(409, 'already_reviewed');
 }
@@ -44,7 +43,7 @@ reviews.get('/', async (c) => {
   });
 });
 
-// POST /v1/reviews — as the acting profile, about a confirmed contact.
+// POST /v1/reviews — as the acting profile, about any other account's active profile (no contact needed).
 reviews.post('/', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c);
   await rateLimit(c, 'RL_WRITE', `review:${profile.ownerUserId}`);
@@ -53,6 +52,8 @@ reviews.post('/', requireAuth, requireProfile, async (c) => {
     contact: z.number().int().min(1).max(5), comment: z.string().trim().min(1).max(2000),
     requestId: z.string().optional(), inviteId: z.string().optional(),
   }).parse(await c.req.json());
+  const recipient = await c.env.DB.prepare(`SELECT status FROM profiles WHERE id = ?`).bind(body.recipientProfileId).first<{ status: string }>();
+  if (!recipient || recipient.status !== 'active') fail(404, 'profile_not_found');
   await checkCanReview(c.env, profile.id, profile.ownerUserId, body.recipientProfileId);
   if (body.inviteId) {
     const invite = await c.env.DB.prepare(`SELECT status FROM review_invites WHERE id = ? AND owner_profile_id = ? AND accepted_by_profile_id = ?`)

@@ -67,8 +67,10 @@ contacts.post('/requests', async (c) => {
   if (await blockedBetweenUsers(c.env, profile.ownerUserId, target!.owner_user_id)) fail(403, 'blocked');
   const current = await relation(c.env, profile.id, profile.ownerUserId, profileId);
   if (current.relation === 'incoming') {
-    await c.env.DB.prepare(`UPDATE contact_requests SET status = 'accepted', responded_at = ? WHERE id = ?`).bind(now(), current.requestId).run();
-    await notify(c.env, profileId, 'contact_accepted', profile.id, { requestId: current.requestId });
+    // Their request is waiting: Add accepts it (never a second, crossing request). Only the first accept notifies.
+    const res = await c.env.DB.prepare(`UPDATE contact_requests SET status = 'accepted', responded_at = ? WHERE id = ? AND status = 'pending'`)
+      .bind(now(), current.requestId).run();
+    if (res.meta.changes) await notify(c.env, profileId, 'contact_accepted', profile.id, { requestId: current.requestId });
     return c.json({ relation: 'connected', requestId: current.requestId });
   }
   if (current.relation !== 'none') return c.json(current);
@@ -88,12 +90,17 @@ contacts.post('/requests', async (c) => {
 contacts.post('/requests/:id/:action{accept|decline|cancel}', async (c) => {
   const profile = actingProfile(c);
   const action = c.req.param('action');
-  const row = await c.env.DB.prepare(`SELECT * FROM contact_requests WHERE id = ? AND status = 'pending'`).bind(c.req.param('id'))
-    .first<{ id: string; sender_profile_id: string; recipient_profile_id: string }>();
+  const row = await c.env.DB.prepare(`SELECT * FROM contact_requests WHERE id = ?`).bind(c.req.param('id'))
+    .first<{ id: string; status: string; sender_profile_id: string; recipient_profile_id: string }>();
   const allowed = row && (action === 'cancel' ? row.sender_profile_id === profile.id : row.recipient_profile_id === profile.id);
   if (!allowed) fail(404, 'request_not_found');
   const status = action === 'accept' ? 'accepted' : action === 'decline' ? 'declined' : 'cancelled';
-  await c.env.DB.prepare(`UPDATE contact_requests SET status = ?, responded_at = ? WHERE id = ?`).bind(status, now(), row!.id).run();
+  // A repeated tap (or a retry after a lost answer) of the same action is a success, nothing changes twice.
+  if (row!.status === status) return c.json({ status });
+  if (row!.status !== 'pending') fail(409, 'request_not_pending');
+  const res = await c.env.DB.prepare(`UPDATE contact_requests SET status = ?, responded_at = ? WHERE id = ? AND status = 'pending'`)
+    .bind(status, now(), row!.id).run();
+  if (!res.meta.changes) fail(409, 'request_not_pending');
   if (status === 'accepted') await notify(c.env, row!.sender_profile_id, 'contact_accepted', profile.id, { requestId: row!.id });
   // A withdrawn request disappears from the recipient's notifications (nothing left to answer).
   if (status === 'cancelled') {
@@ -108,11 +115,9 @@ contacts.delete('/:profileId', async (c) => {
   const profile = actingProfile(c);
   const res = await c.env.DB.prepare(`UPDATE contact_requests SET status = 'removed', responded_at = ? WHERE pair_key = ? AND status = 'accepted'`)
     .bind(now(), pairKey(profile.id, c.req.param('profileId'))).run();
-  if (!res.meta.changes) fail(404, 'not_contact');
-  await c.env.DB.prepare(`UPDATE review_requests SET status = 'cancelled' WHERE status = 'pending'
-      AND ((requester_profile_id = ?1 AND contact_profile_id = ?2) OR (requester_profile_id = ?2 AND contact_profile_id = ?1))`)
-    .bind(profile.id, c.req.param('profileId')).run();
-  return c.json({ status: 'removed' });
+  // Already gone (the other side removed it, or a repeated tap): the same answer — the result is what was asked.
+  // Messages, reviews, review requests and reports stay as they are (FIX 114).
+  return c.json({ status: 'removed', changed: res.meta.changes > 0 });
 });
 
 export default contacts;
