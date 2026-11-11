@@ -61,6 +61,11 @@ export interface Env {
   RESEND_API_KEY?: string;
   /** HMAC key for signed media URLs of private files. */
   MEDIA_URL_SECRET?: string;
+  /** FEATURE 115 — APNs (secrets): the .p8 key's id and PEM text, the team id; the app's bundle id is the topic. */
+  APNS_KEY_ID?: string;
+  APNS_TEAM_ID?: string;
+  APNS_PRIVATE_KEY?: string;
+  APNS_BUNDLE_ID?: string;
 }
 
 export interface RateLimit {

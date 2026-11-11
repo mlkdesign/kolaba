@@ -141,18 +141,29 @@ export function UserPage({ id }: { id: string }) {
   const { data: u, error, reload } = useLoad<UserDetail>((s) => api('GET', `/users/${id}`, undefined, s), [id]);
   const { modal, act } = useAccountActions(reload);
   const extra = useModal();
-  const pro = (p: AdminProfile, enabled: boolean) => extra.open((close) => (
-    <ConfirmModal title={enabled ? 'Grant PRO' : 'Remove PRO'} confirmLabel={enabled ? 'Grant PRO' : 'Remove PRO'} danger={!enabled} reason reasonOptional
-      onClose={close}
-      onConfirm={async (reason) => {
-        await api('PATCH', `/profiles/${p.id}/pro`, { enabled, reason: reason || undefined });
-        toast.ok(enabled ? 'PRO access granted' : 'PRO access removed', `@${p.username} · recorded in Activity Logs.`);
-        reload();
-      }}
-      text={enabled
-        ? <>Give <b>@{p.username}</b> {p.type === 'creator' ? 'Creator' : 'Business'} PRO. It is marked as granted by an administrator — no payment is created.</>
-        : <>Remove PRO from <b>@{p.username}</b>? Any active PRO entitlement of this profile is cancelled now.</>} />
-  ));
+  // FEATURE 115: free PRO for one profile — one calendar month from now (server clock, UTC). The form's request key
+  // makes a double submit harmless (no second grant, no second notification to the person).
+  const pro = (p: AdminProfile, action: 'grant' | 'extend' | 'revoke') => {
+    const requestKey = crypto.randomUUID();
+    const plan = p.type === 'creator' ? 'CREATOR.PRO' : 'BUSINESS.PRO';
+    const titles = { grant: `Grant 1 month ${plan}`, extend: `Extend ${plan} by 1 month`, revoke: 'Remove PRO' };
+    return extra.open((close) => (
+      <ConfirmModal title={titles[action]} confirmLabel={titles[action]} danger={action === 'revoke'} reason reasonOptional
+        onClose={close}
+        onConfirm={async (reason) => {
+          await api('PATCH', `/profiles/${p.id}/pro`, { action, months: 1, requestKey, reason: reason || undefined });
+          toast.ok(action === 'revoke' ? 'PRO access removed' : action === 'extend' ? 'PRO extended' : 'PRO granted',
+                   `${p.displayName} · recorded in Activity Logs.`);
+          reload();
+        }}
+        text={action === 'revoke'
+          ? <>Remove the administrator's PRO from <b>{p.displayName}</b>? It ends now. A paid subscription is never changed here.</>
+          : action === 'extend'
+            ? <>Add one more month of free {plan} to <b>{p.displayName}</b>, after the current grant ends.</>
+            : <>Give <b>{p.displayName}</b> one month of free {plan}, from now. Only this profile gets it — not the account's other
+                profiles. The person gets a notification; no payment is created and no paywall is shown.</>} />
+    ));
+  };
   const edit = (p: AdminProfile) => extra.open((close) => <EditProfile profile={p} onClose={close} onSaved={reload} />);
   return (
     <>
@@ -202,11 +213,13 @@ export function UserPage({ id }: { id: string }) {
                     <div><dt>Profile ID</dt><dd className="mono">{p.id}</dd></div>
                     <div><dt>Location</dt><dd>{p.location ?? '—'}</dd></div>
                     <div><dt>Website</dt><dd className="ellipsis">{p.website ?? '—'}</dd></div>
-                    <div><dt>Plan</dt><dd className="cell-icon">{p.isPro ? <><Icon src={crown} size={13} />PRO{p.subscription && ` · ${p.subscription.source === 'admin' ? 'granted by admin' : p.subscription.source}`}</> : 'Free'}</dd></div>
+                    <div><dt>Plan</dt><dd className="cell-icon">{p.isPro ? <><Icon src={crown} size={13} />PRO{p.subscription && ` · ${p.subscription.source === 'admin' ? 'granted by admin' : p.subscription.source}`}{p.subscription?.expiresAt ? ` · until ${fmtDateTime(p.subscription.expiresAt)}` : ''}</> : 'Free'}</dd></div>
                   </dl>
                   <div className="profile-card__actions">
                     <Button small onClick={() => edit(p)}>Edit profile</Button>
-                    {p.isPro ? <Button small variant="ghost" onClick={() => pro(p, false)}>Remove PRO</Button> : <Button small onClick={() => pro(p, true)}>Grant PRO</Button>}
+                    {p.subscription?.source === 'admin'
+                      ? <><Button small onClick={() => pro(p, 'extend')}>Extend 1 month</Button><Button small variant="ghost" onClick={() => pro(p, 'revoke')}>Remove PRO</Button></>
+                      : !p.isPro && <Button small onClick={() => pro(p, 'grant')}>Grant 1 month PRO</Button>}
                     <Button small variant="ghost" href={p.publicUrl} title={p.publicUrl ? undefined : 'Not public while the profile is hidden'}>
                       Open public profile <ExternalGlyph />
                     </Button>

@@ -1,6 +1,7 @@
 // JSON shapes shared by every endpoint — built in SQL (one query per list, no N+1).
 import type { Env } from '../env';
 import { blockedBetweenProfiles, monetizationEnabled } from './moderation';
+import { pushToProfile, type PushContent } from './push';
 
 /** Absolute URL of a media file: external demo URL, or this API's file endpoint for R2 objects. */
 export function mediaURL(env: Env, row: { id: string; provider: string; url: string | null }): string | null {
@@ -14,7 +15,9 @@ export const ratingColumns = `
     WHERE r.recipient_profile_id = p.id AND r.status = 'published' AND r.review_status = 'approved') AS rating,
   (SELECT COUNT(*) FROM reviews r WHERE r.recipient_profile_id = p.id AND r.status = 'published' AND r.review_status = 'approved') AS reviews_count,
   EXISTS (SELECT 1 FROM subscriptions s WHERE s.profile_id = p.id AND s.status = 'active'
-            AND (s.expires_at IS NULL OR s.expires_at > unixepoch() * 1000)) AS is_pro`;
+            AND (s.expires_at IS NULL OR s.expires_at > unixepoch() * 1000)) AS is_pro,
+  EXISTS (SELECT 1 FROM subscriptions s WHERE s.profile_id = p.id AND s.status = 'active' AND s.source = 'admin'
+            AND (s.expires_at IS NULL OR s.expires_at > unixepoch() * 1000)) AS is_pro_grant`;
 
 /** SQL: the avatar's provider/url for profile alias `p`. */
 export const avatarColumns = `
@@ -31,7 +34,7 @@ export interface CardRow {
   id: string; type: string; display_name: string; username: string; city: string | null; country: string | null;
   country_code: string | null; flag: string | null; category: string | null; is_demo: number; status: string;
   avatar_id: string | null; avatar_provider: string | null; avatar_url: string | null;
-  rating: number | null; reviews_count: number; is_pro: number;
+  rating: number | null; reviews_count: number; is_pro: number; is_pro_grant?: number;
 }
 
 export function card(env: Env, row: CardRow, prefix = '') {
@@ -51,8 +54,8 @@ export function card(env: Env, row: CardRow, prefix = '') {
     avatarUrl: avatarId ? mediaURL(env, { id: avatarId, provider: get('avatar_provider')!, url: get('avatar_url') }) : null,
     rating: get('rating') ?? null,
     reviewsCount: get('reviews_count') ?? 0,
-    // Paid plans are off for now (moderation.ts): no PRO badge anywhere.
-    isPro: monetizationEnabled(env) && get('is_pro') === 1,
+    // Paid plans are off for now (moderation.ts): only PRO an administrator gave shows its badge (FEATURE 115).
+    isPro: monetizationEnabled(env) ? get('is_pro') === 1 : get('is_pro_grant') === 1,
     isDemo: get('is_demo') === 1,
   };
 }
@@ -109,14 +112,38 @@ export function mediaJSON(env: Env, m: MediaRow, extra: Record<string, unknown> 
   };
 }
 
-/** A notification for a profile (in-app only at this stage). */
-export async function notify(env: Env, recipient: string, type: string, actor: string | null, payload: Record<string, unknown> = {}) {
+/** What a feed notification says on the lock screen (FEATURE 115; English until notifications are localized). */
+const PUSH_TEXT: Record<string, { body: string; setting: PushContent['setting'] }> = {
+  contact_request: { body: 'wants to add you to contacts.', setting: 'followersAndMentions' },
+  contact_accepted: { body: 'accepted your contact request.', setting: 'followersAndMentions' },
+  new_review: { body: 'left you a review.', setting: 'projectUpdates' },
+  review_request: { body: 'asked you for a review.', setting: 'projectUpdates' },
+  liked_video: { body: 'liked your video.', setting: 'followersAndMentions' },
+  application_received: { body: 'applied to your job.', setting: 'newApplications' },
+};
+
+/** A notification for a profile: a row of its Notifications feed and, where APNs is set up, a push. Messages are not
+ *  notifications (they live in Chat, its badge and their own push — messages.ts). */
+export async function notify(env: Env, recipient: string, type: string, actor: string | null, payload: Record<string, unknown> = {},
+                             push?: { title: string; body: string }) {
   if (!recipient || recipient === actor) return;
   // Nothing from someone the recipient blocked (or who blocked them).
   if (actor && (await blockedBetweenProfiles(env, recipient, actor))) return;
+  const id = `ntf_${crypto.randomUUID()}`;
   await env.DB.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at)
                         VALUES (?, ?, ?, ?, ?, ?)`)
-    .bind(`ntf_${crypto.randomUUID()}`, recipient, type, actor, JSON.stringify(payload), Date.now()).run();
+    .bind(id, recipient, type, actor, JSON.stringify(payload), Date.now()).run();
+  const preset = PUSH_TEXT[type];
+  let text = push;
+  if (!text && preset) {
+    const name = actor ? (await env.DB.prepare(`SELECT display_name FROM profiles WHERE id = ?`).bind(actor).first<{ display_name: string }>())
+      ?.display_name : null;
+    text = { title: name ?? 'kolaba.', body: preset.body };
+  }
+  if (text) {
+    await pushToProfile(env, recipient, { ...text, setting: preset?.setting ?? null, collapseId: id,
+                                          data: { kind: 'notification', type, notificationId: id } });
+  }
 }
 
 export async function audit(env: Env, actor: string | null, action: string, entityType: string, entityId: string | null,

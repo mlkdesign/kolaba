@@ -37,6 +37,28 @@ me.put('/settings', async (c) => {
   return c.json({ notifications: body.notifications });
 });
 
+// FEATURE 115 — APNs: PUT /v1/me/devices {token, environment, previews} registers this device for the signed-in account
+// (a token another account had moves here); DELETE /v1/me/devices/:token on Log out.
+me.put('/devices', async (c) => {
+  const user = currentUser(c);
+  const body = z.object({
+    token: z.string().trim().regex(/^[0-9a-fA-F]{32,200}$/),
+    environment: z.enum(['production', 'sandbox']).default('production'),
+    previews: z.boolean().default(true),
+  }).parse(await c.req.json());
+  await c.env.DB.prepare(`INSERT INTO device_tokens (token, user_id, environment, previews, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (token) DO UPDATE SET user_id = excluded.user_id, environment = excluded.environment, previews = excluded.previews,
+      updated_at = excluded.updated_at`)
+    .bind(body.token.toLowerCase(), user.id, body.environment, body.previews ? 1 : 0, now(), now()).run();
+  return c.json({ status: 'registered' });
+});
+
+me.delete('/devices/:token', async (c) => {
+  const user = currentUser(c);
+  await c.env.DB.prepare(`DELETE FROM device_tokens WHERE token = ? AND user_id = ?`).bind(c.req.param('token').toLowerCase(), user.id).run();
+  return c.json({ status: 'removed' });
+});
+
 // PUT /v1/me/pro-test {pro} — the acting profile's PRO for testing (creator.pro or business.pro by its type). Only for
 // an admin or an address in PRO_TEST_EMAILS; everyone else gets 403 — PRO is never self-service.
 me.put('/pro-test', requireProfile, async (c) => {
@@ -104,6 +126,7 @@ export async function deleteAccount(env: Env, userId: string): Promise<{ profile
     `DELETE FROM subscriptions WHERE profile_id IN ${P}`,
     `DELETE FROM profiles WHERE owner_user_id = ?1`,
     `DELETE FROM sessions WHERE user_id = ?1`,
+    `DELETE FROM device_tokens WHERE user_id = ?1`,
     `DELETE FROM auth_identities WHERE user_id = ?1`,
     `DELETE FROM email_codes WHERE user_id = ?1`,
     `DELETE FROM user_settings WHERE user_id = ?1`,
