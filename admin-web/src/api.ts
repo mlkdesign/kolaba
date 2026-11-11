@@ -1,14 +1,20 @@
-// The one client for the admin API. The session token lives only in this module's memory: a reload, a new tab or
-// closing the tab signs out (no localStorage, no cookies — GitHub Pages and the Worker are different sites).
+// The one client for the admin API. The session token is kept in this tab's sessionStorage: a reload stays signed in,
+// closing the tab signs out, and no other tab (nor the KOLABA web app on the same github.io origin) can read it — no
+// localStorage, no cookies. The server still ends the session after 60 min idle / 8 h (and on Sign out).
 
 export const API_URL: string = import.meta.env.VITE_API_URL;
 export const APP_URL: string = import.meta.env.VITE_APP_URL;
 
-let token: string | null = null;
+const STORAGE_KEY = 'kolaba.admin.session';
+const stored = () => { try { return sessionStorage.getItem(STORAGE_KEY); } catch { return null; } };
+let token: string | null = stored();
 let onUnauthorized: (() => void) | null = null;
 let onMustChange: (() => void) | null = null;
 
-export function setSession(next: string | null) { token = next; }
+export function setSession(next: string | null) {
+  token = next;
+  try { if (next) sessionStorage.setItem(STORAGE_KEY, next); else sessionStorage.removeItem(STORAGE_KEY); } catch { /* memory only */ }
+}
 export const getSession = () => token;
 export function onSessionLost(handler: () => void, mustChange: () => void) { onUnauthorized = handler; onMustChange = mustChange; }
 
@@ -93,6 +99,7 @@ export interface LogRow {
 export interface UserDetail extends UserRow {
   emailVerifiedAt: number | null; emailVerification: string | null; blockedAt: number | null; deletedAt: number | null;
   deletedReason: string | null; counts: { jobs: number; media: number; sessions: number };
+  bannedAt: number | null; restrictedUntil: number | null; restrictionReason: string | null;
   logs: { id: number; admin_email: string; action: string; result: string; reason: string | null; created_at: number }[];
 }
 export interface JobRow {

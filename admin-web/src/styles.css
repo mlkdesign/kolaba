@@ -1,4 +1,5 @@
-/* KOLABA Admin — tokens from Figma "Admin Panel" (dark only, desktop ≥ 1280 px). */
+/* KOLABA Admin — tokens from Figma "Admin Panel" (dark only; designed at ≥ 1280 px, adapts down to ~900 px — nothing
+   spills out of the window: grids drop columns, tables shrink their columns and scroll inside themselves last). */
 @font-face { font-family: "Jakarta"; src: url("./assets/fonts/PlusJakartaSans-Regular.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Jakarta"; src: url("./assets/fonts/PlusJakartaSans-Medium.woff2") format("woff2"); font-weight: 500; font-display: swap; }
 @font-face { font-family: "Jakarta"; src: url("./assets/fonts/PlusJakartaSans-SemiBold.woff2") format("woff2"); font-weight: 600; font-display: swap; }
@@ -15,7 +16,7 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--text); font: 400 13px/1.45 "Jakarta", system-ui, sans-serif; min-width: 1280px; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 400 13px/1.45 "Jakarta", system-ui, sans-serif; min-width: 0; }
 a { color: inherit; }
 button, input, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; background: none; border: 0; padding: 0; }
@@ -161,16 +162,24 @@ h1, h2, p { margin: 0; }
 .filter-banner a { color: var(--text); }
 
 /* ─── table ─── */
-.table { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 0 8px; }
+.table { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 0 8px;
+  /* Never wider than the page: columns shrink first (below); only on a very narrow window the table scrolls itself. */
+  max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
 .table--bare { background: none; border: 0; padding: 0; }
-.table__row { display: grid; gap: 16px; align-items: center; min-height: 54px; padding: 0 16px; border-bottom: 1px solid var(--border); }
+.table__row { display: grid; gap: 16px; align-items: center; min-height: 54px; padding: 0 16px; border-bottom: 1px solid var(--border);
+  min-width: 720px; }
+/* Cells may shrink below their content: long names, e-mails and ids end in "…" (the full value is in the row's page). */
+.table__row > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.table__row > * > :is(span, b, strong, a, div, p) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.table__row .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.table__row > :last-child { overflow: visible; }
 .table__head { min-height: 38px; color: var(--text-3); font-size: 10px; }
 .table__row.is-link { cursor: pointer; }
 .table__row.is-link:hover { background: rgba(255, 255, 255, 0.025); }
 .is-refreshing { opacity: 0.55; transition: opacity 0.2s; }
-.users-grid { grid-template-columns: minmax(200px, 1.4fr) minmax(160px, 1fr) 140px 150px 110px 100px 50px; }
-.jobs-grid { grid-template-columns: minmax(240px, 1.6fr) minmax(150px, 1fr) 120px 90px 110px 100px 50px; }
-.logs-grid { grid-template-columns: 150px 170px 130px 170px 90px 1fr; font-size: 12px; }
+.users-grid { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.7fr) minmax(0, 0.7fr) 56px; }
+.jobs-grid { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 0.6fr) minmax(0, 0.7fr) minmax(0, 0.7fr) 56px; }
+.logs-grid { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 0.6fr) minmax(0, 1.6fr); font-size: 12px; }
 .cell-user { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .cell-user__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .cell-user__text b { font-weight: 500; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; gap: 6px; align-items: center; }
@@ -281,8 +290,9 @@ h1, h2, p { margin: 0; }
 .kpis--5 { grid-template-columns: repeat(5, 1fr); }
 .nav__count { margin-left: auto; min-width: 20px; height: 18px; padding: 0 6px; border-radius: 99px; background: var(--surface-3); color: var(--text); font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
 .nav__count.is-urgent { background: var(--red); color: #fff; }
-.reports-grid { grid-template-columns: 130px minmax(200px, 1.6fr) 100px 150px 120px 120px 90px 110px 60px; }
-.feedback-grid { grid-template-columns: 170px minmax(240px, 2fr) minmax(150px, 1fr) 150px 140px 110px; }
+.reports-grid { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.6fr) minmax(0, 0.7fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.9fr)
+  minmax(0, 0.8fr) minmax(0, 0.8fr) 64px; }
+.feedback-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.7fr); }
 .table__row.is-urgent { box-shadow: inset 3px 0 0 var(--red); }
 .cell-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-2); }
 .link-sm { color: var(--text-2); font-size: 12px; text-decoration: none; }
@@ -321,3 +331,18 @@ h1, h2, p { margin: 0; }
 .frames video { width: 100%; aspect-ratio: 9 / 16; object-fit: cover; display: block; }
 .review-card__body { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
 .review-card__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+/* ─── narrower windows ─── */
+@media (max-width: 1279px) {
+  .sidebar { width: 200px; padding: 24px 12px 16px; }
+  .content { padding: 20px 20px 32px; }
+  .kpis { grid-template-columns: repeat(2, 1fr); }
+  .kpis--5 { grid-template-columns: repeat(3, 1fr); }
+  .facts { grid-template-columns: repeat(2, 1fr); }
+  .media-grid, .review-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 1023px) {
+  .kpis, .kpis--3, .kpis--5 { grid-template-columns: repeat(2, 1fr); }
+  .profiles { grid-template-columns: 1fr; }
+  .media-strip { grid-template-columns: repeat(2, 1fr); }
+}

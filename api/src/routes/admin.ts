@@ -211,6 +211,19 @@ admin.get('/dashboard', async (c) => {
 
 const userStatus = (s: string) => (s === 'suspended' ? 'blocked' : s);
 
+/** Lifts every block an administrator put on an account — Block, Suspend or a permanent Ban: it can sign in again, its
+ *  profiles hidden by the ban come back, its e-mail may register again. (A deleted account is Restore's, not this.) */
+async function liftBlock(env: Env, userId: string, email: string) {
+  const t = now();
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE users SET status = 'active', blocked_reason = NULL, blocked_at = NULL, banned_at = NULL, failed_logins = 0,
+        locked_until = NULL, updated_at = ? WHERE id = ? AND status = 'suspended'`).bind(t, userId),
+    env.DB.prepare(`UPDATE profiles SET status = 'active', admin_hidden_at = NULL, updated_at = ? WHERE owner_user_id = ?
+        AND admin_hidden_at IS NOT NULL AND status = 'hidden'`).bind(t, userId),
+    env.DB.prepare(`DELETE FROM banned_identities WHERE email_hash = ?`).bind(await emailHash(email)),
+  ]);
+}
+
 type ProfileRow = CardRow & { owner_user_id: string; created_at: number; bio: string; website: string | null; visibility: string };
 
 async function profilesFor(env: Env, userIds: string[]) {
@@ -280,7 +293,7 @@ admin.get('/users', async (c) => {
 admin.get('/users/:id', async (c) => {
   const id = c.req.param('id');
   const u = await c.env.DB.prepare(`SELECT id, email, status, is_demo, created_at, updated_at, email_verified_at, email_verification,
-      blocked_reason, blocked_at, deleted_at, deleted_reason FROM users WHERE id = ?`).bind(id).first<Record<string, any>>();
+      blocked_reason, blocked_at, deleted_at, deleted_reason, banned_at, restricted_until, restriction_reason FROM users WHERE id = ?`).bind(id).first<Record<string, any>>();
   if (!u) fail(404, 'user_not_found');
   const ps = (await profilesFor(c.env, [id])).get(id) ?? [];
   const ids = ps.map((p) => p.id);
@@ -301,6 +314,9 @@ admin.get('/users/:id', async (c) => {
     id: u!.id, email: u!.email, status: userStatus(u!.status), isDemo: u!.is_demo === 1, createdAt: u!.created_at,
     emailVerifiedAt: u!.email_verified_at, emailVerification: u!.email_verification, blockedReason: u!.blocked_reason,
     blockedAt: u!.blocked_at, deletedAt: u!.deleted_at, deletedReason: u!.deleted_reason, accountType: accountType(ps),
+    bannedAt: u!.banned_at ?? null,
+    restrictedUntil: u!.restricted_until && u!.restricted_until > now() ? u!.restricted_until : null,
+    restrictionReason: u!.restriction_reason ?? null,
     isPro: ps.some((p) => p.isPro), counts,
     profiles: ps.map((p) => {
       const s = subByProfile.get(p.id);
@@ -359,7 +375,7 @@ admin.patch('/profiles/:id', async (c) => {
 admin.patch('/users/:id/status', async (c) => {
   const id = c.req.param('id');
   const body = z.object({ action: z.enum(['block', 'unblock', 'delete', 'restore']), reason: Reason.optional() }).parse(await c.req.json());
-  const u = await c.env.DB.prepare(`SELECT status FROM users WHERE id = ?`).bind(id).first<{ status: string }>();
+  const u = await c.env.DB.prepare(`SELECT status, email FROM users WHERE id = ?`).bind(id).first<{ status: string; email: string }>();
   if (!u) fail(404, 'user_not_found');
   const t = now();
   const db = c.env.DB;
@@ -373,8 +389,7 @@ admin.patch('/users/:id/status', async (c) => {
     ]);
   } else if (body.action === 'unblock') {
     if (u!.status !== 'suspended') fail(409, 'invalid_transition');
-    await db.prepare(`UPDATE users SET status = 'active', blocked_reason = NULL, blocked_at = NULL, failed_logins = 0, locked_until = NULL,
-        updated_at = ? WHERE id = ?`).bind(t, id).run();
+    await liftBlock(c.env, id, u!.email);
   } else if (body.action === 'delete') {
     if (u!.status === 'deleted') fail(409, 'invalid_transition');
     // Soft delete: nothing is erased. Sign-in stops, profiles disappear from the app; Restore brings everything back.
@@ -931,9 +946,7 @@ async function sanction(c: Context<AppEnv>, userId: string, kind: Sanction, reas
       ]);
       return;
     case 'unsuspend':
-      await db.prepare(`UPDATE users SET status = 'active', blocked_reason = NULL, blocked_at = NULL, banned_at = NULL, updated_at = ?
-          WHERE id = ? AND status = 'suspended'`).bind(t, userId).run();
-      await db.prepare(`DELETE FROM banned_identities WHERE email_hash = ?`).bind(await emailHash(u!.email)).run();
+      await liftBlock(c.env, userId, u!.email);
       return;
     case 'ban':
       await db.batch([
