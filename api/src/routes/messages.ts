@@ -6,7 +6,8 @@ import type { AppEnv, Env } from '../env';
 import { actingProfile, rateLimit, requireAuth, requireProfile } from '../lib/auth';
 import { areContacts, loadCards, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/cards';
 import { signedMediaURL, signedVoiceURL } from './media';
-import { blockedBetweenUsers } from '../lib/moderation';
+import { blockedBetweenProfiles, blockedBetweenUsers } from '../lib/moderation';
+import { apnsConfigured, pushToProfile } from '../lib/push';
 import { clampLimit, decodeCursor, encodeCursor, fail, newId, now, pairKey } from '../lib/util';
 
 const messages = new Hono<AppEnv>();
@@ -242,21 +243,26 @@ async function checkCanSend(env: Env, conversationId: string, profile: { id: str
   if ((counts?.theirs ?? 0) === 0 && (counts?.mine ?? 0) >= limit) fail(429, 'awaiting_reply');
 }
 
-/** After a message: one unread notification per chat for each unmuted partner. */
+/** After a message (FEATURE 115): messages are not Notifications-feed rows — the partner's Chat list and badge show
+ *  them (unread state comes from conversation_read_state), and a push goes to their devices (muted chats stay quiet). */
 async function afterSend(env: Env, id: string, senderId: string, messageId: string, t: number) {
-  void messageId;
-  // One unread "new message" notification per chat for an unmuted partner.
+  void t;
   const others = await env.DB.prepare(`SELECT profile_id, muted FROM conversation_participants WHERE conversation_id = ? AND profile_id <> ?`)
     .bind(id, senderId).all<{ profile_id: string; muted: number }>();
-  for (const o of others.results) {
-    if (o.muted) continue;
-    const pending = await env.DB.prepare(`SELECT id FROM notifications WHERE recipient_profile_id = ? AND type = 'new_message'
-        AND read_at IS NULL AND json_extract(payload, '$.conversationId') = ?`).bind(o.profile_id, id).first<{ id: string }>();
-    if (pending) {
-      await env.DB.prepare(`UPDATE notifications SET created_at = ?, actor_profile_id = ? WHERE id = ?`).bind(t, senderId, pending.id).run();
-    } else {
-      await notify(env, o.profile_id, 'new_message', senderId, { conversationId: id });
-    }
+  const live = others.results.filter((o) => !o.muted);
+  if (!live.length || !apnsConfigured(env)) return;
+  const row = await env.DB.prepare(`SELECT m.kind, m.body, p.display_name FROM messages m JOIN profiles p ON p.id = m.sender_profile_id
+      WHERE m.id = ?`).bind(messageId).first<{ kind: string | null; body: string | null; display_name: string }>();
+  if (!row) return;
+  const text = (row.body ?? '').trim();
+  const preview = text ? (text.length > 140 ? `${text.slice(0, 139)}…` : text)
+    : row.kind === 'voice' ? 'Sent a voice message.' : row.kind ? 'Sent an attachment.' : 'Sent you a message.';
+  for (const o of live) {
+    if (await blockedBetweenProfiles(env, o.profile_id, senderId)) continue;
+    await pushToProfile(env, o.profile_id, {
+      title: row.display_name, body: preview, privateBody: 'Sent you a message.', threadId: `chat-${id}`,
+      setting: 'newMessages', data: { kind: 'message', conversationId: id, senderProfileId: senderId, messageId },
+    });
   }
 }
 

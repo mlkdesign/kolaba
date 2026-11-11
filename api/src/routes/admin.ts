@@ -369,6 +369,7 @@ admin.patch('/users/:id/status', async (c) => {
     await db.batch([
       db.prepare(`UPDATE users SET status = 'suspended', blocked_reason = ?, blocked_at = ?, updated_at = ? WHERE id = ?`).bind(body.reason, t, t, id),
       db.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(id), // signed out everywhere at once
+      db.prepare(`DELETE FROM device_tokens WHERE user_id = ?`).bind(id),
     ]);
   } else if (body.action === 'unblock') {
     if (u!.status !== 'suspended') fail(409, 'invalid_transition');
@@ -396,20 +397,91 @@ admin.patch('/users/:id/status', async (c) => {
   return c.json({ status: userStatus(after!.status) });
 });
 
+/** One calendar month later in UTC, at the same time; a day the next month lacks becomes its last day (Jan 31 → Feb 28/29). */
+export function addMonthUTC(t: number, months = 1): number {
+  const d = new Date(t);
+  const y = d.getUTCFullYear(), m = d.getUTCMonth() + months;
+  const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return Date.UTC(y, m, Math.min(d.getUTCDate(), last), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds());
+}
+
+const proName = (plan: string) => (plan === 'creator_pro' ? 'CREATOR.PRO' : 'BUSINESS.PRO');
+
+// PATCH /v1/admin/profiles/:id/pro — FEATURE 115: free PRO for ONE profile (never the account's other profiles).
+//   grant  — one month from now (UTC, server clock); refused while this profile already has PRO (no duplicate grant)
+//   extend — one more month after the current admin grant ends
+//   revoke — ends the administrator's grant now (a paid App Store subscription is never touched here)
+// `requestKey` (the admin form's id) makes a repeated submit a no-op: no second grant, no second notification.
+// The old body {enabled} still works: true = grant, false = revoke.
 admin.patch('/profiles/:id/pro', async (c) => {
   const id = c.req.param('id');
-  const { enabled, reason } = z.object({ enabled: z.boolean(), reason: z.string().trim().max(500).optional() }).parse(await c.req.json());
+  const body = z.object({
+    action: z.enum(['grant', 'extend', 'revoke']).optional(),
+    enabled: z.boolean().optional(),
+    months: z.number().int().min(1).max(12).default(1),
+    reason: z.string().trim().max(500).optional(),
+    requestKey: z.string().trim().min(8).max(80).optional(),
+  }).parse(await c.req.json());
+  const action = body.action ?? (body.enabled === false ? 'revoke' : body.enabled === true ? 'grant' : fail(422, 'action_required'));
   const p = await c.env.DB.prepare(`SELECT type FROM profiles WHERE id = ? AND status <> 'deleted'`).bind(id).first<{ type: string }>();
   if (!p) fail(404, 'profile_not_found');
+  const plan = p!.type === 'creator' ? 'creator_pro' : 'business_pro';
   const t = now();
-  // Manual PRO is an entitlement with source 'admin' — no payment or transaction is created.
-  await c.env.DB.batch([
-    c.env.DB.prepare(`UPDATE subscriptions SET status = 'cancelled', expires_at = COALESCE(expires_at, ?) WHERE profile_id = ? AND status = 'active'`).bind(t, id),
-    ...(enabled ? [c.env.DB.prepare(`INSERT INTO subscriptions (id, profile_id, plan, status, source, started_at) VALUES (?, ?, ?, 'active', 'admin', ?)`)
-      .bind(newId('sub'), id, p!.type === 'creator' ? 'creator_pro' : 'business_pro', t)] : []),
-  ]);
-  await audit(c, enabled ? 'pro.grant' : 'pro.revoke', 'profile', id, reason || null, { plan: p!.type === 'creator' ? 'creator_pro' : 'business_pro' });
-  return c.json({ isPro: enabled });
+  if (body.requestKey) {
+    const done = await c.env.DB.prepare(`SELECT id, expires_at FROM pro_grants WHERE request_key = ?`).bind(body.requestKey)
+      .first<{ id: string; expires_at: number }>();
+    if (done) return c.json({ isPro: true, grantId: done.id, expiresAt: done.expires_at, repeated: true });
+  }
+  const active = await c.env.DB.prepare(`SELECT id, source, expires_at FROM subscriptions WHERE profile_id = ? AND status = 'active'
+      AND (expires_at IS NULL OR expires_at > ?) ORDER BY source = 'admin' DESC, started_at DESC`).bind(id, t)
+    .all<{ id: string; source: string; expires_at: number | null }>();
+  const adminSub = active.results.find((s) => s.source === 'admin');
+  const paid = active.results.find((s) => s.source === 'app_store');
+  const who = current(c);
+
+  if (action === 'revoke') {
+    if (!adminSub) return c.json({ isPro: Boolean(paid), changed: false });
+    await c.env.DB.batch([
+      c.env.DB.prepare(`UPDATE subscriptions SET status = 'cancelled', expires_at = ? WHERE id = ?`).bind(t, adminSub.id),
+      c.env.DB.prepare(`UPDATE pro_grants SET status = 'revoked' WHERE subscription_id = ? AND status = 'active'`).bind(adminSub.id),
+    ]);
+    await audit(c, 'pro.revoke', 'profile', id, body.reason || null, { plan, subscriptionId: adminSub.id });
+    return c.json({ isPro: Boolean(paid), changed: true });
+  }
+
+  if (paid) fail(409, 'paid_subscription_active', 'This profile has a paid subscription — it is not changed from here.');
+  if (action === 'grant' && adminSub) fail(409, 'pro_already_active', 'This profile already has PRO. Use Extend instead.');
+  if (action === 'extend' && !adminSub) fail(409, 'no_active_grant', 'There is no active grant to extend.');
+
+  const grantId = newId('grant');
+  let subscriptionId: string;
+  let startedAt = t;
+  let expiresAt: number;
+  const statements = [];
+  if (action === 'extend') {
+    subscriptionId = adminSub!.id;
+    startedAt = adminSub!.expires_at ?? t;
+    expiresAt = addMonthUTC(Math.max(startedAt, t), body.months);
+    statements.push(c.env.DB.prepare(`UPDATE subscriptions SET expires_at = ? WHERE id = ?`).bind(expiresAt, subscriptionId));
+  } else {
+    subscriptionId = newId('sub');
+    expiresAt = addMonthUTC(t, body.months);
+    statements.push(c.env.DB.prepare(`INSERT INTO subscriptions (id, profile_id, plan, status, source, started_at, expires_at)
+        VALUES (?, ?, ?, 'active', 'admin', ?, ?)`).bind(subscriptionId, id, plan, t, expiresAt));
+  }
+  statements.push(c.env.DB.prepare(`INSERT INTO pro_grants (id, profile_id, plan, source, subscription_id, started_at, expires_at,
+      granted_by, status, request_key, created_at) VALUES (?, ?, ?, 'admin_grant', ?, ?, ?, ?, 'active', ?, ?)`)
+    .bind(grantId, id, plan, subscriptionId, startedAt, expiresAt, who.email, body.requestKey ?? null, t));
+  await c.env.DB.batch(statements);
+  await audit(c, action === 'extend' ? 'pro.extend' : 'pro.grant', 'profile', id, body.reason || null,
+              { plan, grantId, subscriptionId, months: body.months, startedAt, expiresAt, source: 'admin_grant' });
+  // The recipient hears once per real grant (a repeated submit returned above).
+  const months = body.months === 1 ? '1 месяц' : `${body.months} мес.`;
+  const title = 'Congratulations!';
+  const message = `Поздравляем, вы получили ${months} бесплатно ${proName(plan)} от kolaba.`;
+  await notify(c.env, id, 'pro_granted', null, { grantId, plan, months: body.months, expiresAt, title, message,
+                                                  messageKey: 'pro_granted' }, { title, body: message });
+  return c.json({ isPro: true, grantId, expiresAt, changed: true });
 });
 
 // ─── jobs ───
@@ -855,6 +927,7 @@ async function sanction(c: Context<AppEnv>, userId: string, kind: Sanction, reas
       await db.batch([
         db.prepare(`UPDATE users SET status = 'suspended', blocked_reason = ?, blocked_at = ?, updated_at = ? WHERE id = ?`).bind(reason, t, t, userId),
         db.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(userId),
+        db.prepare(`DELETE FROM device_tokens WHERE user_id = ?`).bind(userId),
       ]);
       return;
     case 'unsuspend':
@@ -867,6 +940,7 @@ async function sanction(c: Context<AppEnv>, userId: string, kind: Sanction, reas
         db.prepare(`UPDATE users SET status = 'suspended', blocked_reason = ?, blocked_at = ?, banned_at = ?, updated_at = ? WHERE id = ?`)
           .bind(reason, t, t, t, userId),
         db.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(userId),
+        db.prepare(`DELETE FROM device_tokens WHERE user_id = ?`).bind(userId),
         db.prepare(`UPDATE profiles SET status = 'hidden', admin_hidden_at = ?, updated_at = ? WHERE owner_user_id = ? AND status = 'active'`).bind(t, t, userId),
         db.prepare(`INSERT OR REPLACE INTO banned_identities (email_hash, reason, created_at) VALUES (?, ?, ?)`).bind(await emailHash(u!.email), reason, t),
       ]);

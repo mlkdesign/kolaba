@@ -15,16 +15,17 @@ export async function profilesOf(env: Env, userId: string) {
   const rows = await env.DB.prepare(`SELECT ${cardColumns} FROM profiles p ${avatarJoinOwner}
       WHERE p.owner_user_id = ? AND p.status <> 'deleted' ORDER BY p.type = 'business', p.created_at`).bind(userId).all<CardRow>();
   return rows.results.map((r) => ({ ...card(env, r),
-    entitlements: entitlements(r.type as 'creator' | 'business', r.is_pro === 1, monetizationEnabled(env)) }));
+    entitlements: entitlements(r.type as 'creator' | 'business', r.is_pro === 1, monetizationEnabled(env), r.is_pro_grant === 1) }));
 }
 
 /** What a profile may do (AccountCapabilities in the iOS app), decided here. */
-export function entitlements(type: 'creator' | 'business', subscribed: boolean, monetization: boolean) {
-  // While paid plans are off, nothing is PRO and every feature is open (there is nothing to buy).
+export function entitlements(type: 'creator' | 'business', subscribed: boolean, monetization: boolean, granted = false) {
+  // While paid plans are off every feature is open (there is nothing to buy); only PRO an administrator gave is shown
+  // as PRO (FEATURE 115) — never a paywall.
   const pro = monetization ? subscribed : true;
   return {
     plan: type === 'creator' ? 'creator_pro' : 'business_pro',
-    isPro: monetization && subscribed,
+    isPro: monetization ? subscribed : granted,
     monetizationEnabled: monetization,
     canCreateJobs: type === 'business',
     canApply: type === 'creator',
@@ -89,21 +90,22 @@ profiles.post('/', requireAuth, async (c) => {
   const user = currentUser(c);
   await rateLimit(c, 'RL_WRITE', `profile:${user.id}`);
   const body = ProfileFields.extend({ type: z.enum(['creator', 'business']) }).parse(await c.req.json());
-  const counts = await c.env.DB.prepare(`SELECT
-      SUM(type = 'creator') AS creators, SUM(type = 'business') AS businesses
-      FROM profiles WHERE owner_user_id = ? AND status <> 'deleted'`).bind(user.id).first<{ creators: number; businesses: number }>();
-  if (body.type === 'creator' && (counts?.creators ?? 0) >= 1) fail(409, 'creator_profile_exists');
-  if (body.type === 'business' && (counts?.businesses ?? 0) >= MAX_BUSINESS_PROFILES) fail(409, 'business_profile_limit');
+  // One creator and up to five business profiles per account, whatever the plan. The limit is checked inside the INSERT
+  // itself, so two requests at once (two devices) can't both pass it.
   const id = newId(body.type === 'creator' ? 'cr' : 'bz');
-  await c.env.DB.batch([
+  const limit = body.type === 'creator' ? 1 : MAX_BUSINESS_PROFILES;
+  const [inserted] = await c.env.DB.batch([
     c.env.DB.prepare(`INSERT INTO profiles (id, owner_user_id, type, display_name, username, bio, category, country, country_code,
-                      city, flag, languages, website, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+                      city, flag, languages, website, created_at, updated_at)
+                      SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
+                      WHERE (SELECT COUNT(*) FROM profiles WHERE owner_user_id = ?2 AND type = ?3 AND status <> 'deleted') < ?16`)
       // The username column stays (old links) but a new profile's is its own id: unique, never shown, never asked for.
       .bind(id, user.id, body.type, body.displayName, id, body.bio ?? '', body.category ?? null, body.country ?? null,
             body.countryCode ?? null, body.city ?? null, flagOf(body.countryCode), JSON.stringify(body.languages ?? []),
-            body.website ? safeURL(body.website) : null, now(), now()),
-    c.env.DB.prepare(`INSERT INTO profile_settings (profile_id) VALUES (?)`).bind(id),
+            body.website ? safeURL(body.website) : null, now(), now(), limit),
+    c.env.DB.prepare(`INSERT INTO profile_settings (profile_id) SELECT ?1 WHERE EXISTS (SELECT 1 FROM profiles WHERE id = ?1)`).bind(id),
   ]);
+  if (!inserted.meta.changes) fail(409, body.type === 'creator' ? 'creator_profile_exists' : 'business_profile_limit');
   await saveLinks(c.env, id, body.links);
   const verdict = checkText(body.displayName, body.bio);
   if (verdict.flagged) await autoReport(c.env, { type: 'user', id, profileId: id }, verdict, `${body.displayName}\n${body.bio ?? ''}`);
@@ -264,7 +266,7 @@ export async function profilePage(env: Env, id: string, viewerUserId: string | n
     isOwner,
     settings: isOwner ? { showLocation: p!.show_location === 1, whoCanMessage: p!.who_can_message, showLinks: p!.show_links === 1,
                           hideJobPosts: p!.hide_job_posts === 1 } : undefined,
-    entitlements: isOwner ? entitlements(p!.type, await isSubscribed(env, id), monetizationEnabled(env)) : undefined,
+    entitlements: isOwner ? entitlements(p!.type, await isSubscribed(env, id), monetizationEnabled(env), await isSubscribed(env, id, true)) : undefined,
   };
 }
 
@@ -342,9 +344,9 @@ profiles.all('/:id/follow', (c) => c.json({ error: { code: 'follows_removed', me
 
 export default profiles;
 
-async function isSubscribed(env: Env, profileId: string): Promise<boolean> {
+async function isSubscribed(env: Env, profileId: string, adminGrantOnly = false): Promise<boolean> {
   const row = await env.DB.prepare(`SELECT 1 AS ok FROM subscriptions WHERE profile_id = ? AND status = 'active'
-      AND (expires_at IS NULL OR expires_at > ?)`).bind(profileId, now()).first();
+      AND (expires_at IS NULL OR expires_at > ?) AND (? = 0 OR source = 'admin')`).bind(profileId, now(), adminGrantOnly ? 1 : 0).first();
   return Boolean(row);
 }
 

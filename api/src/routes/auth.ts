@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { clientIP, createSession, currentUser, rateLimit, requireAuth } from '../lib/auth';
 import { hashPassword, passwordProblem, verifyPassword } from '../lib/password';
-import { fail, newId, now, sha256Hex, timingSafeEqual } from '../lib/util';
+import { fail, newId, newToken, now, sha256Hex, timingSafeEqual } from '../lib/util';
 import { profilesOf } from './profiles';
 import { isBannedEmail, monetizationEnabled } from '../lib/moderation';
 
@@ -18,6 +18,11 @@ const Credentials = z.object({ email: z.string().trim().toLowerCase().email().ma
 const CodeBody = z.object({ email: z.string().trim().toLowerCase().email().max(254), code: z.string().regex(/^\d{6}$/) });
 
 const CODE_TTL = 15 * 60_000;
+/** FEATURE 115: a password reset code lives 10 minutes; a new one only after 30 seconds; a verified code gives a
+ *  one-time reset token for 10 minutes. */
+const RESET_CODE_TTL = 10 * 60_000;
+const RESEND_AFTER_MS = 30_000;
+const RESET_TOKEN_TTL = 10 * 60_000;
 const MAX_CODE_ATTEMPTS = 5;
 const MAX_FAILED_LOGINS = 8;
 const LOCK_MS = 15 * 60_000;
@@ -45,12 +50,12 @@ async function issueCode(env: Env, userId: string, email: string, purpose: 'veri
   await env.DB.prepare(`UPDATE email_codes SET consumed_at = ? WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL`)
     .bind(now(), userId, purpose).run();
   await env.DB.prepare(`INSERT INTO email_codes (id, user_id, purpose, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-    .bind(newId('code'), userId, purpose, await sha256Hex(`${userId}:${code}`), now() + CODE_TTL, now()).run();
+    .bind(newId('code'), userId, purpose, await sha256Hex(`${userId}:${code}`), now() + (purpose === 'reset' ? RESET_CODE_TTL : CODE_TTL), now()).run();
   const inbox = env.TEST_CODE_INBOX?.trim().toLowerCase();
   const subject = (purpose === 'verify' ? 'Your kolaba. verification code' : 'Reset your kolaba. password')
     + (inbox && inbox !== email ? ` — for ${email} (closed test)` : '');
   await sendEmail(env, inbox || email, subject,
-    `${purpose === 'verify' ? 'Verification' : 'Password reset'} code: ${code}\n\nIt expires in 15 minutes. ` +
+    `${purpose === 'verify' ? 'Verification' : 'Password reset'} code: ${code}\n\nIt expires in ${purpose === 'reset' ? 10 : 15} minutes. ` +
     `If you didn't ask for it, ignore this e-mail.\n\nkolaba. — test environment`);
 }
 
@@ -283,30 +288,109 @@ auth.get('/session', requireAuth, async (c) => {
   return c.json(await sessionPayload(c.env, user.id, ''));
 });
 
+// ─── Password recovery (FEATURE 115): Forgot → code (e-mail) → verify → one-time reset token → new password ───
+
+/** Seconds until another reset code may be sent to this account (0: now). */
+async function resetCooldown(env: Env, userId: string): Promise<number> {
+  const last = await env.DB.prepare(`SELECT created_at FROM email_codes WHERE user_id = ? AND purpose = 'reset'
+      ORDER BY created_at DESC LIMIT 1`).bind(userId).first<{ created_at: number }>();
+  return last ? Math.max(0, Math.ceil((last.created_at + RESEND_AFTER_MS - now()) / 1000)) : 0;
+}
+
+// POST /v1/auth/password/forgot {email} — the same answer whether or not the address has an account. A new code
+// replaces the previous one (only one is ever valid); within 30 s of the last one nothing new is sent.
 auth.post('/password/forgot', async (c) => {
-  const { email } = z.object({ email: z.string().trim().toLowerCase().email() }).parse(await c.req.json());
+  const { email } = z.object({ email: z.string().trim().toLowerCase().email().max(254) }).parse(await c.req.json());
+  await rateLimit(c, 'RL_AUTH', `forgot-ip:${clientIP(c)}`);
   await rateLimit(c, 'RL_AUTH', `forgot:${email}`);
-  const user = await c.env.DB.prepare(`SELECT id FROM users WHERE email = ? AND status = 'active' AND is_demo = 0`).bind(email)
-    .first<{ id: string }>();
-  if (user) await issueCode(c.env, user.id, email, 'reset');
-  return c.json({ status: 'sent' });
+  const user = await c.env.DB.prepare(`SELECT id, password_hash FROM users WHERE email = ? AND status = 'active' AND is_demo = 0
+      AND email_verified_at IS NOT NULL`).bind(email).first<{ id: string; password_hash: string | null }>();
+  let resendAfter = RESEND_AFTER_MS / 1000;
+  if (user) {
+    const wait = await resetCooldown(c.env, user.id);
+    if (wait > 0) {
+      resendAfter = wait;
+    } else if (user.password_hash) {
+      await issueCode(c.env, user.id, email, 'reset');
+    } else {
+      // Google / Apple only: no password to reset — and none is invented. The e-mail says how this account signs in.
+      const methods = await c.env.DB.prepare(`SELECT provider FROM auth_identities WHERE user_id = ?`).bind(user.id).all<{ provider: string }>();
+      const names = methods.results.map((m) => (m.provider === 'google' ? 'Google' : m.provider === 'apple' ? 'Apple' : m.provider));
+      const inbox = c.env.TEST_CODE_INBOX?.trim().toLowerCase();
+      await c.env.DB.prepare(`INSERT INTO email_codes (id, user_id, purpose, code_hash, expires_at, consumed_at, created_at)
+          VALUES (?, ?, 'reset', '', ?, ?, ?)`).bind(newId('code'), user.id, now(), now(), now()).run(); // cooldown marker
+      await sendEmail(c.env, inbox || email, 'Signing in to kolaba.',
+        `Your kolaba. account has no password: it signs in with ${names.join(' or ') || 'a linked account'}.\n` +
+        `Use that button on the Log in screen.\n\nIf you didn't ask for this, ignore this e-mail.`);
+    }
+  }
+  return c.json({ status: 'sent', resendAfter });
 });
 
+// POST /v1/auth/password/verify {email, code} → {resetToken} (five wrong tries end the code).
+auth.post('/password/verify', async (c) => {
+  await rateLimit(c, 'RL_AUTH', `reset-verify:${clientIP(c)}`);
+  const { email, code } = CodeBody.parse(await c.req.json());
+  await rateLimit(c, 'RL_AUTH', `reset-verify:${email}`);
+  const user = await c.env.DB.prepare(`SELECT id FROM users WHERE email = ? AND status = 'active' AND is_demo = 0`).bind(email)
+    .first<{ id: string }>();
+  if (!user) fail(400, 'code_invalid');
+  await checkCode(c.env, user!.id, 'reset', code);
+  const token = newToken();
+  await c.env.DB.batch([
+    c.env.DB.prepare(`UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL`).bind(now(), user!.id),
+    c.env.DB.prepare(`INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .bind(newId('rst'), user!.id, await sha256Hex(token), now() + RESET_TOKEN_TTL, now()),
+  ]);
+  return c.json({ resetToken: token, expiresAt: now() + RESET_TOKEN_TTL });
+});
+
+// POST /v1/auth/password/reset {resetToken, password} — sets the new password once; every session ends (signed out
+// everywhere), old codes and tokens stop working. (The old one-step body {email, code, password} still works.)
 auth.post('/password/reset', async (c) => {
   await rateLimit(c, 'RL_AUTH', `reset:${clientIP(c)}`);
-  const body = CodeBody.extend({ password: z.string().min(1).max(200) }).parse(await c.req.json());
-  const problem = passwordProblem(body.password);
+  const raw = await c.req.json();
+  const password = z.string().min(1).max(200).parse(raw?.password);
+  const problem = passwordProblem(password);
   if (problem) fail(422, problem);
-  const user = await c.env.DB.prepare(`SELECT id FROM users WHERE email = ? AND is_demo = 0`).bind(body.email).first<{ id: string }>();
-  if (!user) fail(400, 'code_invalid');
-  await checkCode(c.env, user!.id, 'reset', body.code);
-  const { hash, salt, scheme } = await hashPassword(body.password);
-  await c.env.DB.batch([
+  let userId: string;
+  let tokenId: string | null = null;
+  if (typeof raw?.resetToken === 'string') {
+    const row = await c.env.DB.prepare(`SELECT id, user_id, expires_at, used_at FROM password_reset_tokens WHERE token_hash = ?`)
+      .bind(await sha256Hex(raw.resetToken)).first<{ id: string; user_id: string; expires_at: number; used_at: number | null }>();
+    if (!row || row.used_at || row.expires_at < now()) fail(400, 'reset_token_expired');
+    userId = row!.user_id;
+    tokenId = row!.id;
+  } else {
+    const body = CodeBody.parse(raw);
+    const user = await c.env.DB.prepare(`SELECT id FROM users WHERE email = ? AND is_demo = 0`).bind(body.email).first<{ id: string }>();
+    if (!user) fail(400, 'code_invalid');
+    await checkCode(c.env, user!.id, 'reset', body.code);
+    userId = user!.id;
+  }
+  const { hash, salt, scheme } = await hashPassword(password);
+  const t = now();
+  const consumed = await c.env.DB.batch([
+    c.env.DB.prepare(`UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL AND (?3 IS NULL OR id = ?3)`)
+      .bind(t, userId, tokenId),
     c.env.DB.prepare(`UPDATE users SET password_hash = ?, password_salt = ?, password_scheme = ?, failed_logins = 0,
                       locked_until = NULL, email_verified_at = COALESCE(email_verified_at, ?), updated_at = ? WHERE id = ?`)
-      .bind(hash, salt, scheme, now(), now(), user!.id),
-    c.env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(user!.id), // signs out everywhere
+      .bind(hash, salt, scheme, t, t, userId),
+    c.env.DB.prepare(`UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL`).bind(t, userId),
+    c.env.DB.prepare(`UPDATE email_codes SET consumed_at = ? WHERE user_id = ? AND purpose = 'reset' AND consumed_at IS NULL`).bind(t, userId),
+    c.env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(userId), // signs out everywhere
   ]);
+  // Two requests with the same token: only the first one finds it unused.
+  if (tokenId && !consumed[0].meta.changes) fail(400, 'reset_token_expired');
+  const email = await c.env.DB.prepare(`SELECT email FROM users WHERE id = ?`).bind(userId).first<{ email: string }>();
+  if (email) {
+    const inbox = c.env.TEST_CODE_INBOX?.trim().toLowerCase();
+    try {
+      await sendEmail(c.env, inbox || email.email, 'Your kolaba. password was changed',
+        `The password of your kolaba. account${inbox && inbox !== email.email ? ` (${email.email})` : ''} was just changed, and every ` +
+        `device was signed out.\n\nIf it wasn't you, reset your password again right away from the Log in screen.`);
+    } catch { /* the password is changed either way */ }
+  }
   return c.json({ status: 'password_changed' });
 });
 

@@ -18,12 +18,12 @@ notifications.get('/', async (c) => {
   const limit = clampLimit(c.req.query('limit'), 30, 60);
   const cursor = decodeCursor<{ t: number; id: string }>(c.req.query('cursor'));
   // FIX 114: no follows — old 'followed' rows are not shown (nor counted).
-  const rows = await c.env.DB.prepare(`SELECT * FROM notifications WHERE recipient_profile_id = ?1 AND type <> 'followed'
+  const rows = await c.env.DB.prepare(`SELECT * FROM notifications WHERE recipient_profile_id = ?1 AND type NOT IN ('followed', 'new_message')
       AND (?2 IS NULL OR (created_at, id) < (?2, ?3)) ORDER BY created_at DESC, id DESC LIMIT ?4`)
     .bind(profile.id, cursor?.t ?? null, cursor?.id ?? null, limit + 1).all<Record<string, any>>();
   const page = rows.results.slice(0, limit);
   const actors = await loadCards(c.env, page.map((n) => n.actor_profile_id));
-  const unread = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE recipient_profile_id = ? AND read_at IS NULL AND type <> 'followed'`)
+  const unread = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE recipient_profile_id = ? AND read_at IS NULL AND type NOT IN ('followed', 'new_message')`)
     .bind(profile.id).first<{ n: number }>();
   const last = rows.results.length > limit ? page[page.length - 1] : null;
   // The row's trailing piece (NotificationsView): the liked video's picture.
@@ -191,7 +191,7 @@ export const sync = new Hono<AppEnv>();
 sync.get('/', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c);
   const counts = await c.env.DB.prepare(`SELECT
-      (SELECT COUNT(*) FROM notifications WHERE recipient_profile_id = ?1 AND read_at IS NULL AND type <> 'followed') AS notifications,
+      (SELECT COUNT(*) FROM notifications WHERE recipient_profile_id = ?1 AND read_at IS NULL AND type NOT IN ('followed', 'new_message')) AS notifications,
       (SELECT COUNT(*) FROM conversation_participants cp WHERE cp.profile_id = ?1 AND cp.hidden_at IS NULL AND cp.muted = 0
          AND EXISTS (SELECT 1 FROM messages m LEFT JOIN conversation_read_state rs ON rs.conversation_id = m.conversation_id AND rs.profile_id = ?1
            WHERE m.conversation_id = cp.conversation_id AND m.sender_profile_id <> ?1 AND m.deleted_at IS NULL
