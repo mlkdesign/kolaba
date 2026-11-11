@@ -18,6 +18,8 @@ import { blocks, feedback, reports } from './routes/safety';
 import { assertCanPost, monetizationEnabled } from './lib/moderation';
 import { purgeExpired } from './lib/retention';
 import admin from './routes/admin';
+import { ChatHub } from './realtime';
+import { fail as failWith } from './lib/util';
 
 const app = new Hono<AppEnv>();
 
@@ -52,7 +54,7 @@ app.use('/v1/*', async (c, next) => (c.req.path.startsWith('/v1/admin') ? next()
 
 // A moderator's restriction stops publishing (jobs, uploads, messages, applications, reviews, contact requests) while
 // it lasts; reading, reporting, blocking, feedback and account deletion keep working.
-const POSTING = /^\/v1\/(jobs(\/[^/]+(\/(apply|publish))?)?|media\/uploads.*|conversations(\/[^/]+\/(messages|voice))?|reviews|contacts\/requests)$/;
+const POSTING = /^\/v1\/(jobs(\/[^/]+(\/(apply|publish))?)?|media\/uploads.*|conversations(\/[^/]+\/(messages|voice|files))?|reviews|contacts\/requests)$/;
 app.use('/v1/*', async (c, next) => {
   if (['POST', 'PUT', 'PATCH'].includes(c.req.method) && POSTING.test(c.req.path)) await assertCanPost(c);
   await next();
@@ -88,6 +90,20 @@ app.route('/v1/blocks', blocks);
 app.route('/v1/feedback', feedback);
 app.route('/v1/admin', admin);
 
+// GET /v1/realtime?profile= (WebSocket) — the acting profile's event stream. The session comes from the Authorization
+// header as everywhere else; the profile must belong to it.
+app.get('/v1/realtime', async (c) => {
+  const user = c.get('user') ?? failWith(401, 'not_signed_in');
+  if (!c.env.CHAT_HUB) failWith(503, 'realtime_unavailable');
+  const profileId = c.req.query('profile') ?? c.req.header('X-Profile-Id') ?? failWith(400, 'profile_required');
+  const profile = await c.env.DB.prepare(`SELECT owner_user_id, status FROM profiles WHERE id = ?`).bind(profileId)
+    .first<{ owner_user_id: string; status: string }>();
+  if (!profile || profile.owner_user_id !== user.id || profile.status !== 'active') failWith(403, 'not_profile_owner');
+  if (c.req.header('Upgrade') !== 'websocket') failWith(400, 'websocket_required');
+  const hub = c.env.CHAT_HUB!.get(c.env.CHAT_HUB!.idFromName(profileId));
+  return hub.fetch(new Request(`https://hub/connect?profile=${encodeURIComponent(profileId)}`, c.req.raw));
+});
+
 app.notFound((c) => c.json({ error: { code: 'not_found' } }, 404));
 
 app.onError((error, c) => {
@@ -100,6 +116,8 @@ app.onError((error, c) => {
   console.error('unhandled', c.req.method, c.req.path, error);
   return c.json({ error: { code: 'internal_error' } }, 500);
 });
+
+export { ChatHub };
 
 export default {
   fetch: app.fetch,

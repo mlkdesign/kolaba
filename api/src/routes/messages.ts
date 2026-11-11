@@ -1,11 +1,13 @@
 // Messages: one chat list, conversations between two profiles (optionally about a job), unread state, search.
-// Realtime = adaptive polling of GET /v1/sync (see routes/sync.ts) — within the Workers Free limits.
+// Realtime = events published to the participants' hubs (src/realtime.ts) after every write; GET /v1/sync and the
+// HTTP reads below stay the source of truth (a client that missed events re-reads).
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, rateLimit, requireAuth, requireProfile } from '../lib/auth';
 import { areContacts, loadCards, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/cards';
-import { signedMediaURL, signedVoiceURL } from './media';
+import { signedFileURL, signedMediaURL, signedVoiceURL } from './media';
+import { publish } from '../realtime';
 import { blockedBetweenProfiles, blockedBetweenUsers } from '../lib/moderation';
 import { apnsConfigured, pushToProfile } from '../lib/push';
 import { clampLimit, decodeCursor, encodeCursor, fail, newId, now, pairKey } from '../lib/util';
@@ -19,11 +21,37 @@ async function participant(env: Env, conversationId: string, profileId: string) 
   if (!row) fail(404, 'conversation_not_found');
 }
 
+async function membersOf(env: Env, conversationId: string): Promise<string[]> {
+  const rows = await env.DB.prepare(`SELECT profile_id FROM conversation_participants WHERE conversation_id = ?`).bind(conversationId)
+    .all<{ profile_id: string }>();
+  return rows.results.map((r) => r.profile_id);
+}
+
+/** Realtime: the message as each participant sees it (isOutgoing, clientId, likes differ per viewer), then chat.updated. */
+async function emitMessage(env: Env, conversationId: string, messageId: string, type: 'message.new' | 'message.updated') {
+  const [members, row] = await Promise.all([membersOf(env, conversationId),
+    env.DB.prepare(`SELECT * FROM messages WHERE id = ?`).bind(messageId).first<Record<string, any>>()]);
+  if (!row) return;
+  await Promise.all(members.map(async (viewer) => {
+    await publish(env, [viewer], { type, conversationId, message: (await messagesJSON(env, [row], viewer))[0] });
+    if (type === 'message.new') await publish(env, [viewer], { type: 'chat.updated', conversationId });
+  }));
+}
+
+/** The reply target, if it is a message of this conversation. */
+async function replyTarget(env: Env, conversationId: string, replyToId: string | undefined | null): Promise<string | null> {
+  if (!replyToId) return null;
+  const row = await env.DB.prepare(`SELECT id FROM messages WHERE id = ? AND conversation_id = ?`).bind(replyToId, conversationId).first();
+  return row ? replyToId : null;
+}
+
 async function messagesJSON(env: Env, rows: Record<string, any>[], viewer: string) {
   if (!rows.length) return [];
   const ids = rows.map((r) => r.id);
   const marks = ids.map(() => '?').join(',');
-  const [attachments, reactions, voices] = await Promise.all([
+  const conversationIds = [...new Set(rows.map((r) => r.conversation_id as string))];
+  const replyIds = [...new Set(rows.map((r) => r.reply_to_id as string | null).filter(Boolean))] as string[];
+  const [attachments, reactions, voices, files, states, replies] = await Promise.all([
     env.DB.prepare(`SELECT ma.message_id, ${mediaColumns} FROM message_attachments ma
       JOIN media m ON m.id = ma.media_id AND m.status = 'ready' AND m.review_status NOT IN ('rejected', 'removed')
       WHERE ma.message_id IN (${marks}) ORDER BY ma.position`).bind(...ids).all<MediaRow & { message_id: string }>(),
@@ -31,7 +59,36 @@ async function messagesJSON(env: Env, rows: Record<string, any>[], viewer: strin
       WHERE message_id IN (${marks}) AND kind = 'like' GROUP BY message_id`).bind(viewer, ...ids).all<{ message_id: string; n: number; mine: number }>(),
     env.DB.prepare(`SELECT message_id, mime, bytes, duration, waveform FROM message_voice WHERE message_id IN (${marks})`)
       .bind(...ids).all<{ message_id: string; mime: string; bytes: number; duration: number; waveform: string }>(),
+    env.DB.prepare(`SELECT id, message_id, name, mime, bytes FROM message_files WHERE message_id IN (${marks}) ORDER BY created_at, id`)
+      .bind(...ids).all<{ id: string; message_id: string; name: string; mime: string; bytes: number }>(),
+    env.DB.prepare(`SELECT conversation_id, MAX(last_read_at) AS r, MAX(last_delivered_at) AS d FROM conversation_read_state
+      WHERE conversation_id IN (${conversationIds.map(() => '?').join(',')}) AND profile_id <> ? GROUP BY conversation_id`)
+      .bind(...conversationIds, viewer).all<{ conversation_id: string; r: number; d: number }>(),
+    replyIds.length
+      ? env.DB.prepare(`SELECT m.id, m.sender_profile_id, m.body, m.deleted_at,
+          (SELECT md.kind FROM message_attachments ma JOIN media md ON md.id = ma.media_id WHERE ma.message_id = m.id ORDER BY ma.position LIMIT 1) AS media_kind,
+          EXISTS (SELECT 1 FROM message_voice v WHERE v.message_id = m.id) AS has_voice,
+          (SELECT name FROM message_files f WHERE f.message_id = m.id LIMIT 1) AS file_name,
+          (SELECT display_name FROM profiles p WHERE p.id = m.sender_profile_id) AS sender_name
+          FROM messages m WHERE m.id IN (${replyIds.map(() => '?').join(',')})`).bind(...replyIds).all<Record<string, any>>()
+      : Promise.resolve({ results: [] as Record<string, any>[] }),
   ]);
+  const stateBy = new Map(states.results.map((s) => [s.conversation_id, s]));
+  const replyBy = new Map(replies.results.map((r) => [r.id as string, {
+    messageId: r.id, senderProfileId: r.sender_profile_id, senderName: r.sender_name ?? '', isOutgoing: r.sender_profile_id === viewer,
+    kind: r.deleted_at ? 'deleted' : r.has_voice ? 'voice' : r.file_name ? 'file' : r.media_kind === 'video' ? 'video'
+      : r.media_kind ? 'photo' : 'text',
+    body: r.deleted_at ? '' : String(r.body ?? '').slice(0, 200), fileName: r.deleted_at ? null : r.file_name ?? null }]));
+  const filesBy = new Map<string, unknown[]>();
+  for (const f of files.results) {
+    filesBy.set(f.message_id, [...(filesBy.get(f.message_id) ?? []),
+      { id: f.id, name: f.name, mime: f.mime, bytes: f.bytes, url: await signedFileURL(env, f.id) }]);
+  }
+  const statusOf = (m: Record<string, any>) => {
+    const s = stateBy.get(m.conversation_id);
+    if ((s?.r ?? 0) >= m.created_at) return 'read';
+    return (s?.d ?? 0) >= m.created_at ? 'delivered' : 'sent';
+  };
   const likes = new Map(reactions.results.map((r) => [r.message_id, r]));
   const voiceBy = new Map<string, Record<string, unknown>>();
   for (const v of voices.results) {
@@ -51,8 +108,11 @@ async function messagesJSON(env: Env, rows: Record<string, any>[], viewer: strin
     voice: m.deleted_at ? null : voiceBy.get(m.id) ?? null,
     likesCount: likes.get(m.id)?.n ?? 0,
     isLikedByMe: (likes.get(m.id)?.mine ?? 0) > 0,
+    files: m.deleted_at ? [] : filesBy.get(m.id) ?? [],
+    replyTo: m.deleted_at || !m.reply_to_id ? null : replyBy.get(m.reply_to_id) ?? null,
     clientId: m.sender_profile_id === viewer ? m.client_id ?? null : null,
-    isReadByOther: m.other_read_at != null ? m.other_read_at >= m.created_at : undefined,
+    status: m.sender_profile_id === viewer ? statusOf(m) : undefined,
+    isReadByOther: m.sender_profile_id === viewer ? statusOf(m) === 'read' : undefined,
   }));
 }
 
@@ -93,6 +153,11 @@ export async function conversationList(env: Env, profileId: string, limit: numbe
 // GET /v1/conversations?cursor=
 messages.get('/', async (c) => {
   const profile = actingProfile(c);
+  // Reading the list on a device = everything so far reached it.
+  if (!c.req.query('cursor')) {
+    c.executionCtx.waitUntil(c.env.DB.prepare(`UPDATE conversation_read_state SET last_delivered_at = ? WHERE profile_id = ?`)
+      .bind(now(), profile.id).run());
+  }
   return c.json(await conversationList(c.env, profile.id, clampLimit(c.req.query('limit'), 30, 50),
     decodeCursor<{ t: number; id: string }>(c.req.query('cursor'))));
 });
@@ -162,6 +227,16 @@ messages.get('/:id/messages', async (c) => {
     .bind(id, profile.id, before?.t ?? null, before?.id ?? null, after, limit + 1).all<Record<string, any>>();
   const page = rows.results.slice(0, limit);
   const last = rows.results.length > limit ? page[page.length - 1] : null;
+  // Fetched by this profile's device = delivered to it (the sender's ticks follow).
+  if (!before && page.some((m) => m.sender_profile_id !== profile.id)) {
+    c.executionCtx.waitUntil((async () => {
+      const t = now();
+      await c.env.DB.prepare(`UPDATE conversation_read_state SET last_delivered_at = ? WHERE conversation_id = ? AND profile_id = ?`)
+        .bind(t, id, profile.id).run();
+      await publish(c.env, (await membersOf(c.env, id)).filter((p) => p !== profile.id),
+        { type: 'message.delivered', conversationId: id, profileId: profile.id, deliveredAt: t });
+    })());
+  }
   const conv = await c.env.DB.prepare(`SELECT c.related_job_id, (SELECT title FROM jobs WHERE id = c.related_job_id) AS job_title,
       (SELECT profile_id FROM conversation_participants WHERE conversation_id = c.id AND profile_id <> ? LIMIT 1) AS other_id,
       (SELECT muted FROM conversation_participants WHERE conversation_id = c.id AND profile_id = ?) AS muted
@@ -183,7 +258,7 @@ messages.post('/:id/messages', async (c) => {
   await participant(c.env, id, profile.id);
   await rateLimit(c, 'RL_WRITE', `msg:${profile.ownerUserId}`);
   const body = z.object({ body: z.string().max(4000).default(''), mediaIds: z.array(z.string()).max(10).default([]),
-                          clientId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional() })
+                          clientId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional(), replyToId: z.string().max(64).optional() })
     .parse(await c.req.json());
   const text = body.body.trim();
   if (!text && !body.mediaIds.length) fail(422, 'empty_message');
@@ -201,9 +276,10 @@ messages.post('/:id/messages', async (c) => {
   }
   const messageId = newId('msg');
   const t = now();
+  const replyTo = await replyTarget(c.env, id, body.replyToId);
   await c.env.DB.batch([
-    c.env.DB.prepare(`INSERT INTO messages (id, conversation_id, sender_profile_id, kind, body, created_at, client_id) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      .bind(messageId, id, profile.id, text ? 'text' : 'media', text, t, body.clientId ?? null),
+    c.env.DB.prepare(`INSERT INTO messages (id, conversation_id, sender_profile_id, kind, body, created_at, client_id, reply_to_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(messageId, id, profile.id, text ? 'text' : 'media', text, t, body.clientId ?? null, replyTo),
     ...[...new Set(body.mediaIds)].map((mid, i) =>
       c.env.DB.prepare(`INSERT INTO message_attachments (message_id, media_id, position) VALUES (?, ?, ?)`).bind(messageId, mid, i)),
     c.env.DB.prepare(`UPDATE conversations SET last_message_id = ?, last_message_at = ? WHERE id = ?`).bind(messageId, t, id),
@@ -212,6 +288,7 @@ messages.post('/:id/messages', async (c) => {
       last_read_message_id = excluded.last_read_message_id`).bind(id, profile.id, t, messageId),
     c.env.DB.prepare(`UPDATE conversation_participants SET hidden_at = NULL WHERE conversation_id = ?`).bind(id),
   ]);
+  c.executionCtx.waitUntil(emitMessage(c.env, id, messageId, 'message.new'));
   await afterSend(c.env, id, profile.id, messageId, t);
   const row = await c.env.DB.prepare(`SELECT m.*, NULL AS other_read_at FROM messages m WHERE id = ?`).bind(messageId).first<Record<string, any>>();
   return c.json((await messagesJSON(c.env, [row!], profile.id))[0], 201);
@@ -282,6 +359,7 @@ messages.put('/:id/messages/:messageId/like', async (c) => {
   await visibleMessage(c.env, c.req.param('id'), c.req.param('messageId'), profile.id);
   await c.env.DB.prepare(`INSERT OR IGNORE INTO message_reactions (message_id, profile_id, kind, created_at) VALUES (?, ?, 'like', ?)`)
     .bind(c.req.param('messageId'), profile.id, now()).run();
+  c.executionCtx.waitUntil(emitReaction(c.env, c.req.param('id'), c.req.param('messageId')));
   return c.json(await likeState(c.env, c.req.param('messageId'), profile.id));
 });
 
@@ -290,7 +368,79 @@ messages.delete('/:id/messages/:messageId/like', async (c) => {
   await visibleMessage(c.env, c.req.param('id'), c.req.param('messageId'), profile.id);
   await c.env.DB.prepare(`DELETE FROM message_reactions WHERE message_id = ? AND profile_id = ? AND kind = 'like'`)
     .bind(c.req.param('messageId'), profile.id).run();
+  c.executionCtx.waitUntil(emitReaction(c.env, c.req.param('id'), c.req.param('messageId')));
   return c.json(await likeState(c.env, c.req.param('messageId'), profile.id));
+});
+
+async function emitReaction(env: Env, conversationId: string, messageId: string) {
+  for (const viewer of await membersOf(env, conversationId)) {
+    await publish(env, [viewer], { type: 'reaction.updated', conversationId, ...(await likeState(env, messageId, viewer)) });
+  }
+}
+
+// DELETE /v1/conversations/:id/messages/:messageId — the sender takes a message back for everyone (its text, media,
+// voice and files stop being served; the row stays as a tombstone so order and replies hold).
+messages.delete('/:id/messages/:messageId', async (c) => {
+  const profile = actingProfile(c);
+  const id = c.req.param('id');
+  await participant(c.env, id, profile.id);
+  const res = await c.env.DB.prepare(`UPDATE messages SET deleted_at = ? WHERE id = ? AND conversation_id = ? AND sender_profile_id = ?
+      AND deleted_at IS NULL`).bind(now(), c.req.param('messageId'), id, profile.id).run();
+  if (!res.meta.changes) fail(404, 'message_not_found');
+  c.executionCtx.waitUntil((async () => {
+    const members = await membersOf(c.env, id);
+    await publish(c.env, members, { type: 'message.deleted', conversationId: id, messageId: c.req.param('messageId') });
+    await publish(c.env, members, { type: 'chat.updated', conversationId: id });
+  })());
+  return c.json({ status: 'deleted' });
+});
+
+// POST /v1/conversations/:id/files — multipart: file, clientId, replyToId. Any document up to MAX_FILE_MB, stored
+// privately in R2; participants get signed download URLs only.
+messages.post('/:id/files', async (c) => {
+  const profile = actingProfile(c);
+  const id = c.req.param('id');
+  await participant(c.env, id, profile.id);
+  await rateLimit(c, 'RL_WRITE', `msg:${profile.ownerUserId}`);
+  if (!c.env.MEDIA) fail(503, 'storage_unavailable');
+  const maxBytes = Number(c.env.MAX_FILE_MB ?? 20) * 1024 * 1024;
+  if (Number(c.req.header('Content-Length') ?? 0) > maxBytes + 64 * 1024) fail(413, 'file_too_large');
+  const form = await c.req.formData().catch(() => fail(400, 'invalid_form'));
+  const file = form.get('file');
+  if (!(file instanceof File)) fail(400, 'file_required');
+  const upload = file as File;
+  if (upload.size === 0 || upload.size > maxBytes) fail(413, 'file_too_large');
+  const name = (upload.name || 'file').replace(/[\u0000-\u001f\\/]/g, '').trim().slice(0, 180) || 'file';
+  const clientId = String(form.get('clientId') ?? '');
+  if (clientId && !/^[A-Za-z0-9_-]{8,64}$/.test(clientId)) fail(422, 'invalid_client_id');
+  if (clientId) {
+    const existing = await c.env.DB.prepare(`SELECT * FROM messages WHERE conversation_id = ? AND sender_profile_id = ? AND client_id = ?`)
+      .bind(id, profile.id, clientId).first<Record<string, any>>();
+    if (existing) return c.json((await messagesJSON(c.env, [existing], profile.id))[0], 200);
+  }
+  await checkCanSend(c.env, id, profile);
+  const messageId = newId('msg');
+  const fileId = newId('fil');
+  const replyTo = await replyTarget(c.env, id, String(form.get('replyToId') ?? '') || null);
+  const key = `files/${id}/${fileId}`;
+  const mime = (upload.type || 'application/octet-stream').toLowerCase().slice(0, 120);
+  await c.env.MEDIA!.put(key, await upload.arrayBuffer(), { httpMetadata: { contentType: 'application/octet-stream' } });
+  const t = now();
+  await c.env.DB.batch([
+    c.env.DB.prepare(`INSERT INTO messages (id, conversation_id, sender_profile_id, kind, body, created_at, client_id, reply_to_id) VALUES (?, ?, ?, 'media', '', ?, ?, ?)`)
+      .bind(messageId, id, profile.id, t, clientId || null, replyTo),
+    c.env.DB.prepare(`INSERT INTO message_files (id, message_id, storage_key, name, mime, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .bind(fileId, messageId, key, name, mime, upload.size, t),
+    c.env.DB.prepare(`UPDATE conversations SET last_message_id = ?, last_message_at = ? WHERE id = ?`).bind(messageId, t, id),
+    c.env.DB.prepare(`INSERT INTO conversation_read_state (conversation_id, profile_id, last_read_at, last_read_message_id) VALUES (?, ?, ?, ?)
+      ON CONFLICT (conversation_id, profile_id) DO UPDATE SET last_read_at = excluded.last_read_at,
+      last_read_message_id = excluded.last_read_message_id`).bind(id, profile.id, t, messageId),
+    c.env.DB.prepare(`UPDATE conversation_participants SET hidden_at = NULL WHERE conversation_id = ?`).bind(id),
+  ]);
+  c.executionCtx.waitUntil(emitMessage(c.env, id, messageId, 'message.new'));
+  await afterSend(c.env, id, profile.id, messageId, t);
+  const row = await c.env.DB.prepare(`SELECT * FROM messages WHERE id = ?`).bind(messageId).first<Record<string, any>>();
+  return c.json((await messagesJSON(c.env, [row!], profile.id))[0], 201);
 });
 
 async function likeState(env: Env, messageId: string, profileId: string) {
@@ -338,12 +488,13 @@ messages.post('/:id/voice', async (c) => {
   const ascii = String.fromCharCode(...bytes.slice(4, 8));
   if (!(ascii === 'ftyp' || (bytes[0] === 0xff && (bytes[1] & 0xf0) === 0xf0))) fail(415, 'invalid_file');
   const messageId = newId('msg');
+  const replyTo = await replyTarget(c.env, id, String(form.get('replyToId') ?? '') || null);
   const key = `voice/${id}/${messageId}.${ext}`;
   await c.env.MEDIA!.put(key, bytes, { httpMetadata: { contentType: ext === 'aac' ? 'audio/aac' : 'audio/mp4' } });
   const t = now();
   await c.env.DB.batch([
-    c.env.DB.prepare(`INSERT INTO messages (id, conversation_id, sender_profile_id, kind, body, created_at, client_id) VALUES (?, ?, ?, 'media', '', ?, ?)`)
-      .bind(messageId, id, profile.id, t, clientId || null),
+    c.env.DB.prepare(`INSERT INTO messages (id, conversation_id, sender_profile_id, kind, body, created_at, client_id, reply_to_id) VALUES (?, ?, ?, 'media', '', ?, ?, ?)`)
+      .bind(messageId, id, profile.id, t, clientId || null, replyTo),
     c.env.DB.prepare(`INSERT INTO message_voice (message_id, storage_key, mime, bytes, duration, waveform, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .bind(messageId, key, ext === 'aac' ? 'audio/aac' : 'audio/mp4', bytes.length, duration, JSON.stringify(waveform), t),
     c.env.DB.prepare(`UPDATE conversations SET last_message_id = ?, last_message_at = ? WHERE id = ?`).bind(messageId, t, id),
@@ -352,6 +503,7 @@ messages.post('/:id/voice', async (c) => {
       last_read_message_id = excluded.last_read_message_id`).bind(id, profile.id, t, messageId),
     c.env.DB.prepare(`UPDATE conversation_participants SET hidden_at = NULL WHERE conversation_id = ?`).bind(id),
   ]);
+  c.executionCtx.waitUntil(emitMessage(c.env, id, messageId, 'message.new'));
   await afterSend(c.env, id, profile.id, messageId, t);
   const row = await c.env.DB.prepare(`SELECT m.*, NULL AS other_read_at FROM messages m WHERE id = ?`).bind(messageId).first<Record<string, any>>();
   return c.json((await messagesJSON(c.env, [row!], profile.id))[0], 201);
@@ -368,6 +520,12 @@ messages.post('/:id/read', async (c) => {
     c.env.DB.prepare(`UPDATE notifications SET read_at = ? WHERE recipient_profile_id = ? AND type = 'new_message' AND read_at IS NULL
       AND json_extract(payload, '$.conversationId') = ?`).bind(now(), profile.id, id),
   ]);
+  c.executionCtx.waitUntil((async () => {
+    const t = now();
+    const others = (await membersOf(c.env, id)).filter((p) => p !== profile.id);
+    await publish(c.env, others, { type: 'message.read', conversationId: id, profileId: profile.id, readAt: t });
+    await publish(c.env, [profile.id], { type: 'chat.updated', conversationId: id });
+  })());
   return c.json({ status: 'read' });
 });
 
@@ -389,6 +547,7 @@ messages.delete('/:id', async (c) => {
   const res = await c.env.DB.prepare(`UPDATE conversation_participants SET hidden_at = ?, cleared_at = ? WHERE conversation_id = ? AND profile_id = ?`)
     .bind(t, t, c.req.param('id'), profile.id).run();
   if (!res.meta.changes) fail(404, 'conversation_not_found');
+  c.executionCtx.waitUntil(publish(c.env, [profile.id], { type: 'chat.deleted', conversationId: c.req.param('id') }));
   return c.json({ status: 'hidden' });
 });
 

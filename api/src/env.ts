@@ -3,6 +3,10 @@ export interface Env {
   DB: D1Database;
   /** R2 bucket kolaba-media — optional until R2 is enabled on the account (uploads answer 503 without it). */
   MEDIA?: R2Bucket;
+  /** Realtime hubs (src/realtime.ts): one Durable Object per profile. Optional: without it the API still works. */
+  CHAT_HUB?: DurableObjectNamespace;
+  /** Chat files: size limit (MB). */
+  MAX_FILE_MB?: string;
   /** Workers Rate Limiting bindings. */
   RL_AUTH?: RateLimit;
   RL_WRITE?: RateLimit;

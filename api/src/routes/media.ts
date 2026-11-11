@@ -166,6 +166,31 @@ export async function signedVoiceURL(env: Env, messageId: string): Promise<strin
   return `${env.API_URL}/v1/media/voice/${messageId}?exp=${expires}&sig=${await signature(env, `voice:${messageId}`, expires)}`;
 }
 
+/** A time-limited URL for a chat file (participants only receive it). */
+export async function signedFileURL(env: Env, fileId: string): Promise<string> {
+  const expires = now() + 3_600_000;
+  return `${env.API_URL}/v1/media/chat-file/${fileId}?exp=${expires}&sig=${await signature(env, `file:${fileId}`, expires)}`;
+}
+
+/** Types a chat file is served as; everything else goes out as a plain download. */
+const FILE_TYPES = /^(application\/(pdf|zip|msword|rtf|json|vnd\.[a-z0-9.+-]+)|text\/(plain|csv)|image\/(png|jpeg|heic|gif|webp)|audio\/[a-z0-9.+-]+|video\/(mp4|quicktime))$/;
+
+// GET /v1/media/chat-file/:fileId?exp&sig — a chat file's bytes (signed URL; always a download, never rendered).
+media.get('/chat-file/:fileId', async (c) => {
+  const id = c.req.param('fileId');
+  const exp = Number(c.req.query('exp'));
+  if (!exp || exp < now() || c.req.query('sig') !== (await signature(c.env, `file:${id}`, exp))) fail(403, 'forbidden');
+  const row = await c.env.DB.prepare(`SELECT f.storage_key, f.mime, f.name FROM message_files f JOIN messages m ON m.id = f.message_id
+      WHERE f.id = ? AND m.deleted_at IS NULL`).bind(id).first<{ storage_key: string; mime: string; name: string }>();
+  if (!row || !c.env.MEDIA) fail(404, 'media_not_found');
+  const object = await c.env.MEDIA!.get(row!.storage_key);
+  if (!object) fail(404, 'media_not_found');
+  return new Response(object!.body, { status: 200, headers: {
+    'Content-Type': FILE_TYPES.test(row!.mime) ? row!.mime : 'application/octet-stream', 'Content-Length': String(object!.size),
+    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(row!.name)}`,
+    'Cache-Control': 'private, max-age=3600', 'X-Content-Type-Options': 'nosniff' } });
+});
+
 // GET /v1/media/voice/:messageId?exp&sig — a voice message's audio (signed URL, Range for AVPlayer).
 media.get('/voice/:messageId', async (c) => {
   const id = c.req.param('messageId');
