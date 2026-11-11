@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { api, errorText, onSessionLost, setSession } from './api';
+import { api, errorText, getSession, onSessionLost, setSession } from './api';
 import { href, navigate, useRoute } from './router';
 import { Button, Field, Icon, Modal, Toasts, initials, toast } from './ui';
 import navDashboard from './assets/icons/nav-dashboard.svg';
@@ -31,10 +31,18 @@ interface Counts { reports: number; urgent: number; contentReview: number; feedb
 export function App() {
   const [admin, setAdmin] = useState<Admin | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // A reload with a kept session: ask the server who it is before showing anything (no sign-in form flash).
+  const [restoring, setRestoring] = useState(() => getSession() !== null);
   useEffect(() => {
     onSessionLost(() => { setSession(null); setAdmin(null); setNotice('Your session has expired. Sign in again.'); },
                   () => setAdmin((a) => (a ? { ...a, mustChangePassword: true } : a)));
+    if (!getSession()) return;
+    api<{ admin: Admin }>('GET', '/me')
+      .then((res) => setAdmin(res.admin))
+      .catch(() => { setSession(null); setNotice(null); })
+      .finally(() => setRestoring(false));
   }, []);
+  if (restoring) return <AuthShell><p className="auth__restoring">Restoring your session…</p></AuthShell>;
   const signedIn = (token: string, a: Admin) => { setSession(token); setNotice(null); setAdmin(a); };
   const signOut = async () => {
     try { await api('POST', '/logout'); } catch { /* the session ends locally either way */ }

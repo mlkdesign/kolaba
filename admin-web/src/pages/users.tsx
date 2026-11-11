@@ -33,7 +33,8 @@ function useAccountActions(reload: () => void) {
     if (action === 'block') return <ConfirmModal title="Block account" danger reason confirmLabel="Block account" onClose={close} onConfirm={run}
       text={<>Block <b>{u.email}</b>? The user is signed out on every device at once and can’t sign in or use the app until unblocked.</>} />;
     if (action === 'unblock') return <ConfirmModal title="Unblock account" confirmLabel="Unblock" onClose={close} onConfirm={run}
-      text={<>Unblock <b>{u.email}</b>? They can sign in and use the app again.</>} />;
+      text={<>Unblock <b>{u.email}</b>? They can sign in and use the app again. A permanent ban is lifted too: profiles it hid
+        come back and the e-mail may register again.</>} />;
     if (action === 'delete') return <ConfirmModal title="Delete account" danger reason typeToConfirm="DELETE" confirmLabel="Delete account" onClose={close} onConfirm={run}
       text={<>Soft-delete <b>{u.email}</b>: sign-in stops and the profiles disappear from KOLABA. <b>Nothing is erased</b> — jobs, media and
         messages stay in the database, and the account can be restored.</>} />;
@@ -164,6 +165,16 @@ export function UserPage({ id }: { id: string }) {
                 profiles. The person gets a notification; no payment is created and no paywall is shown.</>} />
     ));
   };
+  // A moderator's posting restriction (Reports → Temporarily restrict) is lifted here too.
+  const liftRestriction = () => u && extra.open((close) => (
+    <ConfirmModal title="Lift restriction" confirmLabel="Lift restriction" reason reasonOptional onClose={close}
+      onConfirm={async (reason) => {
+        await api('POST', `/users/${u.id}/sanction`, { action: 'unrestrict', reason: reason || undefined });
+        toast.ok('Restriction lifted', `${u.email} · recorded in Activity Logs.`);
+        reload();
+      }}
+      text={<>Let <b>{u.email}</b> post, message and apply again now.</>} />
+  ));
   const edit = (p: AdminProfile) => extra.open((close) => <EditProfile profile={p} onClose={close} onSaved={reload} />);
   return (
     <>
@@ -171,7 +182,8 @@ export function UserPage({ id }: { id: string }) {
         actions={u && (
           <>
             {u.status === 'active' && <Button variant="danger" onClick={() => act(u, 'block')}>Block</Button>}
-            {u.status === 'blocked' && <Button onClick={() => act(u, 'unblock')}>Unblock</Button>}
+            {u.status === 'blocked' && <Button onClick={() => act(u, 'unblock')}>{u.bannedAt ? 'Unblock (lift ban)' : 'Unblock'}</Button>}
+            {u.restrictedUntil && <Button onClick={liftRestriction}>Lift restriction</Button>}
             {u.status === 'deleted'
               ? <Button onClick={() => act(u, 'restore')}>Restore account</Button>
               : <Button variant="ghost" onClick={() => act(u, 'delete')}>Delete account</Button>}
@@ -192,7 +204,8 @@ export function UserPage({ id }: { id: string }) {
                 <div><dt>Published jobs</dt><dd>{fmtNum(u.counts.jobs)}{u.counts.jobs > 0 && <> · <a href={href(`/jobs?owner=${u.id}`)}>View</a></>}</dd></div>
                 <div><dt>Uploaded media</dt><dd>{fmtNum(u.counts.media)}{u.counts.media > 0 && <> · <a href={href(`/media?owner=${u.id}`)}>View</a></>}</dd></div>
                 <div><dt>Active app sessions</dt><dd>{fmtNum(u.counts.sessions)}</dd></div>
-                {u.status === 'blocked' && <div className="facts__wide"><dt>Blocked</dt><dd>{fmtDateTime(u.blockedAt)} — {u.blockedReason}</dd></div>}
+                {u.status === 'blocked' && <div className="facts__wide"><dt>{u.bannedAt ? 'Banned permanently' : 'Blocked'}</dt><dd>{fmtDateTime(u.blockedAt)} — {u.blockedReason}</dd></div>}
+                {u.restrictedUntil && <div className="facts__wide"><dt>Restricted</dt><dd>Until {fmtDateTime(u.restrictedUntil)}{u.restrictionReason ? ` — ${u.restrictionReason}` : ''}</dd></div>}
                 {u.status === 'deleted' && <div className="facts__wide"><dt>Deleted</dt><dd>{fmtDateTime(u.deletedAt)} — {u.deletedReason}</dd></div>}
               </dl>
             </section>
