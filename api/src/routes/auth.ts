@@ -196,12 +196,13 @@ auth.post('/login', async (c) => {
 // who continues to the usual onboarding (no profile yet).
 auth.post('/google', async (c) => {
   await rateLimit(c, 'RL_AUTH', `google:${clientIP(c)}`);
-  const clientId = c.env.GOOGLE_CLIENT_ID?.trim();
-  if (!clientId) fail(503, 'google_unavailable', 'Google sign-in is not configured.');
+  // The Web client (Google Identity Services) and the iOS app's client (GoogleSignIn-iOS): one KOLABA account either way.
+  const clientIds = [c.env.GOOGLE_CLIENT_ID, ...(c.env.GOOGLE_IOS_CLIENT_IDS ?? '').split(',')].map((v) => v?.trim() ?? '').filter(Boolean);
+  if (!clientIds.length) fail(503, 'google_unavailable', 'Google sign-in is not configured.');
   const body = z.object({ credential: z.string().min(20).max(8192), password: z.string().min(1).max(200).optional(),
                           acceptTerms: z.boolean().optional() }).parse(await c.req.json());
   let claims;
-  try { claims = await verifyGoogleIdToken(body.credential, clientId!, c.env.GOOGLE_JWKS_URL || undefined); }
+  try { claims = await verifyGoogleIdToken(body.credential, clientIds, c.env.GOOGLE_JWKS_URL || undefined); }
   catch (e) { fail(401, 'google_token_invalid', e instanceof GoogleTokenError ? e.message : 'invalid'); }
   const { sub, email } = claims!;
   const ua = c.req.header('User-Agent');

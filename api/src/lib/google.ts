@@ -40,8 +40,9 @@ const b64urlBytes = (s: string) => {
 };
 const b64urlJSON = <T>(s: string): T => JSON.parse(new TextDecoder().decode(b64urlBytes(s)));
 
-/** The token's claims when it is a valid Google ID token for `clientId`; throws GoogleTokenError otherwise. */
-export async function verifyGoogleIdToken(token: string, clientId: string, jwksUrl = GOOGLE_JWKS_URL, nowSeconds = Math.floor(Date.now() / 1000)): Promise<GoogleClaims> {
+/** The token's claims when it is a valid Google ID token for one of our client ids (the Web client — Google Identity
+ *  Services — or the iOS app's client, GoogleSignIn-iOS); throws GoogleTokenError otherwise. */
+export async function verifyGoogleIdToken(token: string, clientId: string | string[], jwksUrl = GOOGLE_JWKS_URL, nowSeconds = Math.floor(Date.now() / 1000)): Promise<GoogleClaims> {
   const parts = token.split('.');
   if (parts.length !== 3) throw new GoogleTokenError('malformed');
   let header: { alg: string; kid: string; typ?: string };
@@ -59,7 +60,8 @@ export async function verifyGoogleIdToken(token: string, clientId: string, jwksU
   if (!ok) throw new GoogleTokenError('bad_signature');
 
   if (!ISSUERS.includes(claims.iss)) throw new GoogleTokenError('bad_issuer');
-  if (claims.aud !== clientId) throw new GoogleTokenError('bad_audience');
+  const audiences = (Array.isArray(clientId) ? clientId : [clientId]).filter(Boolean);
+  if (!audiences.includes(claims.aud)) throw new GoogleTokenError('bad_audience');
   if (typeof claims.exp !== 'number' || claims.exp + SKEW < nowSeconds) throw new GoogleTokenError('expired');
   if (typeof claims.iat === 'number' && claims.iat - SKEW > nowSeconds) throw new GoogleTokenError('not_yet_valid');
   if (!claims.sub || !claims.email) throw new GoogleTokenError('incomplete');

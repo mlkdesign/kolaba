@@ -27,6 +27,8 @@ export interface Env {
   TEST_CODE_INBOX?: string;
   /** Google Identity Services Web client id (public): the audience every Google ID token must carry. */
   GOOGLE_CLIENT_ID?: string;
+  /** Comma-separated iOS OAuth client ids whose ID tokens are accepted too (GoogleSignIn-iOS: aud = the iOS client). */
+  GOOGLE_IOS_CLIENT_IDS?: string;
   /** Tests only: another JWKS URL for Google's signing keys (never set in production). */
   GOOGLE_JWKS_URL?: string;
   /** Comma-separated e-mails allowed to switch their own profile between Free and PRO for testing. */
