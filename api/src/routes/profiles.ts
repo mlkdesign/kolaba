@@ -40,7 +40,8 @@ const Links = z.record(z.enum(['instagram', 'tiktok', 'youtube', 'telegram', 'wh
   z.string().trim().max(300)).optional();
 const ProfileFields = z.object({
   displayName: z.string().trim().min(1).max(80),
-  username: Username,
+  // FIX 114: no usernames in KOLABA — still accepted from an old client, never required (internal key = profile id).
+  username: Username.optional(),
   bio: z.string().max(1000).optional(),
   category: z.string().trim().max(60).nullable().optional(),
   country: z.string().trim().max(60).nullable().optional(),
@@ -93,13 +94,12 @@ profiles.post('/', requireAuth, async (c) => {
       FROM profiles WHERE owner_user_id = ? AND status <> 'deleted'`).bind(user.id).first<{ creators: number; businesses: number }>();
   if (body.type === 'creator' && (counts?.creators ?? 0) >= 1) fail(409, 'creator_profile_exists');
   if (body.type === 'business' && (counts?.businesses ?? 0) >= MAX_BUSINESS_PROFILES) fail(409, 'business_profile_limit');
-  const taken = await c.env.DB.prepare(`SELECT 1 AS ok FROM profiles WHERE username = ?`).bind(body.username).first();
-  if (taken) fail(409, 'username_taken');
   const id = newId(body.type === 'creator' ? 'cr' : 'bz');
   await c.env.DB.batch([
     c.env.DB.prepare(`INSERT INTO profiles (id, owner_user_id, type, display_name, username, bio, category, country, country_code,
                       city, flag, languages, website, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, user.id, body.type, body.displayName, body.username, body.bio ?? '', body.category ?? null, body.country ?? null,
+      // The username column stays (old links) but a new profile's is its own id: unique, never shown, never asked for.
+      .bind(id, user.id, body.type, body.displayName, id, body.bio ?? '', body.category ?? null, body.country ?? null,
             body.countryCode ?? null, body.city ?? null, flagOf(body.countryCode), JSON.stringify(body.languages ?? []),
             body.website ? safeURL(body.website) : null, now(), now()),
     c.env.DB.prepare(`INSERT INTO profile_settings (profile_id) VALUES (?)`).bind(id),
@@ -122,10 +122,6 @@ profiles.patch('/:id', requireAuth, async (c) => {
     introVideoMediaId: z.string().nullable().optional(),
   }).parse(await c.req.json());
 
-  if (body.username) {
-    const taken = await c.env.DB.prepare(`SELECT 1 AS ok FROM profiles WHERE username = ? AND id <> ?`).bind(body.username, id).first();
-    if (taken) fail(409, 'username_taken');
-  }
   for (const [field, purpose] of [['avatarMediaId', 'photo'], ['introVideoMediaId', 'video']] as const) {
     const mediaId = body[field];
     if (!mediaId) continue;
@@ -140,7 +136,7 @@ profiles.patch('/:id', requireAuth, async (c) => {
   }
 
   const columns: Record<string, unknown> = {
-    display_name: body.displayName, username: body.username, bio: body.bio, category: body.category, country: body.country,
+    display_name: body.displayName, bio: body.bio, category: body.category, country: body.country,
     country_code: body.countryCode, city: body.city, flag: body.countryCode !== undefined ? flagOf(body.countryCode) : undefined,
     languages: body.languages ? JSON.stringify(body.languages) : undefined,
     website: body.website !== undefined ? (body.website ? safeURL(body.website) : null) : undefined,
@@ -207,7 +203,7 @@ profiles.get('/', async (c) => {
       JOIN users u ON u.id = p.owner_user_id AND u.status = 'active'
       WHERE p.status = 'active' AND p.visibility = 'public'
         AND (?1 IS NULL OR p.type = ?1)
-        AND (?2 = '' OR lower(p.display_name || ' ' || p.username || ' ' || COALESCE(p.category, '') || ' ' ||
+        AND (?2 = '' OR lower(p.display_name || ' ' || COALESCE(p.category, '') || ' ' ||
              COALESCE(p.city, '') || ' ' || COALESCE(p.country, '')) LIKE '%' || ?2 || '%')
         AND (?3 IS NULL OR (lower(p.display_name), p.id) > (?3, ?4))
         AND (?6 IS NULL OR ${notBlockedSQL('p.owner_user_id', '?6')})
@@ -222,9 +218,11 @@ profiles.get('/', async (c) => {
 /** A profile page: card + bio, links, social figures, intro video, figures, ratings; private parts for the owner. */
 export async function profilePage(env: Env, id: string, viewerUserId: string | null) {
   const p = await env.DB.prepare(`SELECT p.*, s.show_location, s.who_can_message, s.show_links, s.hide_job_posts
-      FROM profiles p LEFT JOIN profile_settings s ON s.profile_id = p.id WHERE p.id = ?`).bind(id)
+      FROM profiles p LEFT JOIN profile_settings s ON s.profile_id = p.id
+      WHERE p.id = ?1 OR (p.username = ?1 AND NOT EXISTS (SELECT 1 FROM profiles x WHERE x.id = ?1))`).bind(id)
     .first<Record<string, any>>();
   if (!p || p.status === 'deleted') fail(404, 'profile_not_found');
+  id = p!.id; // an old /profile/<username> link: the profile's own id from here on
   const isOwner = p!.owner_user_id === viewerUserId;
   if (!isOwner && p!.status !== 'active') fail(404, 'profile_not_found');
   const base = (await loadCard(env, id, isOwner))!;
@@ -243,9 +241,7 @@ export async function profilePage(env: Env, id: string, viewerUserId: string | n
         (SELECT COUNT(*) FROM media WHERE owner_profile_id = ?1 AND purpose = 'portfolio' AND status = 'ready' AND review_status = 'approved') AS portfolio,
         (SELECT COUNT(*) FROM jobs WHERE owner_profile_id = ?1 AND status = 'published') AS jobs,
         (SELECT COUNT(*) FROM contact_requests WHERE status = 'accepted' AND (sender_profile_id = ?1 OR recipient_profile_id = ?1)) AS contacts,
-        (SELECT COALESCE(SUM(likes_count), 0) FROM media WHERE owner_profile_id = ?1 AND status = 'ready' AND review_status = 'approved') AS likes,
-        (SELECT COUNT(*) FROM follows WHERE followee_profile_id = ?1) AS followers,
-        (SELECT COUNT(*) FROM follows WHERE follower_profile_id = ?1) AS following`)
+        (SELECT COALESCE(SUM(likes_count), 0) FROM media WHERE owner_profile_id = ?1 AND status = 'ready' AND review_status = 'approved') AS likes`)
       .bind(id).first(),
   ]);
   const showLocation = isOwner || p!.show_location === 1;
@@ -341,36 +337,8 @@ profiles.get('/:id/jobs', requireAuth, requireProfile, async (c) => {
   return c.json({ items: await jobsJSON(c.env, rows.results, viewer.id) });
 });
 
-// PUT / DELETE /v1/profiles/:id/follow — the acting profile follows / unfollows (one-directional, not contacts).
-profiles.put('/:id/follow', requireAuth, requireProfile, async (c) => {
-  const me = actingProfile(c);
-  const id = c.req.param('id');
-  const target = await c.env.DB.prepare(`SELECT owner_user_id, status FROM profiles WHERE id = ?`).bind(id)
-    .first<{ owner_user_id: string; status: string }>();
-  if (!target || target.status !== 'active') fail(404, 'profile_not_found');
-  if (target!.owner_user_id === me.ownerUserId) fail(422, 'same_account');
-  const res = await c.env.DB.prepare(`INSERT OR IGNORE INTO follows (follower_profile_id, followee_profile_id, created_at) VALUES (?, ?, ?)`)
-    .bind(me.id, id, now()).run();
-  if (res.meta.changes) {
-    await c.env.DB.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at)
-                            VALUES (?, ?, 'followed', ?, '{}', ?)`).bind(newId('ntf'), id, me.id, now()).run();
-  }
-  return c.json({ following: true });
-});
-
-profiles.delete('/:id/follow', requireAuth, requireProfile, async (c) => {
-  const me = actingProfile(c);
-  await c.env.DB.prepare(`DELETE FROM follows WHERE follower_profile_id = ? AND followee_profile_id = ?`).bind(me.id, c.req.param('id')).run();
-  return c.json({ following: false });
-});
-
-// GET /v1/profiles/:id/follow — whether the acting profile follows it.
-profiles.get('/:id/follow', requireAuth, requireProfile, async (c) => {
-  const me = actingProfile(c);
-  const row = await c.env.DB.prepare(`SELECT 1 AS ok FROM follows WHERE follower_profile_id = ? AND followee_profile_id = ?`)
-    .bind(me.id, c.req.param('id')).first();
-  return c.json({ following: Boolean(row) });
-});
+// FIX 114: KOLABA has mutual contacts only — the old one-directional follow is gone (410 for an old client).
+profiles.all('/:id/follow', (c) => c.json({ error: { code: 'follows_removed', message: 'Use contacts.' } }, 410));
 
 export default profiles;
 

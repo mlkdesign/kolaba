@@ -17,26 +17,23 @@ notifications.get('/', async (c) => {
   const profile = actingProfile(c);
   const limit = clampLimit(c.req.query('limit'), 30, 60);
   const cursor = decodeCursor<{ t: number; id: string }>(c.req.query('cursor'));
-  const rows = await c.env.DB.prepare(`SELECT * FROM notifications WHERE recipient_profile_id = ?1
+  // FIX 114: no follows — old 'followed' rows are not shown (nor counted).
+  const rows = await c.env.DB.prepare(`SELECT * FROM notifications WHERE recipient_profile_id = ?1 AND type <> 'followed'
       AND (?2 IS NULL OR (created_at, id) < (?2, ?3)) ORDER BY created_at DESC, id DESC LIMIT ?4`)
     .bind(profile.id, cursor?.t ?? null, cursor?.id ?? null, limit + 1).all<Record<string, any>>();
   const page = rows.results.slice(0, limit);
   const actors = await loadCards(c.env, page.map((n) => n.actor_profile_id));
-  const unread = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE recipient_profile_id = ? AND read_at IS NULL`)
+  const unread = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE recipient_profile_id = ? AND read_at IS NULL AND type <> 'followed'`)
     .bind(profile.id).first<{ n: number }>();
   const last = rows.results.length > limit ? page[page.length - 1] : null;
-  // The row's trailing piece (NotificationsView): the liked video's picture, and whether the actor is followed.
+  // The row's trailing piece (NotificationsView): the liked video's picture.
   const payloads = page.map((n) => JSON.parse(n.payload) as Record<string, any>);
   const mediaIds = [...new Set(payloads.map((p) => p.mediaId).filter(Boolean))] as string[];
-  const actorIds = [...new Set(page.map((n) => n.actor_profile_id).filter(Boolean))] as string[];
-  const [mediaRows, followRows] = await Promise.all([
+  const [mediaRows] = await Promise.all([
     mediaIds.length ? c.env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.id IN (${mediaIds.map(() => '?').join(',')}) AND m.status = 'ready' AND m.review_status = 'approved'`)
       .bind(...mediaIds).all<MediaRow>() : Promise.resolve({ results: [] as MediaRow[] }),
-    actorIds.length ? c.env.DB.prepare(`SELECT followee_profile_id AS id FROM follows WHERE follower_profile_id = ? AND followee_profile_id IN (${actorIds.map(() => '?').join(',')})`)
-      .bind(profile.id, ...actorIds).all<{ id: string }>() : Promise.resolve({ results: [] as { id: string }[] }),
   ]);
   const mediaById = new Map(mediaRows.results.map((m) => [m.id, mediaJSON(c.env, m)]));
-  const followed = new Set(followRows.results.map((r) => r.id));
   // A contact request's own state now (pending → Accept / Decline on the row; accepted / declined / cancelled after).
   const requestIds = [...new Set(page.map((n, i) => (n.type === 'contact_request' ? payloads[i].requestId : null)).filter(Boolean))] as string[];
   const requestRows = requestIds.length
@@ -47,7 +44,7 @@ notifications.get('/', async (c) => {
     items: page.map((n, i) => ({ id: n.id, type: n.type, payload: payloads[i], createdAt: n.created_at, readAt: n.read_at,
                               actor: n.actor_profile_id ? actors.get(n.actor_profile_id) ?? null : null,
                               media: payloads[i].mediaId ? mediaById.get(payloads[i].mediaId) ?? null : null,
-                              isFollowingActor: n.actor_profile_id ? followed.has(n.actor_profile_id) : false,
+                              isFollowingActor: false,
                               requestStatus: n.type === 'contact_request' ? requestStatus.get(payloads[i].requestId) ?? null : undefined })),
     unreadCount: unread?.n ?? 0,
     nextCursor: last ? encodeCursor({ t: last.created_at, id: last.id }) : null,
@@ -119,13 +116,11 @@ reels.get('/creators', requireAuth, requireProfile, async (c) => {
   if (!page.length) return c.json({ items: [], nextCursor: null });
   const ids = page.map((p) => p.id);
   const marks = ids.map(() => '?').join(',');
-  const [cards, videos, follows, bios] = await Promise.all([
+  const [cards, videos, bios] = await Promise.all([
     loadCards(c.env, ids),
     c.env.DB.prepare(`SELECT ${mediaColumns}, EXISTS (SELECT 1 FROM likes l WHERE l.media_id = m.id AND l.profile_id = ?) AS is_liked
         FROM media m WHERE m.owner_profile_id IN (${marks}) AND m.kind = 'video' AND m.purpose IN ('portfolio', 'intro')
         AND m.status = 'ready' AND m.is_public = 1 AND m.review_status = 'approved' ORDER BY m.position, m.created_at DESC`).bind(profile.id, ...ids).all<MediaRow & { is_liked: number }>(),
-    c.env.DB.prepare(`SELECT followee_profile_id FROM follows WHERE follower_profile_id = ? AND followee_profile_id IN (${marks})`)
-      .bind(profile.id, ...ids).all<{ followee_profile_id: string }>(),
     c.env.DB.prepare(`SELECT id, bio FROM profiles WHERE id IN (${marks})`).bind(...ids).all<{ id: string; bio: string }>(),
   ]);
   // KOLABA has contacts, not follows: each creator's contact state with the viewer (the page's contact button).
@@ -139,12 +134,11 @@ reels.get('/creators', requireAuth, requireProfile, async (c) => {
     if (r.status === 'accepted') return { relation: 'connected', requestId: r.id };
     return { relation: r.sender_profile_id === profile.id ? 'requested' : 'incoming', requestId: r.id };
   };
-  const followed = new Set(follows.results.map((f) => f.followee_profile_id));
   const bio = new Map(bios.results.map((b) => [b.id, b.bio]));
   const last = creators.results.length > limit ? page[page.length - 1] : null;
   return c.json({
     items: page.map((p) => ({
-      author: cards.get(p.id), bio: bio.get(p.id) ?? '', isFollowing: followed.has(p.id), contact: contactOf(p.id),
+      author: cards.get(p.id), bio: bio.get(p.id) ?? '', isFollowing: false, contact: contactOf(p.id),
       videos: videos.results.filter((v) => v.owner_profile_id === p.id).slice(0, 10).map((v) => mediaJSON(c.env, v, { isLiked: v.is_liked === 1 })),
     })),
     nextCursor: last ? encodeCursor({ t: last.latest, id: last.id }) : null,
@@ -163,7 +157,7 @@ search.get('/', requireAuth, requireProfile, async (c) => {
   const want = (s: string) => scope === 'all' || scope === s;
   const profilesOf = async (type: string) => want(`${type}s`)
     ? (await c.env.DB.prepare(`SELECT ${cardColumns} FROM profiles p ${avatarJoin} WHERE p.type = ?1 AND p.status = 'active'
-          AND p.visibility = 'public' AND ${notBlockedSQL('p.owner_user_id', '?3')} AND lower(p.display_name || ' ' || p.username || ' ' || COALESCE(p.category, '') || ' ' ||
+          AND p.visibility = 'public' AND ${notBlockedSQL('p.owner_user_id', '?3')} AND lower(p.display_name || ' ' || COALESCE(p.category, '') || ' ' ||
           COALESCE(p.city, '') || ' ' || COALESCE(p.country, '')) LIKE ?2 ORDER BY lower(p.display_name) LIMIT 20`)
         .bind(type, like, profile.ownerUserId).all<CardRow>()).results.map((r) => card(c.env, r))
     : [];
@@ -175,7 +169,7 @@ search.get('/', requireAuth, requireProfile, async (c) => {
     want('contacts') ? c.env.DB.prepare(`SELECT CASE WHEN cr.sender_profile_id = ?1 THEN cr.recipient_profile_id ELSE cr.sender_profile_id END AS id
         FROM contact_requests cr JOIN profiles p ON p.id = CASE WHEN cr.sender_profile_id = ?1 THEN cr.recipient_profile_id ELSE cr.sender_profile_id END
         WHERE cr.status = 'accepted' AND (cr.sender_profile_id = ?1 OR cr.recipient_profile_id = ?1)
-          AND lower(p.display_name || ' ' || p.username) LIKE ?2 LIMIT 20`).bind(profile.id, like).all<{ id: string }>() : null,
+          AND lower(p.display_name) LIKE ?2 LIMIT 20`).bind(profile.id, like).all<{ id: string }>() : null,
     want('messages') ? c.env.DB.prepare(`SELECT m.id, m.conversation_id, m.body, m.created_at, m.sender_profile_id FROM messages m
         JOIN conversation_participants cp ON cp.conversation_id = m.conversation_id AND cp.profile_id = ?1
         WHERE m.deleted_at IS NULL AND lower(m.body) LIKE ?2 ORDER BY m.created_at DESC LIMIT 20`).bind(profile.id, like)
@@ -197,7 +191,7 @@ export const sync = new Hono<AppEnv>();
 sync.get('/', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c);
   const counts = await c.env.DB.prepare(`SELECT
-      (SELECT COUNT(*) FROM notifications WHERE recipient_profile_id = ?1 AND read_at IS NULL) AS notifications,
+      (SELECT COUNT(*) FROM notifications WHERE recipient_profile_id = ?1 AND read_at IS NULL AND type <> 'followed') AS notifications,
       (SELECT COUNT(*) FROM conversation_participants cp WHERE cp.profile_id = ?1 AND cp.hidden_at IS NULL AND cp.muted = 0
          AND EXISTS (SELECT 1 FROM messages m LEFT JOIN conversation_read_state rs ON rs.conversation_id = m.conversation_id AND rs.profile_id = ?1
            WHERE m.conversation_id = cp.conversation_id AND m.sender_profile_id <> ?1 AND m.deleted_at IS NULL
