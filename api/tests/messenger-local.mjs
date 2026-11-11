@@ -102,6 +102,7 @@ await test('reply keeps its original; reaction.updated reaches both', async () =
   const eb = await sb.wait('reaction.updated'); eq(eb.isLikedByMe, true, 'mine');
 });
 await test('file: private upload, signed download, reply preview says file', async () => {
+  sb.events.length = 0;
   const form = new FormData(); form.set('file', new File(['%PDF-1.4 test'], 'brief.pdf', { type: 'application/pdf' })); form.set('clientId', 'client-file-1');
   const r = await call(a, 'POST', `/v1/conversations/${conv}/files`, undefined, form); eq(r.status, 201, r.text);
   eq(r.json.files[0].name, 'brief.pdf', 'name'); eq(r.json.files[0].bytes, 13, 'bytes');
