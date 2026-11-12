@@ -119,6 +119,13 @@ await test('delete: only the sender; message.deleted to both; body gone', async 
   const list = await call(b, 'GET', `/v1/conversations/${conv}/messages?limit=100`);
   const gone = list.json.items.find((m) => m.id === first.id); eq(gone.body, '', 'body'); eq(Boolean(gone.deletedAt), true, 'tombstone');
 });
+await test('delete the last message: the chat list shows the one before it', async () => {
+  const last = await call(a, 'POST', `/v1/conversations/${conv}/messages`, { body: 'to be deleted' });
+  eq((await call(a, 'DELETE', `/v1/conversations/${conv}/messages/${last.json.id}`)).status, 200, 'delete');
+  const list = await call(b, 'GET', '/v1/conversations');
+  const row = list.json.items.find((i) => i.id === conv);
+  eq(row.lastMessage.id !== last.json.id, true, 'not the deleted one'); eq(row.lastMessage.body.length > 0, true, 'has text');
+});
 await test('delete chat: chat.deleted for me, the partner keeps the history', async () => {
   eq((await call(a, 'DELETE', `/v1/conversations/${conv}`)).status, 200, 'delete');
   await sa.wait('chat.deleted');

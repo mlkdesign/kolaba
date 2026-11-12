@@ -387,6 +387,10 @@ messages.delete('/:id/messages/:messageId', async (c) => {
   const res = await c.env.DB.prepare(`UPDATE messages SET deleted_at = ? WHERE id = ? AND conversation_id = ? AND sender_profile_id = ?
       AND deleted_at IS NULL`).bind(now(), c.req.param('messageId'), id, profile.id).run();
   if (!res.meta.changes) fail(404, 'message_not_found');
+  // The chat list's last message: the latest one still there (or none).
+  await c.env.DB.prepare(`UPDATE conversations SET (last_message_id, last_message_at) = (
+      SELECT id, created_at FROM messages WHERE conversation_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1)
+      WHERE id = ?1 AND last_message_id = ?2`).bind(id, c.req.param('messageId')).run();
   c.executionCtx.waitUntil((async () => {
     const members = await membersOf(c.env, id);
     await publish(c.env, members, { type: 'message.deleted', conversationId: id, messageId: c.req.param('messageId') });
