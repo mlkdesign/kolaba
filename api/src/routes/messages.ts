@@ -162,7 +162,9 @@ messages.get('/', async (c) => {
     decodeCursor<{ t: number; id: string }>(c.req.query('cursor'))));
 });
 
-// POST /v1/conversations {profileId, jobId?} — opens or returns the chat (respects "who can message me").
+// POST /v1/conversations {profileId, jobId?} — opens or returns THE chat with that profile (respects "who can message
+// me"). One chat per pair of profiles: `jobId` is still accepted (older clients) and checked, but never makes a separate
+// job chat any more.
 messages.post('/', async (c) => {
   const profile = actingProfile(c);
   const { profileId, jobId } = z.object({ profileId: z.string(), jobId: z.string().optional() }).parse(await c.req.json());
@@ -179,7 +181,7 @@ messages.post('/', async (c) => {
   }
   const key = pairKey(profile.id, profileId);
   const existing = await c.env.DB.prepare(`SELECT id FROM conversations WHERE pair_key = ? AND related_job_id = ?`)
-    .bind(key, jobId ?? '').first<{ id: string }>();
+    .bind(key, '').first<{ id: string }>();
   if (existing) {
     await c.env.DB.prepare(`UPDATE conversation_participants SET hidden_at = NULL WHERE conversation_id = ? AND profile_id = ?`)
       .bind(existing.id, profile.id).run();
@@ -196,7 +198,7 @@ messages.post('/', async (c) => {
   try {
     await c.env.DB.batch([
       c.env.DB.prepare(`INSERT INTO conversations (id, kind, pair_key, related_job_id, created_at, created_by_profile_id) VALUES (?, ?, ?, ?, ?, ?)`)
-        .bind(id, jobId ? 'job' : 'direct', key, jobId ?? '', now(), profile.id),
+        .bind(id, 'direct', key, '', now(), profile.id),
       c.env.DB.prepare(`INSERT INTO conversation_participants (conversation_id, profile_id, joined_at) VALUES (?, ?, ?), (?, ?, ?)`)
         .bind(id, profile.id, now(), id, profileId, now()),
       c.env.DB.prepare(`INSERT INTO conversation_read_state (conversation_id, profile_id, last_read_at) VALUES (?, ?, ?), (?, ?, 0)`)
@@ -204,7 +206,7 @@ messages.post('/', async (c) => {
     ]);
   } catch (error) {
     if (!String(error).includes('UNIQUE')) throw error;
-    const again = await c.env.DB.prepare(`SELECT id FROM conversations WHERE pair_key = ? AND related_job_id = ?`).bind(key, jobId ?? '')
+    const again = await c.env.DB.prepare(`SELECT id FROM conversations WHERE pair_key = ? AND related_job_id = ?`).bind(key, '')
       .first<{ id: string }>();
     return c.json({ id: again!.id });
   }
