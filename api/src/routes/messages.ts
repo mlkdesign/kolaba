@@ -119,9 +119,15 @@ async function messagesJSON(env: Env, rows: Record<string, any>[], viewer: strin
 /** The chat list for a profile: newest activity first, unread counts, last message, the partner's card. */
 export async function conversationList(env: Env, profileId: string, limit: number, cursor: { t: number; id: string } | null, q = '') {
   const rows = await env.DB.prepare(`SELECT c.id, c.kind, c.related_job_id, COALESCE(c.last_message_at, c.created_at) AS activity_at,
-        cp.muted, c.last_message_id,
+        cp.muted,
+        CASE WHEN EXISTS (SELECT 1 FROM message_hidden h WHERE h.message_id = c.last_message_id AND h.profile_id = ?1)
+          THEN (SELECT m.id FROM messages m WHERE m.conversation_id = c.id AND m.deleted_at IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM message_hidden h WHERE h.message_id = m.id AND h.profile_id = ?1)
+                ORDER BY m.created_at DESC, m.id DESC LIMIT 1)
+          ELSE c.last_message_id END AS last_message_id,
         (SELECT other.profile_id FROM conversation_participants other WHERE other.conversation_id = c.id AND other.profile_id <> ?1 LIMIT 1) AS other_id,
         (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_profile_id <> ?1 AND m.deleted_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM message_hidden h WHERE h.message_id = m.id AND h.profile_id = ?1)
            AND m.created_at > MAX(COALESCE(rs.last_read_at, 0), COALESCE(cp.cleared_at, 0))) AS unread_count,
         (SELECT title FROM jobs WHERE id = c.related_job_id) AS job_title
       FROM conversation_participants cp JOIN conversations c ON c.id = cp.conversation_id
@@ -225,6 +231,7 @@ messages.get('/:id/messages', async (c) => {
         AND profile_id <> ?2 LIMIT 1) AS other_read_at FROM messages m
       WHERE m.conversation_id = ?1 AND (?3 IS NULL OR (m.created_at, m.id) < (?3, ?4)) AND m.created_at > ?5
         AND m.created_at > COALESCE((SELECT cleared_at FROM conversation_participants WHERE conversation_id = ?1 AND profile_id = ?2), 0)
+        AND NOT EXISTS (SELECT 1 FROM message_hidden h WHERE h.message_id = m.id AND h.profile_id = ?2)
       ORDER BY m.created_at DESC, m.id DESC LIMIT ?6`)
     .bind(id, profile.id, before?.t ?? null, before?.id ?? null, after, limit + 1).all<Record<string, any>>();
   const page = rows.results.slice(0, limit);
@@ -382,10 +389,24 @@ async function emitReaction(env: Env, conversationId: string, messageId: string)
 
 // DELETE /v1/conversations/:id/messages/:messageId — the sender takes a message back for everyone (its text, media,
 // voice and files stop being served; the row stays as a tombstone so order and replies hold).
+// `?for=me`: any message of the chat is hidden for this profile only (the other side keeps it); this profile's other
+// devices hear message.deleted.
 messages.delete('/:id/messages/:messageId', async (c) => {
   const profile = actingProfile(c);
   const id = c.req.param('id');
   await participant(c.env, id, profile.id);
+  if (c.req.query('for') === 'me') {
+    const messageId = c.req.param('messageId');
+    const exists = await c.env.DB.prepare(`SELECT 1 FROM messages WHERE id = ? AND conversation_id = ?`).bind(messageId, id).first();
+    if (!exists) fail(404, 'message_not_found');
+    await c.env.DB.prepare(`INSERT OR IGNORE INTO message_hidden (message_id, profile_id, hidden_at) VALUES (?, ?, ?)`)
+      .bind(messageId, profile.id, now()).run();
+    c.executionCtx.waitUntil((async () => {
+      await publish(c.env, [profile.id], { type: 'message.deleted', conversationId: id, messageId });
+      await publish(c.env, [profile.id], { type: 'chat.updated', conversationId: id });
+    })());
+    return c.json({ status: 'hidden' });
+  }
   const res = await c.env.DB.prepare(`UPDATE messages SET deleted_at = ? WHERE id = ? AND conversation_id = ? AND sender_profile_id = ?
       AND deleted_at IS NULL`).bind(now(), c.req.param('messageId'), id, profile.id).run();
   if (!res.meta.changes) fail(404, 'message_not_found');

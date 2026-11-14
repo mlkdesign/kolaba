@@ -126,6 +126,21 @@ await test('delete the last message: the chat list shows the one before it', asy
   const row = list.json.items.find((i) => i.id === conv);
   eq(row.lastMessage.id !== last.json.id, true, 'not the deleted one'); eq(row.lastMessage.body.length > 0, true, 'has text');
 });
+await test('delete for me: hidden for me only, the partner keeps it; any message; list preview skips it', async () => {
+  const theirs = await call(b, 'POST', `/v1/conversations/${conv}/messages`, { body: 'hide me for a' });
+  sa.events.length = 0; sb.events.length = 0;
+  eq((await call(a, 'DELETE', `/v1/conversations/${conv}/messages/${theirs.json.id}?for=me`)).status, 200, 'hide theirs');
+  const e = await sa.wait('message.deleted'); eq(e.messageId, theirs.json.id, 'my devices hear it');
+  const mine = await call(a, 'GET', `/v1/conversations/${conv}/messages?limit=100`);
+  eq(mine.json.items.some((m) => m.id === theirs.json.id), false, 'gone for me');
+  const partner = await call(b, 'GET', `/v1/conversations/${conv}/messages?limit=100`);
+  const kept = partner.json.items.find((m) => m.id === theirs.json.id); eq(kept?.body, 'hide me for a', 'partner keeps it');
+  const rowA = (await call(a, 'GET', '/v1/conversations')).json.items.find((i) => i.id === conv);
+  eq(rowA.lastMessage?.id !== theirs.json.id, true, 'my preview skips it');
+  const rowB = (await call(b, 'GET', '/v1/conversations')).json.items.find((i) => i.id === conv);
+  eq(rowB.lastMessage?.id, theirs.json.id, 'partner preview keeps it');
+  eq((await call(a, 'DELETE', `/v1/conversations/${conv}/messages/msg_nope?for=me`)).status, 404, 'unknown message');
+});
 await test('delete chat: chat.deleted for me, the partner keeps the history', async () => {
   eq((await call(a, 'DELETE', `/v1/conversations/${conv}`)).status, 200, 'delete');
   await sa.wait('chat.deleted');
