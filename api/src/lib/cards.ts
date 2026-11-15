@@ -155,6 +155,8 @@ export interface NotifyOptions {
   targetId?: string;
   /** Overrides the type's preset text (the admin's own words). */
   push?: { title: string; body: string };
+  /** Overrides the type's push category (an admin notice in a chosen category; null: mandatory). */
+  setting?: PushSetting | null;
 }
 
 /** A notification for a PROFILE: a row of its own feed (never another profile's of the same account) and, where APNs
@@ -180,7 +182,7 @@ export async function notify(env: Env, recipient: string, type: string, actor: s
       ?.display_name : null;
     text = name ? { title: name, body: preset.body } : { title: 'kolaba.', body: preset.body };
   }
-  await pushToProfile(env, recipient, { ...text, setting: preset.setting, collapseId: id,
+  await pushToProfile(env, recipient, { ...text, setting: options.setting !== undefined ? options.setting : preset.setting, collapseId: id,
                                         data: { kind: 'notification', type, notificationId: id } });
 }
 

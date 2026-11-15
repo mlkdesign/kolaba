@@ -433,6 +433,8 @@ admin.post('/notifications', async (c) => {
     title: z.string().trim().min(1).max(80),
     message: z.string().trim().min(1).max(500),
     requestKey: z.string().trim().min(8).max(80),
+    // The app's notification categories: where it's filed and which icon it gets in the profile's feed.
+    category: z.enum(['jobs', 'contacts', 'reviews', 'content', 'pro', 'account']).default('account'),
   }).parse(await c.req.json());
   if (body.scope === 'account') {
     const u = await c.env.DB.prepare(`SELECT id FROM users WHERE id = ? AND status <> 'deleted'`).bind(body.userId ?? '').first<{ id: string }>();
@@ -444,9 +446,13 @@ admin.post('/notifications', async (c) => {
   }
   const p = await c.env.DB.prepare(`SELECT id FROM profiles WHERE id = ? AND status <> 'deleted'`).bind(body.profileId ?? '').first<{ id: string }>();
   if (!p) fail(404, 'profile_not_found');
-  await notify(c.env, p!.id, 'profile_message', null, { title: body.title, message: body.message },
-               { dedupKey: `admin:${body.requestKey}`, push: { title: body.title, body: body.message } });
-  await audit(c, 'notification.send', 'profile', p!.id, null, { scope: 'profile', title: body.title, requestKey: body.requestKey });
+  // Its push follows the profile's switch for that category (PRO and account notices always go).
+  const setting = body.category === 'jobs' ? 'jobs' : body.category === 'contacts' ? 'contacts'
+    : body.category === 'reviews' || body.category === 'content' ? 'activity' : null;
+  await notify(c.env, p!.id, 'profile_message', null, { title: body.title, message: body.message, category: body.category },
+               { dedupKey: `admin:${body.requestKey}`, push: { title: body.title, body: body.message }, setting });
+  await audit(c, 'notification.send', 'profile', p!.id, null,
+              { scope: 'profile', category: body.category, title: body.title, requestKey: body.requestKey });
   return c.json({ sent: true });
 });
 

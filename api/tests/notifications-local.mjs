@@ -171,6 +171,17 @@ await test('X-Profile-Id of another account is refused', async () => {
   ok(r.status === 403 || r.status === 404, `status ${r.status}`);
 });
 
+await test('manual notice: category kept for the app, default Account, bad category refused', async () => {
+  const r = await call(ADM, 'POST', '/v1/admin/notifications', { scope: 'profile', profileId: bBiz1, title: 'New tools',
+    message: 'Applicants can now attach videos.', requestKey: randomUUID(), category: 'jobs' }, { origin: ADMIN_ORIGIN });
+  eq(r.status, 200, r.text);
+  const row = (await feed(B, bBiz1)).items.find((n) => n.type === 'profile_message' && n.payload.title === 'New tools');
+  eq(row?.payload.category, 'jobs', 'category');
+  const bad = await call(ADM, 'POST', '/v1/admin/notifications', { scope: 'profile', profileId: bBiz1, title: 'x', message: 'y',
+    requestKey: randomUUID(), category: 'messages' }, { origin: ADMIN_ORIGIN });
+  eq(bad.status >= 400, true, 'messages is not a notification category');
+});
+
 console.log('FIX 125 preferences');
 await test('preferences: defaults on, saved per profile, the other profile untouched', async () => {
   const d = (await call(B, 'GET', '/v1/notifications/preferences', undefined, { profileId: bBiz1 })).json;

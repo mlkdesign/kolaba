@@ -234,7 +234,7 @@ export function UserPage({ id }: { id: string }) {
                   </dl>
                   <div className="profile-card__actions">
                     <Button small onClick={() => edit(p)}>Edit profile</Button>
-                    <Button small onClick={() => message({ scope: 'profile', id: p.id, name: p.displayName })}>Send notification</Button>
+                    <Button small onClick={() => message({ scope: 'profile', id: p.id, name: p.displayName })}>Send manual notification</Button>
                     {p.subscription?.source === 'admin'
                       ? <><Button small onClick={() => pro(p, 'extend')}>Extend 1 month</Button><Button small variant="ghost" onClick={() => pro(p, 'revoke')}>Remove PRO</Button></>
                       : !p.isPro && <Button small onClick={() => pro(p, 'grant')}>Grant 1 month PRO</Button>}
@@ -306,12 +306,20 @@ function EditProfile({ profile, onClose, onSaved }: { profile: AdminProfile; onC
   );
 }
 
+type Category = 'jobs' | 'contacts' | 'reviews' | 'content' | 'pro' | 'account';
+/** The app's Notifications categories (its filters): the notice is filed there with that category's icon. */
+const CATEGORIES: { value: Category; label: string }[] = [
+  { value: 'jobs', label: 'Jobs' }, { value: 'contacts', label: 'Contacts' }, { value: 'reviews', label: 'Reviews' },
+  { value: 'content', label: 'Content' }, { value: 'pro', label: 'PRO' }, { value: 'account', label: 'Account' },
+];
+
 /** Sends a notice "from kolaba." — never in another user's name. The form's request key makes a double submit harmless. */
 function SendNotification({ target, onClose, onSent }: {
   target: { scope: 'account' | 'profile'; id: string; name: string }; onClose: () => void; onSent: () => void;
 }) {
   const [title, setTitle] = useState('');
   const [text, setText] = useState('');
+  const [category, setCategory] = useState<Category>('account');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [requestKey] = useState(() => crypto.randomUUID());
@@ -320,14 +328,14 @@ function SendNotification({ target, onClose, onSent }: {
     try {
       await api('POST', '/notifications', {
         scope: target.scope, ...(target.scope === 'account' ? { userId: target.id } : { profileId: target.id }),
-        title: title.trim(), message: text.trim(), requestKey,
+        title: title.trim(), message: text.trim(), requestKey, ...(target.scope === 'profile' ? { category } : {}),
       });
       toast.ok('Notification sent', `${target.name} · recorded in Activity Logs.`);
       onSent(); onClose();
     } catch (e) { setError(errorText(e)); setBusy(false); }
   };
   return (
-    <Modal title="Send notification" onClose={busy ? () => {} : onClose} width={520}>
+    <Modal title={target.scope === 'profile' ? 'Send manual notification' : 'Send notification'} onClose={busy ? () => {} : onClose} width={520}>
       <form onSubmit={(e) => { e.preventDefault(); send(); }}>
         <p className="field__hint">
           {target.scope === 'account'
@@ -335,8 +343,15 @@ function SendNotification({ target, onClose, onSent }: {
             : <>To the profile <b>{target.name}</b> only — never the account’s other profiles.</>}
           {' '}It comes from “kolaba.” and is never shown as another user’s action.
         </p>
+        {target.scope === 'profile' && (
+          <Field label="Category" hint="Where it appears in the app's Notifications, and its icon. Its push follows the profile's switch for that category (PRO and Account always arrive).">
+            <select className="input" value={category} onChange={(e) => setCategory(e.target.value as Category)}>
+              {CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+            </select>
+          </Field>
+        )}
         <Field label="Title"><input className="input" maxLength={80} required value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
-        <Field label={`Message (${text.length}/500)`}><textarea className="input" rows={4} maxLength={500} required value={text} onChange={(e) => setText(e.target.value)} /></Field>
+        <Field label={`Description (${text.length}/500)`}><textarea className="input" rows={4} maxLength={500} required value={text} onChange={(e) => setText(e.target.value)} /></Field>
         {error && <p className="form-error" role="alert">{error}</p>}
         <div className="modal__actions">
           <Button onClick={onClose} disabled={busy}>Cancel</Button>
