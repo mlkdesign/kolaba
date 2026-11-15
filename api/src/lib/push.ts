@@ -38,21 +38,34 @@ export interface PushContent {
   collapseId?: string;
   /** Opened by the app: kind, profileId, conversationId… */
   data: Record<string, string>;
-  /** Which Settings switch may silence it. */
-  setting: 'newMessages' | 'projectUpdates' | 'newApplications' | 'followersAndMentions' | null;
+  /** Which Settings switch may silence it (null: never — account security). */
+  setting: PushSetting | null;
 }
+
+/** Settings → Notifications switches that gate a push (stored per account in user_settings.notifications). */
+export type PushSetting = 'newMessages' | 'projectUpdates' | 'newApplications' | 'followersAndMentions' | 'reviews'
+  | 'content' | 'subscription';
 
 /** Sends to every device of the profile's owner. Never throws (a push must not fail the request that caused it). */
 export async function pushToProfile(env: Env, profileId: string, content: PushContent): Promise<void> {
   if (!apnsConfigured(env)) return;
+  const owner = await env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(profileId)
+    .first<{ owner_user_id: string }>().catch(() => null);
+  if (!owner) return;
+  await pushToUser(env, owner.owner_user_id, content, profileId);
+}
+
+/** Sends to every device of the account; `profileId` (when the push is a profile's) tells the app which profile
+ *  to open. An account push (security) has none and ignores the switches. */
+export async function pushToUser(env: Env, userId: string, content: PushContent, profileId: string | null = null): Promise<void> {
+  if (!apnsConfigured(env)) return;
   try {
-    const owner = await env.DB.prepare(`SELECT p.owner_user_id AS user_id, s.notifications FROM profiles p
-        LEFT JOIN user_settings s ON s.user_id = p.owner_user_id WHERE p.id = ?`).bind(profileId)
-      .first<{ user_id: string; notifications: string | null }>();
-    if (!owner) return;
+    const row = await env.DB.prepare(`SELECT notifications FROM user_settings WHERE user_id = ?`).bind(userId)
+      .first<{ notifications: string | null }>();
     let settings: Record<string, unknown> = {};
-    try { settings = JSON.parse(owner.notifications ?? '{}'); } catch { /* defaults: everything on */ }
-    if (settings.push === false || (content.setting && settings[content.setting] === false)) return;
+    try { settings = JSON.parse(row?.notifications ?? '{}'); } catch { /* defaults: everything on */ }
+    if (content.setting && (settings.push === false || settings[content.setting] === false)) return;
+    const owner = { user_id: userId };
     const devices = await env.DB.prepare(`SELECT token, environment, previews FROM device_tokens WHERE user_id = ?`)
       .bind(owner.user_id).all<{ token: string; environment: string; previews: number }>();
     if (!devices.results.length) return;
@@ -62,7 +75,7 @@ export async function pushToProfile(env: Env, profileId: string, content: PushCo
       const body = d.previews === 0 && content.privateBody ? content.privateBody : content.body;
       const payload = {
         aps: { alert: { title: content.title, body }, sound: 'default', 'thread-id': content.threadId, 'mutable-content': 1 },
-        ...content.data, profileId,
+        ...content.data, ...(profileId ? { profileId } : {}),
       };
       const res = await fetch(`${host}/3/device/${d.token}`, {
         method: 'POST',

@@ -84,7 +84,8 @@ reviews.post('/', requireAuth, requireProfile, async (c) => {
     await autoReport(c.env, { type: 'review', id, profileId: profile.id }, verdict, body.comment);
     return c.json({ id, reviewStatus: 'flagged' }, 201);
   }
-  await notify(c.env, body.recipientProfileId, 'new_review', profile.id, { reviewId: id });
+  await notify(c.env, body.recipientProfileId, 'new_review', profile.id, { reviewId: id },
+               { dedupKey: `new_review:${id}`, targetType: 'review', targetId: id });
   return c.json({ id, reviewStatus: 'approved' }, 201);
 });
 
@@ -107,7 +108,8 @@ reviews.post('/requests', requireAuth, requireProfile, async (c) => {
     if (String(error).includes('UNIQUE')) return c.json({ state: 'requested', created: false });
     throw error;
   }
-  await notify(c.env, contactProfileId, 'review_request', profile.id, { requestId: id });
+  await notify(c.env, contactProfileId, 'review_request', profile.id, { requestId: id },
+               { dedupKey: `review_request:${id}`, targetType: 'review_request', targetId: id });
   return c.json({ id, state: 'requested', created: true }, 201);
 });
 
@@ -199,7 +201,8 @@ reviews.post('/invites/:token/accept', requireAuth, requireProfile, async (c) =>
     statements.push(c.env.DB.prepare(`UPDATE contact_requests SET status = 'accepted', responded_at = ? WHERE id = ?`).bind(now(), live.id));
   }
   await c.env.DB.batch(statements);
-  await notify(c.env, invite.owner_profile_id, 'contact_accepted', profile.id, { via: 'review_invite' });
+  await notify(c.env, invite.owner_profile_id, 'contact_accepted', profile.id, { via: 'review_invite' },
+               { dedupKey: `contact_accepted:invite:${invite.id}:${profile.id}`, targetType: 'profile', targetId: profile.id });
   return c.json({ inviteId: invite.id, recipient: await loadCard(c.env, invite.owner_profile_id),
                   canReview: !(await hasReviewed(c.env, profile.ownerUserId, invite.owner_profile_id)) });
 });

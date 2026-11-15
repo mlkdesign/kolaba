@@ -308,19 +308,13 @@ profiles.get('/:id/collections', async (c) => {
                                                    itemsCount: r.items_count, cover: r.cover_id ? coverMap.get(r.cover_id) ?? null : null })) });
 });
 
-// POST /v1/profiles/:id/view — counts a profile view and tells its owner (once per viewer per day).
+// POST /v1/profiles/:id/view — kept for older apps; a view is no longer a notification (nor recorded).
 profiles.post('/:id/view', requireAuth, requireProfile, async (c) => {
   const viewer = actingProfile(c);
   const id = c.req.param('id');
   if (viewer.id === id) return c.json({ ok: true });
   const owner = await c.env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(id).first<{ owner_user_id: string }>();
   if (!owner || owner.owner_user_id === viewer.ownerUserId) return c.json({ ok: true });
-  const recent = await c.env.DB.prepare(`SELECT 1 AS ok FROM notifications WHERE recipient_profile_id = ? AND actor_profile_id = ?
-      AND type = 'viewed_profile' AND created_at > ?`).bind(id, viewer.id, now() - 86_400_000).first();
-  if (!recent) {
-    await c.env.DB.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at)
-                            VALUES (?, ?, 'viewed_profile', ?, '{}', ?)`).bind(newId('ntf'), id, viewer.id, now()).run();
-  }
   return c.json({ ok: true });
 });
 

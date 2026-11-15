@@ -6,6 +6,7 @@ import { clientIP, createSession, currentUser, rateLimit, requireAuth } from '..
 import { hashPassword, passwordProblem, verifyPassword } from '../lib/password';
 import { fail, newId, newToken, now, sha256Hex, timingSafeEqual } from '../lib/util';
 import { profilesOf } from './profiles';
+import { notifyAccount } from '../lib/cards';
 import { isBannedEmail, monetizationEnabled } from '../lib/moderation';
 
 /** The Terms of Service / Privacy Policy version a new account accepts (bump when the documents change). */
@@ -392,6 +393,8 @@ auth.post('/password/reset', async (c) => {
         `device was signed out.\n\nIf it wasn't you, reset your password again right away from the Log in screen.`);
     } catch { /* the password is changed either way */ }
   }
+  // In the app too, on every profile of the account (never switched off; no password or code in it).
+  await notifyAccount(c.env, userId, 'password_changed', {}, { dedupKey: `password_changed:${userId}:${t}` });
   return c.json({ status: 'password_changed' });
 });
 

@@ -13,11 +13,16 @@ const me = new Hono<AppEnv>();
 me.use('*', requireAuth);
 
 // The iOS switches (SettingsNotificationsPage): stored per account.
+// Categories (Notifications ТЗ §7): Jobs & Apply (newApplications, projectUpdates = saved jobs), Contacts
+// (followersAndMentions), Reviews, Content & Moderation, PRO & Subscription, Messages (push only — never feed rows).
+// Account security has no switch: it always arrives.
 const Notifications = z.object({
   push: z.boolean(), newMessages: z.boolean(), projectUpdates: z.boolean(), newApplications: z.boolean(),
   followersAndMentions: z.boolean(), email: z.boolean(),
+  reviews: z.boolean().default(true), content: z.boolean().default(true), subscription: z.boolean().default(true),
 });
-const DEFAULTS = { push: true, newMessages: true, projectUpdates: true, newApplications: true, followersAndMentions: true, email: false };
+const DEFAULTS = { push: true, newMessages: true, projectUpdates: true, newApplications: true, followersAndMentions: true, email: false,
+                   reviews: true, content: true, subscription: true };
 
 me.get('/settings', async (c) => {
   const user = currentUser(c);
@@ -108,7 +113,7 @@ export async function deleteAccount(env: Env, userId: string): Promise<{ profile
     `DELETE FROM review_requests WHERE requester_profile_id IN ${P} OR contact_profile_id IN ${P}`,
     `DELETE FROM reviews WHERE author_user_id = ?1 OR author_profile_id IN ${P} OR recipient_profile_id IN ${P}`,
     `DELETE FROM review_invites WHERE owner_profile_id IN ${P} OR accepted_by_profile_id IN ${P}`,
-    `DELETE FROM notifications WHERE recipient_profile_id IN ${P} OR actor_profile_id IN ${P}`,
+    `DELETE FROM notifications WHERE recipient_user_id = ?1 OR recipient_profile_id IN ${P} OR actor_profile_id IN ${P}`,
     // Reports this account filed stay for the moderators, without the reporter (DATA_RETENTION.md).
     `UPDATE reports SET reporter_user_id = NULL, reporter_profile_id = NULL WHERE reporter_user_id = ?1 OR reporter_profile_id IN ${P}`,
     `DELETE FROM message_reactions WHERE profile_id IN ${P} OR message_id IN (SELECT id FROM messages WHERE sender_profile_id IN ${P})`,

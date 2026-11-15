@@ -185,9 +185,23 @@ jobs.patch('/:id', requireAuth, requireProfile, async (c) => {
           body.deadline ?? null, now(), job.id).run();
   await setJobMedia(c.env, job.id, profile.id, body.mediaIds);
   await screenJob(c.env, job.id, body.title, body.description, body.tags);
+  if (job.status === 'published') await notifySavers(c.env, job.id, 'saved_job_updated', body.title);
   const row = await c.env.DB.prepare(`SELECT * FROM jobs WHERE id = ?`).bind(job.id).first<Record<string, any>>();
   return c.json((await jobsJSON(c.env, [row!], profile.id))[0]);
 });
+
+/** The profiles that saved a job hear that it changed or closed — one row per job per day for edits (small edits
+ *  don't pile up), one for the close; no push for either (Settings: Job updates). */
+export async function notifySavers(env: Env, jobId: string, type: 'saved_job_updated' | 'saved_job_closed', title: string) {
+  const owner = await env.DB.prepare(`SELECT owner_profile_id FROM jobs WHERE id = ?`).bind(jobId).first<{ owner_profile_id: string }>();
+  const savers = await env.DB.prepare(`SELECT profile_id FROM saved_jobs WHERE job_id = ?`).bind(jobId).all<{ profile_id: string }>();
+  const day = Math.floor(now() / 86_400_000);
+  for (const s of savers.results) {
+    await notify(env, s.profile_id, type, owner?.owner_profile_id ?? null, { jobId, jobTitle: title },
+                 { dedupKey: type === 'saved_job_closed' ? `${type}:${jobId}:${s.profile_id}` : `${type}:${jobId}:${s.profile_id}:${day}`,
+                   targetType: 'job', targetId: jobId });
+  }
+}
 
 /** Automatic text check of a job post: a flagged post leaves the public feed until a moderator looks at it (it is never
  *  rejected automatically). A post a moderator rejected / removed stays so after an edit. */
@@ -211,6 +225,7 @@ jobs.post('/:id/:action{publish|close}', requireAuth, requireProfile, async (c) 
   } else {
     if (job.status !== 'published') fail(409, 'invalid_transition');
     await c.env.DB.prepare(`UPDATE jobs SET status = 'closed', closed_at = ?, updated_at = ? WHERE id = ?`).bind(now(), now(), job.id).run();
+    await notifySavers(c.env, job.id, 'saved_job_closed', job.title);
   }
   const row = await c.env.DB.prepare(`SELECT * FROM jobs WHERE id = ?`).bind(job.id).first<Record<string, any>>();
   return c.json((await jobsJSON(c.env, [row!], profile.id))[0]);
@@ -219,6 +234,7 @@ jobs.post('/:id/:action{publish|close}', requireAuth, requireProfile, async (c) 
 jobs.delete('/:id', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c, 'business');
   const job = await ownedJob(c.env, c.req.param('id'), profile.id);
+  if (job.status === 'published') await notifySavers(c.env, job.id, 'saved_job_closed', job.title);
   await c.env.DB.prepare(`DELETE FROM jobs WHERE id = ?`).bind(job.id).run();
   return c.json({ status: 'deleted' });
 });
@@ -298,7 +314,9 @@ jobs.post('/:id/apply', requireAuth, requireProfile, async (c) => {
     if (String(error).includes('UNIQUE')) fail(409, 'already_applied');
     throw error;
   }
-  await notify(c.env, job!.owner_profile_id, 'application_received', profile.id, { jobId: job!.id, applicationId: id, jobTitle: job!.title });
+  // Only the business that published the job (never another profile of the same account).
+  await notify(c.env, job!.owner_profile_id, 'application_received', profile.id, { jobId: job!.id, applicationId: id, jobTitle: job!.title },
+               { dedupKey: `apply:${id}`, targetType: 'job', targetId: job!.id });
   const row = await c.env.DB.prepare(`SELECT * FROM applications WHERE id = ?`).bind(id).first<Record<string, any>>();
   return c.json((await applicationsJSON(c.env, [row!]))[0], 201);
 });

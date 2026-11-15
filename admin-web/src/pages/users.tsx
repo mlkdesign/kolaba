@@ -176,6 +176,9 @@ export function UserPage({ id }: { id: string }) {
       text={<>Let <b>{u.email}</b> post, message and apply again now.</>} />
   ));
   const edit = (p: AdminProfile) => extra.open((close) => <EditProfile profile={p} onClose={close} onSaved={reload} />);
+  // A message from the kolaba team in the app's Notifications: the whole account (once, on all its profiles) or one profile.
+  const message = (target: { scope: 'account'; id: string; name: string } | { scope: 'profile'; id: string; name: string }) =>
+    extra.open((close) => <SendNotification target={target} onClose={close} onSent={reload} />);
   return (
     <>
       <PageHeader title={u ? (u.profiles[0]?.displayName ?? u.email) : 'Account'} subtitle={u?.email} back={{ to: '/users', label: 'Users' }}
@@ -184,6 +187,7 @@ export function UserPage({ id }: { id: string }) {
             {u.status === 'active' && <Button variant="danger" onClick={() => act(u, 'block')}>Block</Button>}
             {u.status === 'blocked' && <Button onClick={() => act(u, 'unblock')}>{u.bannedAt ? 'Unblock (lift ban)' : 'Unblock'}</Button>}
             {u.restrictedUntil && <Button onClick={liftRestriction}>Lift restriction</Button>}
+            {u.status !== 'deleted' && <Button onClick={() => message({ scope: 'account', id: u.id, name: u.email })}>Send notification</Button>}
             {u.status === 'deleted'
               ? <Button onClick={() => act(u, 'restore')}>Restore account</Button>
               : <Button variant="ghost" onClick={() => act(u, 'delete')}>Delete account</Button>}
@@ -230,6 +234,7 @@ export function UserPage({ id }: { id: string }) {
                   </dl>
                   <div className="profile-card__actions">
                     <Button small onClick={() => edit(p)}>Edit profile</Button>
+                    <Button small onClick={() => message({ scope: 'profile', id: p.id, name: p.displayName })}>Send notification</Button>
                     {p.subscription?.source === 'admin'
                       ? <><Button small onClick={() => pro(p, 'extend')}>Extend 1 month</Button><Button small variant="ghost" onClick={() => pro(p, 'revoke')}>Remove PRO</Button></>
                       : !p.isPro && <Button small onClick={() => pro(p, 'grant')}>Grant 1 month PRO</Button>}
@@ -295,6 +300,47 @@ function EditProfile({ profile, onClose, onSaved }: { profile: AdminProfile; onC
         <div className="modal__actions">
           <Button onClick={onClose} disabled={busy}>Cancel</Button>
           <Button type="submit" variant="primary" loading={busy}>Save changes</Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/** Sends a notice "from kolaba." — never in another user's name. The form's request key makes a double submit harmless. */
+function SendNotification({ target, onClose, onSent }: {
+  target: { scope: 'account' | 'profile'; id: string; name: string }; onClose: () => void; onSent: () => void;
+}) {
+  const [title, setTitle] = useState('');
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [requestKey] = useState(() => crypto.randomUUID());
+  const send = async () => {
+    setBusy(true); setError(null);
+    try {
+      await api('POST', '/notifications', {
+        scope: target.scope, ...(target.scope === 'account' ? { userId: target.id } : { profileId: target.id }),
+        title: title.trim(), message: text.trim(), requestKey,
+      });
+      toast.ok('Notification sent', `${target.name} · recorded in Activity Logs.`);
+      onSent(); onClose();
+    } catch (e) { setError(errorText(e)); setBusy(false); }
+  };
+  return (
+    <Modal title="Send notification" onClose={busy ? () => {} : onClose} width={520}>
+      <form onSubmit={(e) => { e.preventDefault(); send(); }}>
+        <p className="field__hint">
+          {target.scope === 'account'
+            ? <>To the whole account <b>{target.name}</b>: stored once and shown on every profile of the account.</>
+            : <>To the profile <b>{target.name}</b> only — never the account’s other profiles.</>}
+          {' '}It comes from “kolaba.” and is never shown as another user’s action.
+        </p>
+        <Field label="Title"><input className="input" maxLength={80} required value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
+        <Field label={`Message (${text.length}/500)`}><textarea className="input" rows={4} maxLength={500} required value={text} onChange={(e) => setText(e.target.value)} /></Field>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <div className="modal__actions">
+          <Button onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button type="submit" variant="primary" loading={busy}>Send</Button>
         </div>
       </form>
     </Modal>

@@ -1,7 +1,7 @@
 // JSON shapes shared by every endpoint — built in SQL (one query per list, no N+1).
 import type { Env } from '../env';
 import { blockedBetweenProfiles, monetizationEnabled } from './moderation';
-import { pushToProfile, type PushContent } from './push';
+import { pushToProfile, pushToUser, type PushSetting } from './push';
 
 /** Absolute URL of a media file: external demo URL, or this API's file endpoint for R2 objects. */
 export function mediaURL(env: Env, row: { id: string; provider: string; url: string | null }): string | null {
@@ -112,38 +112,92 @@ export function mediaJSON(env: Env, m: MediaRow, extra: Record<string, unknown> 
   };
 }
 
-/** What a feed notification says on the lock screen (FEATURE 115; English until notifications are localized). */
-const PUSH_TEXT: Record<string, { body: string; setting: PushContent['setting'] }> = {
-  contact_request: { body: 'wants to add you to contacts.', setting: 'followersAndMentions' },
-  contact_accepted: { body: 'accepted your contact request.', setting: 'followersAndMentions' },
-  new_review: { body: 'left you a review.', setting: 'projectUpdates' },
-  review_request: { body: 'asked you for a review.', setting: 'projectUpdates' },
-  liked_video: { body: 'liked your video.', setting: 'followersAndMentions' },
-  application_received: { body: 'applied to your job.', setting: 'newApplications' },
+/** Every notification type the feed knows: what its push says (English until notifications are localized), which
+ *  Settings switch may silence it, and whether it pushes at all — not every feed row is worth a push (a saved job's
+ *  small edit, a finished background task), and messages are never notifications (Chat, its badge, its own push). */
+export const NOTIFICATION_TYPES: Record<string, { body: string; setting: PushSetting | null; push: boolean;
+                                                 scope: 'profile' | 'account' }> = {
+  // Jobs & Apply
+  application_received: { body: 'applied to your job.', setting: 'newApplications', push: true, scope: 'profile' },
+  saved_job_updated: { body: 'A job you saved has been updated.', setting: 'projectUpdates', push: false, scope: 'profile' },
+  saved_job_closed: { body: 'A job you saved is no longer available.', setting: 'projectUpdates', push: false, scope: 'profile' },
+  job_removed: { body: 'Your job has been removed.', setting: null, push: true, scope: 'profile' },
+  // Contacts
+  contact_request: { body: 'sent you a contact request.', setting: 'followersAndMentions', push: true, scope: 'profile' },
+  contact_accepted: { body: 'accepted your contact request.', setting: 'followersAndMentions', push: true, scope: 'profile' },
+  // Reviews
+  review_request: { body: 'requested a review from you.', setting: 'reviews', push: true, scope: 'profile' },
+  new_review: { body: 'left you a review.', setting: 'reviews', push: true, scope: 'profile' },
+  review_rejected: { body: 'Your review could not be published.', setting: 'reviews', push: true, scope: 'profile' },
+  // Media & content
+  liked_video: { body: 'liked your video.', setting: 'content', push: false, scope: 'profile' },
+  video_failed: { body: "Your video couldn't be processed.", setting: 'content', push: true, scope: 'profile' },
+  content_removed: { body: 'Your content was removed.', setting: 'content', push: true, scope: 'profile' },
+  content_restored: { body: 'Your content has been restored.', setting: 'content', push: false, scope: 'profile' },
+  content_approved: { body: 'Your content was approved.', setting: 'content', push: false, scope: 'profile' },
+  report_reviewed: { body: 'Your report has been reviewed.', setting: 'content', push: false, scope: 'profile' },
+  // PRO
+  pro_granted: { body: 'Your PRO subscription is active.', setting: 'subscription', push: true, scope: 'profile' },
+  pro_expired: { body: 'Your PRO subscription has expired.', setting: 'subscription', push: true, scope: 'profile' },
+  pro_restored: { body: 'Your PRO benefits have been restored.', setting: 'subscription', push: true, scope: 'profile' },
+  // Account & security (one row for the whole account, never switched off)
+  password_changed: { body: 'Your password was changed.', setting: null, push: true, scope: 'account' },
+  moderation_warning: { body: 'You received a warning from kolaba.', setting: null, push: true, scope: 'account' },
+  moderation_restriction: { body: 'Your account was restricted.', setting: null, push: true, scope: 'account' },
+  account_message: { body: 'A message from kolaba.', setting: null, push: true, scope: 'account' },
+  profile_message: { body: 'A message from kolaba.', setting: 'content', push: true, scope: 'profile' },
 };
 
-/** A notification for a profile: a row of its Notifications feed and, where APNs is set up, a push. Messages are not
- *  notifications (they live in Chat, its badge and their own push — messages.ts). */
-export async function notify(env: Env, recipient: string, type: string, actor: string | null, payload: Record<string, unknown> = {},
-                             push?: { title: string; body: string }) {
+export interface NotifyOptions {
+  /** The same key never makes a second row (or push) — a repeated request, retry or webhook. */
+  dedupKey?: string;
+  targetType?: string;
+  targetId?: string;
+  /** Overrides the type's preset text (the admin's own words). */
+  push?: { title: string; body: string };
+}
+
+/** A notification for a PROFILE: a row of its own feed (never another profile's of the same account) and, where APNs
+ *  is set up and the type pushes, a push that opens that profile. */
+export async function notify(env: Env, recipient: string, type: string, actor: string | null,
+                             payload: Record<string, unknown> = {}, options: NotifyOptions = {}) {
   if (!recipient || recipient === actor) return;
+  const preset = NOTIFICATION_TYPES[type];
+  if (!preset || preset.scope !== 'profile') throw new Error(`not a profile notification: ${type}`);
   // Nothing from someone the recipient blocked (or who blocked them).
   if (actor && (await blockedBetweenProfiles(env, recipient, actor))) return;
+  const owner = await env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(recipient).first<{ owner_user_id: string }>();
+  if (!owner) return;
   const id = `ntf_${crypto.randomUUID()}`;
-  await env.DB.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?)`)
-    .bind(id, recipient, type, actor, JSON.stringify(payload), Date.now()).run();
-  const preset = PUSH_TEXT[type];
-  let text = push;
-  if (!text && preset) {
+  const res = await env.DB.prepare(`INSERT OR IGNORE INTO notifications (id, recipient_user_id, recipient_profile_id, scope, type,
+        actor_profile_id, target_type, target_id, payload, dedup_key, created_at) VALUES (?, ?, ?, 'profile', ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, owner.owner_user_id, recipient, type, actor, options.targetType ?? null, options.targetId ?? null,
+          JSON.stringify(payload), options.dedupKey ?? null, Date.now()).run();
+  if (!res.meta.changes || !preset.push) return;
+  let text = options.push;
+  if (!text) {
     const name = actor ? (await env.DB.prepare(`SELECT display_name FROM profiles WHERE id = ?`).bind(actor).first<{ display_name: string }>())
       ?.display_name : null;
-    text = { title: name ?? 'kolaba.', body: preset.body };
+    text = name ? { title: name, body: preset.body } : { title: 'kolaba.', body: preset.body };
   }
-  if (text) {
-    await pushToProfile(env, recipient, { ...text, setting: preset?.setting ?? null, collapseId: id,
-                                          data: { kind: 'notification', type, notificationId: id } });
-  }
+  await pushToProfile(env, recipient, { ...text, setting: preset.setting, collapseId: id,
+                                        data: { kind: 'notification', type, notificationId: id } });
+}
+
+/** A notification for the whole ACCOUNT (security, sanctions, the team's account messages): stored once, shown on
+ *  every profile of the account, its push never switched off by the category switches. */
+export async function notifyAccount(env: Env, userId: string, type: string, payload: Record<string, unknown> = {},
+                                    options: NotifyOptions = {}) {
+  const preset = NOTIFICATION_TYPES[type];
+  if (!preset || preset.scope !== 'account') throw new Error(`not an account notification: ${type}`);
+  const id = `ntf_${crypto.randomUUID()}`;
+  const res = await env.DB.prepare(`INSERT OR IGNORE INTO notifications (id, recipient_user_id, recipient_profile_id, scope, type,
+        actor_profile_id, target_type, target_id, payload, dedup_key, created_at) VALUES (?, ?, NULL, 'account', ?, NULL, ?, ?, ?, ?, ?)`)
+    .bind(id, userId, type, options.targetType ?? null, options.targetId ?? null, JSON.stringify(payload),
+          options.dedupKey ?? null, Date.now()).run();
+  if (!res.meta.changes || !preset.push) return;
+  await pushToUser(env, userId, { ...(options.push ?? { title: 'kolaba.', body: preset.body }), setting: null, collapseId: id,
+                                  data: { kind: 'notification', type, notificationId: id } });
 }
 
 export async function audit(env: Env, actor: string | null, action: string, entityType: string, entityId: string | null,

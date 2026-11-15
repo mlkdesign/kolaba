@@ -6,7 +6,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import type { AdminSession, AppEnv, Env } from '../env';
 import { clientIP, rateLimit } from '../lib/auth';
-import { avatarJoin, card, cardColumns, type CardRow, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/cards';
+import { avatarJoin, card, cardColumns, type CardRow, mediaColumns, mediaJSON, type MediaRow, notify, notifyAccount } from '../lib/cards';
 import { hashPassword, verifyPassword } from '../lib/password';
 import { fail, newId, newToken, now, sha256Hex, timingSafeEqual } from '../lib/util';
 import { jobsJSON } from './jobs';
@@ -422,6 +422,34 @@ export function addMonthUTC(t: number, months = 1): number {
 
 const proName = (plan: string) => (plan === 'creator_pro' ? 'CREATOR.PRO' : 'BUSINESS.PRO');
 
+// POST /v1/admin/notifications — a message from the kolaba team, to one ACCOUNT (once, shown on all its profiles) or one
+// PROFILE (Creator or a Business — never its siblings). Always from "kolaba." (no actor: it can't pose as another
+// user's Apply, review or request). `requestKey` makes a repeated submit a no-op. Audited.
+admin.post('/notifications', async (c) => {
+  const body = z.object({
+    scope: z.enum(['account', 'profile']),
+    userId: z.string().optional(),
+    profileId: z.string().optional(),
+    title: z.string().trim().min(1).max(80),
+    message: z.string().trim().min(1).max(500),
+    requestKey: z.string().trim().min(8).max(80),
+  }).parse(await c.req.json());
+  if (body.scope === 'account') {
+    const u = await c.env.DB.prepare(`SELECT id FROM users WHERE id = ? AND status <> 'deleted'`).bind(body.userId ?? '').first<{ id: string }>();
+    if (!u) fail(404, 'user_not_found');
+    await notifyAccount(c.env, u!.id, 'account_message', { title: body.title, message: body.message },
+                        { dedupKey: `admin:${body.requestKey}`, push: { title: body.title, body: body.message } });
+    await audit(c, 'notification.send', 'user', u!.id, null, { scope: 'account', title: body.title, requestKey: body.requestKey });
+    return c.json({ sent: true });
+  }
+  const p = await c.env.DB.prepare(`SELECT id FROM profiles WHERE id = ? AND status <> 'deleted'`).bind(body.profileId ?? '').first<{ id: string }>();
+  if (!p) fail(404, 'profile_not_found');
+  await notify(c.env, p!.id, 'profile_message', null, { title: body.title, message: body.message },
+               { dedupKey: `admin:${body.requestKey}`, push: { title: body.title, body: body.message } });
+  await audit(c, 'notification.send', 'profile', p!.id, null, { scope: 'profile', title: body.title, requestKey: body.requestKey });
+  return c.json({ sent: true });
+});
+
 // PATCH /v1/admin/profiles/:id/pro — FEATURE 115: free PRO for ONE profile (never the account's other profiles).
 //   grant  — one month from now (UTC, server clock); refused while this profile already has PRO (no duplicate grant)
 //   extend — one more month after the current admin grant ends
@@ -495,7 +523,8 @@ admin.patch('/profiles/:id/pro', async (c) => {
   const title = 'Congratulations!';
   const message = `Поздравляем, вы получили ${months} бесплатно ${proName(plan)} от kolaba.`;
   await notify(c.env, id, 'pro_granted', null, { grantId, plan, months: body.months, expiresAt, title, message,
-                                                  messageKey: 'pro_granted' }, { title, body: message });
+                                                  messageKey: 'pro_granted' },
+               { push: { title, body: message }, dedupKey: `pro_granted:${grantId}`, targetType: 'profile', targetId: id });
   return c.json({ isPro: true, grantId, expiresAt, changed: true });
 });
 
@@ -889,7 +918,24 @@ admin.get('/reports/:id', async (c) => {
 type Sanction = 'warn' | 'restrict' | 'unrestrict' | 'suspend' | 'unsuspend' | 'ban';
 
 /** Hides / restores the reported item itself (nothing is erased: rows and files stay for appeals and evidence). */
+/** The owner of a removed / restored item hears it: a job's business ("Your job has been removed"), a review's author,
+ *  a photo's / video's profile. The moderator's reason is shown; nothing else of the report (never who reported). */
+async function notifyContentDecision(env: Env, type: string, id: string, removed: boolean, reason: string | null) {
+  const owner = type === 'post'
+    ? await env.DB.prepare(`SELECT owner_profile_id AS p FROM jobs WHERE id = ?`).bind(id).first<{ p: string }>()
+    : type === 'media'
+      ? await env.DB.prepare(`SELECT owner_profile_id AS p FROM media WHERE id = ?`).bind(id).first<{ p: string }>()
+      : type === 'review'
+        ? await env.DB.prepare(`SELECT author_profile_id AS p FROM reviews WHERE id = ?`).bind(id).first<{ p: string }>()
+        : null;
+  if (!owner?.p) return;
+  const notice = removed ? (type === 'post' ? 'job_removed' : type === 'review' ? 'review_rejected' : 'content_removed') : 'content_restored';
+  await notify(env, owner.p, notice, null, { targetType: type, targetId: id, reason },
+               { dedupKey: `${notice}:${type}:${id}:${now()}`, targetType: type === 'post' ? 'job' : type, targetId: id });
+}
+
 async function setContentRemoved(env: Env, type: string, id: string, removed: boolean, reason: string | null) {
+  await notifyContentDecision(env, type, id, removed, reason);
   const t = now();
   switch (type) {
     case 'post':
@@ -921,18 +967,13 @@ async function sanction(c: Context<AppEnv>, userId: string, kind: Sanction, reas
   switch (kind) {
     case 'warn':
       await db.prepare(`UPDATE users SET warnings_count = warnings_count + 1, updated_at = ? WHERE id = ?`).bind(t, userId).run();
-      if (notifyProfileId) {
-        await db.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at) VALUES (?, ?, 'moderation_warning', NULL, ?, ?)`)
-          .bind(`ntf_${crypto.randomUUID()}`, notifyProfileId, JSON.stringify({ reason }), t).run();
-      }
+      // An account notice: on every profile of the account, stored once.
+      await notifyAccount(c.env, userId, 'moderation_warning', { reason }, { dedupKey: `warn:${userId}:${t}` });
       return;
     case 'restrict':
       await db.prepare(`UPDATE users SET restricted_until = ?, restriction_reason = ?, updated_at = ? WHERE id = ?`)
         .bind(t + Math.min(Math.max(days ?? 7, 1), 365) * 86_400_000, reason, t, userId).run();
-      if (notifyProfileId) {
-        await db.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at) VALUES (?, ?, 'moderation_restriction', NULL, ?, ?)`)
-          .bind(`ntf_${crypto.randomUUID()}`, notifyProfileId, JSON.stringify({ reason, days: days ?? 7 }), t).run();
-      }
+      await notifyAccount(c.env, userId, 'moderation_restriction', { reason, days: days ?? 7 }, { dedupKey: `restrict:${userId}:${t}` });
       return;
     case 'unrestrict':
       await db.prepare(`UPDATE users SET restricted_until = NULL, restriction_reason = NULL, updated_at = ? WHERE id = ?`).bind(t, userId).run();
@@ -1016,6 +1057,15 @@ admin.post('/reports/:id/action', async (c) => {
   }
   await recordAction(c, { reportId: id, targetType: r!.target_type, targetId: r!.target_id, targetUserId: r!.target_user_id,
                           action: body.action, reason: body.reason ?? null, detail: body.days ? { days: body.days } : undefined });
+  // Each reporter whose report this closed hears that it was reviewed — never the outcome's details or who else reported.
+  if (status === 'resolved' || status === 'dismissed') {
+    const closed = await c.env.DB.prepare(`SELECT id, reporter_profile_id FROM reports WHERE handled_at = ? AND target_type = ? AND target_id = ?
+        AND reporter_profile_id IS NOT NULL AND status IN ('resolved', 'dismissed')`).bind(t, r!.target_type, r!.target_id)
+      .all<{ id: string; reporter_profile_id: string }>();
+    for (const report of closed.results) {
+      await notify(c.env, report.reporter_profile_id, 'report_reviewed', null, {}, { dedupKey: `report_reviewed:${report.id}` });
+    }
+  }
   return c.json({ status });
 });
 
@@ -1107,13 +1157,18 @@ admin.post('/content-review/:type{media|posts|reviews}/:id', async (c) => {
     if (!r) fail(404, 'review_not_found');
     ownerProfile = r!.author_profile_id;
     await c.env.DB.prepare(`UPDATE reviews SET review_status = ?, review_reason = ? WHERE id = ?`).bind(value, body.reason ?? null, id).run();
-    if (value === 'approved') await notify(c.env, r!.recipient_profile_id, 'new_review', r!.author_profile_id, { reviewId: id });
+    if (value === 'approved') {
+      await notify(c.env, r!.recipient_profile_id, 'new_review', r!.author_profile_id, { reviewId: id },
+                   { dedupKey: `new_review:${id}`, targetType: 'review', targetId: id });
+    }
   }
-  // The owner learns the outcome in the app (Notifications) — with the reason when it was rejected.
+  // The owner learns the outcome in the app (Notifications) — with the reason when it was rejected: a job's business
+  // ("Your job has been removed"), a review's author ("Your review could not be published"), a photo's / video's profile.
   if (ownerProfile) {
-    await c.env.DB.prepare(`INSERT INTO notifications (id, recipient_profile_id, type, actor_profile_id, payload, created_at) VALUES (?, ?, ?, NULL, ?, ?)`)
-      .bind(`ntf_${crypto.randomUUID()}`, ownerProfile, value === 'approved' ? 'content_approved' : 'content_rejected',
-            JSON.stringify({ targetType: type, targetId: id, reason: body.reason ?? null }), t).run();
+    const notice = value === 'approved' ? 'content_approved' : type === 'posts' ? 'job_removed' : type === 'reviews' ? 'review_rejected' : 'content_removed';
+    await notify(c.env, ownerProfile, notice, null, { targetType: type, targetId: id, reason: body.reason ?? null },
+                 { dedupKey: `${notice}:${type}:${id}:${t}`, targetType: type === 'posts' ? 'job' : type === 'reviews' ? 'review' : 'media',
+                   targetId: id });
   }
   const owner = ownerProfile ? await c.env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(ownerProfile).first<{ owner_user_id: string }>() : null;
   await recordAction(c, { targetType: type === 'posts' ? 'post' : type === 'reviews' ? 'review' : 'media', targetId: id,

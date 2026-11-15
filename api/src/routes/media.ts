@@ -305,7 +305,8 @@ media.put('/:id/like', requireAuth, requireProfile, async (c) => {
     .bind(id, profile.id, now()).run();
   if (res.meta.changes) {
     await c.env.DB.prepare(`UPDATE media SET likes_count = likes_count + 1 WHERE id = ?`).bind(id).run();
-    await notify(c.env, target!.owner_profile_id, 'liked_video', profile.id, { mediaId: id });
+    await notify(c.env, target!.owner_profile_id, 'liked_video', profile.id, { mediaId: id },
+                 { dedupKey: `like:${id}:${profile.id}`, targetType: 'media', targetId: id });
   }
   const count = await c.env.DB.prepare(`SELECT likes_count FROM media WHERE id = ?`).bind(id).first<{ likes_count: number }>();
   return c.json({ liked: true, likesCount: count?.likes_count ?? 0 });
