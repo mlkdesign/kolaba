@@ -70,6 +70,36 @@ notifications.get('/', async (c) => {
   });
 });
 
+// GET / PUT /v1/notifications/preferences — FIX 125: the acting profile's Settings → Notifications (each profile its own).
+// Defaults: everything on. Saved before the answer — the app shows a switch as saved only after this succeeds.
+const PREF_KEYS = ['pushEnabled', 'jobsEnabled', 'contactsEnabled', 'activityEnabled', 'messagesEnabled'] as const;
+const prefsJSON = (row: Record<string, number> | null, t: number | null) => ({
+  pushEnabled: row ? row.push_enabled === 1 : true, jobsEnabled: row ? row.jobs_enabled === 1 : true,
+  contactsEnabled: row ? row.contacts_enabled === 1 : true, activityEnabled: row ? row.activity_enabled === 1 : true,
+  messagesEnabled: row ? row.messages_enabled === 1 : true, updatedAt: t,
+});
+notifications.get('/preferences', async (c) => {
+  const profile = actingProfile(c);
+  const row = await c.env.DB.prepare(`SELECT * FROM notification_preferences WHERE profile_id = ?`).bind(profile.id)
+    .first<Record<string, number>>();
+  return c.json(prefsJSON(row, row?.updated_at ?? null));
+});
+notifications.put('/preferences', async (c) => {
+  const profile = actingProfile(c);
+  const body = z.object(Object.fromEntries(PREF_KEYS.map((k) => [k, z.boolean()])) as Record<(typeof PREF_KEYS)[number], z.ZodBoolean>)
+    .parse(await c.req.json());
+  const t = now();
+  await c.env.DB.prepare(`INSERT INTO notification_preferences (profile_id, push_enabled, jobs_enabled, contacts_enabled, activity_enabled,
+      messages_enabled, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (profile_id) DO UPDATE SET push_enabled = excluded.push_enabled,
+      jobs_enabled = excluded.jobs_enabled, contacts_enabled = excluded.contacts_enabled, activity_enabled = excluded.activity_enabled,
+      messages_enabled = excluded.messages_enabled, updated_at = excluded.updated_at`)
+    .bind(profile.id, Number(body.pushEnabled), Number(body.jobsEnabled), Number(body.contactsEnabled), Number(body.activityEnabled),
+          Number(body.messagesEnabled), t).run();
+  const row = await c.env.DB.prepare(`SELECT * FROM notification_preferences WHERE profile_id = ?`).bind(profile.id)
+    .first<Record<string, number>>();
+  return c.json(prefsJSON(row, t));
+});
+
 // GET /v1/notifications/unread-by-profile — the account's other profiles with unread notifications (Switch profiles'
 // dot); account notices count on every profile, so they're not in these numbers.
 notifications.get('/unread-by-profile', async (c) => {

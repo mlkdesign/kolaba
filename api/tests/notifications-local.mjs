@@ -171,5 +171,28 @@ await test('X-Profile-Id of another account is refused', async () => {
   ok(r.status === 403 || r.status === 404, `status ${r.status}`);
 });
 
+console.log('FIX 125 preferences');
+await test('preferences: defaults on, saved per profile, the other profile untouched', async () => {
+  const d = (await call(B, 'GET', '/v1/notifications/preferences', undefined, { profileId: bBiz1 })).json;
+  ok(d.pushEnabled && d.jobsEnabled && d.contactsEnabled && d.activityEnabled && d.messagesEnabled, 'defaults on');
+  const body = { pushEnabled: true, jobsEnabled: false, contactsEnabled: true, activityEnabled: false, messagesEnabled: true };
+  const r = await call(B, 'PUT', '/v1/notifications/preferences', body, { profileId: bBiz1 });
+  eq(r.status, 200, r.text); eq(r.json.jobsEnabled, false, 'saved'); ok(r.json.updatedAt, 'updatedAt');
+  const again = (await call(B, 'GET', '/v1/notifications/preferences', undefined, { profileId: bBiz1 })).json;
+  eq(again.activityEnabled, false, 'kept');
+  const other = (await call(B, 'GET', '/v1/notifications/preferences', undefined, { profileId: bCreator })).json;
+  eq(other.jobsEnabled, true, 'the creator keeps its own');
+  const bad = await call(B, 'PUT', '/v1/notifications/preferences', { pushEnabled: true }, { profileId: bBiz1 });
+  ok(bad.status >= 400, 'incomplete body refused');
+});
+await test('switches change pushes only: the feed still gets the event', async () => {
+  await call(B, 'PUT', '/v1/notifications/preferences', { pushEnabled: false, jobsEnabled: false, contactsEnabled: false,
+                                                          activityEnabled: false, messagesEnabled: false }, { profileId: bCreator });
+  const before = (await feed(B, bCreator)).items.length;
+  const r = await call(A, 'POST', '/v1/contacts/requests', { profileId: bCreator }, { profileId: aCreator });
+  ok(r.status < 300, r.text);
+  ok((await feed(B, bCreator)).items.length > before, 'the request is in the feed');
+});
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) process.exit(1);

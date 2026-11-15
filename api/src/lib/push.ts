@@ -42,9 +42,17 @@ export interface PushContent {
   setting: PushSetting | null;
 }
 
-/** Settings → Notifications switches that gate a push (stored per account in user_settings.notifications). */
-export type PushSetting = 'newMessages' | 'projectUpdates' | 'newApplications' | 'followersAndMentions' | 'reviews'
-  | 'content' | 'subscription';
+/** FIX 125: the category of an optional push — Settings → Notifications per profile (notification_preferences):
+ *  the main Push switch and these four. Null on a content: mandatory (PRO, moderation, sanctions, account security). */
+export type PushSetting = 'jobs' | 'contacts' | 'activity' | 'messages';
+
+/** Whether the profile wants this optional push (no row: everything on). Read right before sending. */
+export async function profileWantsPush(env: Env, profileId: string, setting: PushSetting): Promise<boolean> {
+  const row = await env.DB.prepare(`SELECT push_enabled, jobs_enabled, contacts_enabled, activity_enabled, messages_enabled
+      FROM notification_preferences WHERE profile_id = ?`).bind(profileId).first<Record<string, number>>();
+  if (!row) return true;
+  return row.push_enabled === 1 && row[`${setting}_enabled`] === 1;
+}
 
 /** Sends to every device of the profile's owner. Never throws (a push must not fail the request that caused it). */
 export async function pushToProfile(env: Env, profileId: string, content: PushContent): Promise<void> {
@@ -60,11 +68,8 @@ export async function pushToProfile(env: Env, profileId: string, content: PushCo
 export async function pushToUser(env: Env, userId: string, content: PushContent, profileId: string | null = null): Promise<void> {
   if (!apnsConfigured(env)) return;
   try {
-    const row = await env.DB.prepare(`SELECT notifications FROM user_settings WHERE user_id = ?`).bind(userId)
-      .first<{ notifications: string | null }>();
-    let settings: Record<string, unknown> = {};
-    try { settings = JSON.parse(row?.notifications ?? '{}'); } catch { /* defaults: everything on */ }
-    if (content.setting && (settings.push === false || settings[content.setting] === false)) return;
+    // An optional push follows the receiving profile's switches; a mandatory one (no setting) always goes.
+    if (content.setting && profileId && !(await profileWantsPush(env, profileId, content.setting))) return;
     const owner = { user_id: userId };
     const devices = await env.DB.prepare(`SELECT token, environment, previews FROM device_tokens WHERE user_id = ?`)
       .bind(owner.user_id).all<{ token: string; environment: string; previews: number }>();

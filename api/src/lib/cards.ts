@@ -113,39 +113,39 @@ export function mediaJSON(env: Env, m: MediaRow, extra: Record<string, unknown> 
 }
 
 /** Every notification type the feed knows: what its push says (English until notifications are localized), which
- *  Settings switch may silence it, and whether it pushes at all — not every feed row is worth a push (a saved job's
+ *  FIX 125 category may silence it (null: mandatory — PRO, moderation, sanctions, security), and whether it pushes at all — not every feed row is worth a push (a saved job's
  *  small edit, a finished background task), and messages are never notifications (Chat, its badge, its own push). */
 export const NOTIFICATION_TYPES: Record<string, { body: string; setting: PushSetting | null; push: boolean;
                                                  scope: 'profile' | 'account' }> = {
   // Jobs & Apply
-  application_received: { body: 'applied to your job.', setting: 'newApplications', push: true, scope: 'profile' },
-  saved_job_updated: { body: 'A job you saved has been updated.', setting: 'projectUpdates', push: false, scope: 'profile' },
-  saved_job_closed: { body: 'A job you saved is no longer available.', setting: 'projectUpdates', push: false, scope: 'profile' },
+  application_received: { body: 'applied to your job.', setting: 'jobs', push: true, scope: 'profile' },
+  saved_job_updated: { body: 'A job you saved has been updated.', setting: 'jobs', push: false, scope: 'profile' },
+  saved_job_closed: { body: 'A job you saved is no longer available.', setting: 'jobs', push: false, scope: 'profile' },
   job_removed: { body: 'Your job has been removed.', setting: null, push: true, scope: 'profile' },
   // Contacts
-  contact_request: { body: 'sent you a contact request.', setting: 'followersAndMentions', push: true, scope: 'profile' },
-  contact_accepted: { body: 'accepted your contact request.', setting: 'followersAndMentions', push: true, scope: 'profile' },
+  contact_request: { body: 'sent you a contact request.', setting: 'contacts', push: true, scope: 'profile' },
+  contact_accepted: { body: 'accepted your contact request.', setting: 'contacts', push: true, scope: 'profile' },
   // Reviews
-  review_request: { body: 'requested a review from you.', setting: 'reviews', push: true, scope: 'profile' },
-  new_review: { body: 'left you a review.', setting: 'reviews', push: true, scope: 'profile' },
-  review_rejected: { body: 'Your review could not be published.', setting: 'reviews', push: true, scope: 'profile' },
+  review_request: { body: 'requested a review from you.', setting: 'activity', push: true, scope: 'profile' },
+  new_review: { body: 'left you a review.', setting: 'activity', push: true, scope: 'profile' },
+  review_rejected: { body: 'Your review could not be published.', setting: null, push: true, scope: 'profile' },
   // Media & content
-  liked_video: { body: 'liked your video.', setting: 'content', push: false, scope: 'profile' },
-  video_failed: { body: "Your video couldn't be processed.", setting: 'content', push: true, scope: 'profile' },
-  content_removed: { body: 'Your content was removed.', setting: 'content', push: true, scope: 'profile' },
-  content_restored: { body: 'Your content has been restored.', setting: 'content', push: false, scope: 'profile' },
-  content_approved: { body: 'Your content was approved.', setting: 'content', push: false, scope: 'profile' },
-  report_reviewed: { body: 'Your report has been reviewed.', setting: 'content', push: false, scope: 'profile' },
+  liked_video: { body: 'liked your video.', setting: 'activity', push: true, scope: 'profile' },
+  video_failed: { body: "Your video couldn't be processed.", setting: 'activity', push: true, scope: 'profile' },
+  content_removed: { body: 'Your content was removed.', setting: null, push: true, scope: 'profile' },
+  content_restored: { body: 'Your content has been restored.', setting: 'activity', push: false, scope: 'profile' },
+  content_approved: { body: 'Your content was approved.', setting: 'activity', push: false, scope: 'profile' },
+  report_reviewed: { body: 'Your report has been reviewed.', setting: 'activity', push: false, scope: 'profile' },
   // PRO
-  pro_granted: { body: 'Your PRO subscription is active.', setting: 'subscription', push: true, scope: 'profile' },
-  pro_expired: { body: 'Your PRO subscription has expired.', setting: 'subscription', push: true, scope: 'profile' },
-  pro_restored: { body: 'Your PRO benefits have been restored.', setting: 'subscription', push: true, scope: 'profile' },
+  pro_granted: { body: 'Your PRO subscription is active.', setting: null, push: true, scope: 'profile' },
+  pro_expired: { body: 'Your PRO subscription has expired.', setting: null, push: true, scope: 'profile' },
+  pro_restored: { body: 'Your PRO benefits have been restored.', setting: null, push: true, scope: 'profile' },
   // Account & security (one row for the whole account, never switched off)
   password_changed: { body: 'Your password was changed.', setting: null, push: true, scope: 'account' },
   moderation_warning: { body: 'You received a warning from kolaba.', setting: null, push: true, scope: 'account' },
   moderation_restriction: { body: 'Your account was restricted.', setting: null, push: true, scope: 'account' },
   account_message: { body: 'A message from kolaba.', setting: null, push: true, scope: 'account' },
-  profile_message: { body: 'A message from kolaba.', setting: 'content', push: true, scope: 'profile' },
+  profile_message: { body: 'A message from kolaba.', setting: null, push: true, scope: 'profile' },
 };
 
 export interface NotifyOptions {

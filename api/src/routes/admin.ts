@@ -519,9 +519,9 @@ admin.patch('/profiles/:id/pro', async (c) => {
   await audit(c, action === 'extend' ? 'pro.extend' : 'pro.grant', 'profile', id, body.reason || null,
               { plan, grantId, subscriptionId, months: body.months, startedAt, expiresAt, source: 'admin_grant' });
   // The recipient hears once per real grant (a repeated submit returned above).
-  const months = body.months === 1 ? '1 месяц' : `${body.months} мес.`;
   const title = 'Congratulations!';
-  const message = `Поздравляем, вы получили ${months} бесплатно ${proName(plan)} от kolaba.`;
+  // English only until notifications are localized (never two languages in one notification).
+  const message = `Congratulations! You've received ${body.months === 1 ? '1 month' : `${body.months} months`} of ${proName(plan)} from kolaba.`;
   await notify(c.env, id, 'pro_granted', null, { grantId, plan, months: body.months, expiresAt, title, message,
                                                   messageKey: 'pro_granted' },
                { push: { title, body: message }, dedupKey: `pro_granted:${grantId}`, targetType: 'profile', targetId: id });

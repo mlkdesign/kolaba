@@ -347,7 +347,7 @@ async function afterSend(env: Env, id: string, senderId: string, messageId: stri
     if (await blockedBetweenProfiles(env, o.profile_id, senderId)) continue;
     await pushToProfile(env, o.profile_id, {
       title: row.display_name, body: preview, privateBody: 'Sent you a message.', threadId: `chat-${id}`,
-      setting: 'newMessages', data: { kind: 'message', conversationId: id, senderProfileId: senderId, messageId },
+      setting: 'messages', data: { kind: 'message', conversationId: id, senderProfileId: senderId, messageId },
     });
   }
 }
