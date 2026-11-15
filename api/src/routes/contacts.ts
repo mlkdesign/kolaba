@@ -70,7 +70,8 @@ contacts.post('/requests', async (c) => {
     // Their request is waiting: Add accepts it (never a second, crossing request). Only the first accept notifies.
     const res = await c.env.DB.prepare(`UPDATE contact_requests SET status = 'accepted', responded_at = ? WHERE id = ? AND status = 'pending'`)
       .bind(now(), current.requestId).run();
-    if (res.meta.changes) await notify(c.env, profileId, 'contact_accepted', profile.id, { requestId: current.requestId });
+    if (res.meta.changes) await notify(c.env, profileId, 'contact_accepted', profile.id, { requestId: current.requestId },
+                                        { dedupKey: `contact_accepted:${current.requestId}`, targetType: 'profile', targetId: profile.id });
     return c.json({ relation: 'connected', requestId: current.requestId });
   }
   if (current.relation !== 'none') return c.json(current);
@@ -82,7 +83,8 @@ contacts.post('/requests', async (c) => {
     if (String(error).includes('UNIQUE')) return c.json(await relation(c.env, profile.id, profile.ownerUserId, profileId));
     throw error;
   }
-  await notify(c.env, profileId, 'contact_request', profile.id, { requestId: id });
+  await notify(c.env, profileId, 'contact_request', profile.id, { requestId: id },
+               { dedupKey: `contact_request:${id}`, targetType: 'contact_request', targetId: id });
   return c.json({ relation: 'requested', requestId: id }, 201);
 });
 
@@ -101,7 +103,10 @@ contacts.post('/requests/:id/:action{accept|decline|cancel}', async (c) => {
   const res = await c.env.DB.prepare(`UPDATE contact_requests SET status = ?, responded_at = ? WHERE id = ? AND status = 'pending'`)
     .bind(status, now(), row!.id).run();
   if (!res.meta.changes) fail(409, 'request_not_pending');
-  if (status === 'accepted') await notify(c.env, row!.sender_profile_id, 'contact_accepted', profile.id, { requestId: row!.id });
+  if (status === 'accepted') {
+    await notify(c.env, row!.sender_profile_id, 'contact_accepted', profile.id, { requestId: row!.id },
+                 { dedupKey: `contact_accepted:${row!.id}`, targetType: 'profile', targetId: profile.id });
+  }
   // A withdrawn request disappears from the recipient's notifications (nothing left to answer).
   if (status === 'cancelled') {
     await c.env.DB.prepare(`DELETE FROM notifications WHERE recipient_profile_id = ? AND type = 'contact_request'

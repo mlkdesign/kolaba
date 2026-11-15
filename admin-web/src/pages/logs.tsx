@@ -8,7 +8,7 @@ import logsIcon from '../assets/icons/nav-logs.svg';
 const ACTIONS: Record<string, string> = {
   login: 'Admin login', logout: 'Admin logout', 'admin.bootstrap': 'Admin created', 'password.change': 'Password changed',
   'profile.edit': 'Profile edited', 'user.block': 'User blocked', 'user.unblock': 'User unblocked', 'user.delete': 'User deleted',
-  'user.restore': 'User restored', 'pro.grant': 'PRO granted', 'pro.revoke': 'PRO removed', 'job.edit': 'Job edited',
+  'user.restore': 'User restored', 'pro.grant': 'PRO granted', 'notification.send': 'Notification sent', 'pro.revoke': 'PRO removed', 'job.edit': 'Job edited',
   'job.hide': 'Job hidden', 'job.restore': 'Job restored', 'job.delete': 'Job deleted', 'media.hide': 'Media hidden', 'media.restore': 'Media restored',
 };
 

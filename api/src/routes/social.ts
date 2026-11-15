@@ -12,27 +12,31 @@ import { jobsJSON } from './jobs';
 export const notifications = new Hono<AppEnv>();
 notifications.use('*', requireAuth, requireProfile);
 
-// GET /v1/notifications?cursor=
+/** SQL: the notifications the acting profile sees — its own, and its account's (security, the team's notices). Never
+ *  another profile's of the same account, never a message. */
+const VISIBLE = `((n.scope = 'profile' AND n.recipient_profile_id = ?1) OR (n.scope = 'account' AND n.recipient_user_id = ?2))
+  AND n.type NOT IN ('followed', 'new_message', 'viewed_profile')`;
+
+// GET /v1/notifications?cursor=&filter=unread
 notifications.get('/', async (c) => {
   const profile = actingProfile(c);
   const limit = clampLimit(c.req.query('limit'), 30, 60);
   const cursor = decodeCursor<{ t: number; id: string }>(c.req.query('cursor'));
-  // FIX 114: no follows — old 'followed' rows are not shown (nor counted).
-  const rows = await c.env.DB.prepare(`SELECT * FROM notifications WHERE recipient_profile_id = ?1 AND type NOT IN ('followed', 'new_message')
-      AND (?2 IS NULL OR (created_at, id) < (?2, ?3)) ORDER BY created_at DESC, id DESC LIMIT ?4`)
-    .bind(profile.id, cursor?.t ?? null, cursor?.id ?? null, limit + 1).all<Record<string, any>>();
+  const unreadOnly = c.req.query('filter') === 'unread';
+  const rows = await c.env.DB.prepare(`SELECT n.* FROM notifications n WHERE ${VISIBLE} ${unreadOnly ? 'AND n.read_at IS NULL' : ''}
+      AND (?3 IS NULL OR (n.created_at, n.id) < (?3, ?4)) ORDER BY n.created_at DESC, n.id DESC LIMIT ?5`)
+    .bind(profile.id, profile.ownerUserId, cursor?.t ?? null, cursor?.id ?? null, limit + 1).all<Record<string, any>>();
   const page = rows.results.slice(0, limit);
   const actors = await loadCards(c.env, page.map((n) => n.actor_profile_id));
-  const unread = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE recipient_profile_id = ? AND read_at IS NULL AND type NOT IN ('followed', 'new_message')`)
-    .bind(profile.id).first<{ n: number }>();
+  const unread = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM notifications n WHERE ${VISIBLE} AND n.read_at IS NULL`)
+    .bind(profile.id, profile.ownerUserId).first<{ n: number }>();
   const last = rows.results.length > limit ? page[page.length - 1] : null;
-  // The row's trailing piece (NotificationsView): the liked video's picture.
   const payloads = page.map((n) => JSON.parse(n.payload) as Record<string, any>);
+  // The row's trailing piece: the liked video's picture.
   const mediaIds = [...new Set(payloads.map((p) => p.mediaId).filter(Boolean))] as string[];
-  const [mediaRows] = await Promise.all([
-    mediaIds.length ? c.env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.id IN (${mediaIds.map(() => '?').join(',')}) AND m.status = 'ready' AND m.review_status = 'approved'`)
-      .bind(...mediaIds).all<MediaRow>() : Promise.resolve({ results: [] as MediaRow[] }),
-  ]);
+  const mediaRows = mediaIds.length
+    ? await c.env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.id IN (${mediaIds.map(() => '?').join(',')}) AND m.status = 'ready' AND m.review_status = 'approved'`)
+        .bind(...mediaIds).all<MediaRow>() : { results: [] as MediaRow[] };
   const mediaById = new Map(mediaRows.results.map((m) => [m.id, mediaJSON(c.env, m)]));
   // A contact request's own state now (pending → Accept / Decline on the row; accepted / declined / cancelled after).
   const requestIds = [...new Set(page.map((n, i) => (n.type === 'contact_request' ? payloads[i].requestId : null)).filter(Boolean))] as string[];
@@ -40,38 +44,97 @@ notifications.get('/', async (c) => {
     ? await c.env.DB.prepare(`SELECT id, status FROM contact_requests WHERE recipient_profile_id = ? AND id IN (${requestIds.map(() => '?').join(',')})`)
         .bind(profile.id, ...requestIds).all<{ id: string; status: string }>() : { results: [] as { id: string; status: string }[] };
   const requestStatus = new Map(requestRows.results.map((r) => [r.id, r.status]));
+  // Whether a job a row points at still opens (a removed / deleted job shows its state instead of a broken screen).
+  const jobIds = [...new Set(page.filter((n) => n.target_type === 'job' || payloads[page.indexOf(n)].jobId)
+    .map((n) => n.target_id ?? payloads[page.indexOf(n)].jobId).filter(Boolean))] as string[];
+  const liveJobs = jobIds.length
+    ? await c.env.DB.prepare(`SELECT id FROM jobs WHERE id IN (${jobIds.map(() => '?').join(',')}) AND status IN ('published', 'closed', 'draft')
+        AND COALESCE(review_status, 'approved') NOT IN ('rejected', 'removed')`).bind(...jobIds).all<{ id: string }>()
+    : { results: [] as { id: string }[] };
+  const liveJobIds = new Set(liveJobs.results.map((j) => j.id));
   return c.json({
-    items: page.map((n, i) => ({ id: n.id, type: n.type, payload: payloads[i], createdAt: n.created_at, readAt: n.read_at,
-                              actor: n.actor_profile_id ? actors.get(n.actor_profile_id) ?? null : null,
-                              media: payloads[i].mediaId ? mediaById.get(payloads[i].mediaId) ?? null : null,
-                              isFollowingActor: false,
-                              requestStatus: n.type === 'contact_request' ? requestStatus.get(payloads[i].requestId) ?? null : undefined })),
+    items: page.map((n, i) => {
+      const jobId = n.target_type === 'job' ? n.target_id : payloads[i].jobId;
+      return {
+        id: n.id, type: n.type, scope: n.scope, payload: payloads[i], createdAt: n.created_at, readAt: n.read_at,
+        targetType: n.target_type ?? null, targetId: n.target_id ?? null,
+        actor: n.actor_profile_id ? actors.get(n.actor_profile_id) ?? null : null,
+        media: payloads[i].mediaId ? mediaById.get(payloads[i].mediaId) ?? null : null,
+        isFollowingActor: false,
+        requestStatus: n.type === 'contact_request' ? requestStatus.get(payloads[i].requestId) ?? 'cancelled' : undefined,
+        targetAvailable: jobId ? liveJobIds.has(jobId) : undefined,
+      };
+    }),
     unreadCount: unread?.n ?? 0,
     nextCursor: last ? encodeCursor({ t: last.created_at, id: last.id }) : null,
   });
+});
+
+// GET / PUT /v1/notifications/preferences — FIX 125: the acting profile's Settings → Notifications (each profile its own).
+// Defaults: everything on. Saved before the answer — the app shows a switch as saved only after this succeeds.
+const PREF_KEYS = ['pushEnabled', 'jobsEnabled', 'contactsEnabled', 'activityEnabled', 'messagesEnabled'] as const;
+const prefsJSON = (row: Record<string, number> | null, t: number | null) => ({
+  pushEnabled: row ? row.push_enabled === 1 : true, jobsEnabled: row ? row.jobs_enabled === 1 : true,
+  contactsEnabled: row ? row.contacts_enabled === 1 : true, activityEnabled: row ? row.activity_enabled === 1 : true,
+  messagesEnabled: row ? row.messages_enabled === 1 : true, updatedAt: t,
+});
+notifications.get('/preferences', async (c) => {
+  const profile = actingProfile(c);
+  const row = await c.env.DB.prepare(`SELECT * FROM notification_preferences WHERE profile_id = ?`).bind(profile.id)
+    .first<Record<string, number>>();
+  return c.json(prefsJSON(row, row?.updated_at ?? null));
+});
+notifications.put('/preferences', async (c) => {
+  const profile = actingProfile(c);
+  const body = z.object(Object.fromEntries(PREF_KEYS.map((k) => [k, z.boolean()])) as Record<(typeof PREF_KEYS)[number], z.ZodBoolean>)
+    .parse(await c.req.json());
+  const t = now();
+  await c.env.DB.prepare(`INSERT INTO notification_preferences (profile_id, push_enabled, jobs_enabled, contacts_enabled, activity_enabled,
+      messages_enabled, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (profile_id) DO UPDATE SET push_enabled = excluded.push_enabled,
+      jobs_enabled = excluded.jobs_enabled, contacts_enabled = excluded.contacts_enabled, activity_enabled = excluded.activity_enabled,
+      messages_enabled = excluded.messages_enabled, updated_at = excluded.updated_at`)
+    .bind(profile.id, Number(body.pushEnabled), Number(body.jobsEnabled), Number(body.contactsEnabled), Number(body.activityEnabled),
+          Number(body.messagesEnabled), t).run();
+  const row = await c.env.DB.prepare(`SELECT * FROM notification_preferences WHERE profile_id = ?`).bind(profile.id)
+    .first<Record<string, number>>();
+  return c.json(prefsJSON(row, t));
+});
+
+// GET /v1/notifications/unread-by-profile — the account's other profiles with unread notifications (Switch profiles'
+// dot); account notices count on every profile, so they're not in these numbers.
+notifications.get('/unread-by-profile', async (c) => {
+  const profile = actingProfile(c);
+  const rows = await c.env.DB.prepare(`SELECT n.recipient_profile_id AS id, COUNT(*) AS n FROM notifications n
+      JOIN profiles p ON p.id = n.recipient_profile_id AND p.owner_user_id = ?1
+      WHERE n.scope = 'profile' AND n.recipient_user_id = ?1 AND n.read_at IS NULL
+        AND n.type NOT IN ('followed', 'new_message', 'viewed_profile') GROUP BY n.recipient_profile_id`)
+    .bind(profile.ownerUserId).all<{ id: string; n: number }>();
+  return c.json({ items: rows.results.map((r) => ({ profileId: r.id, unread: r.n })) });
 });
 
 notifications.post('/read', async (c) => {
   const profile = actingProfile(c);
   const { ids } = z.object({ ids: z.array(z.string()).max(100) }).parse(await c.req.json());
   if (!ids.length) return c.json({ updated: 0 });
-  const res = await c.env.DB.prepare(`UPDATE notifications SET read_at = ? WHERE recipient_profile_id = ? AND read_at IS NULL
-      AND id IN (${ids.map(() => '?').join(',')})`).bind(now(), profile.id, ...ids).run();
+  const res = await c.env.DB.prepare(`UPDATE notifications AS n SET read_at = ?3 WHERE ${VISIBLE} AND n.read_at IS NULL
+      AND n.id IN (${ids.map((_, i) => `?${i + 4}`).join(',')})`).bind(profile.id, profile.ownerUserId, now(), ...ids).run();
   return c.json({ updated: res.meta.changes });
 });
 
 // DELETE /v1/notifications/:id — the row's long-press Delete (iOS FIX 52).
 notifications.delete('/:id', async (c) => {
   const profile = actingProfile(c);
-  const res = await c.env.DB.prepare(`DELETE FROM notifications WHERE id = ? AND recipient_profile_id = ?`).bind(c.req.param('id'), profile.id).run();
+  const res = await c.env.DB.prepare(`DELETE FROM notifications AS n WHERE n.id = ?3 AND ${VISIBLE}`)
+    .bind(profile.id, profile.ownerUserId, c.req.param('id')).run();
   if (!res.meta.changes) fail(404, 'notification_not_found');
   return c.json({ status: 'deleted' });
 });
 
+// POST /v1/notifications/read-all — this profile's and its account's (never another profile's).
 notifications.post('/read-all', async (c) => {
   const profile = actingProfile(c);
-  const res = await c.env.DB.prepare(`UPDATE notifications SET read_at = ? WHERE recipient_profile_id = ? AND read_at IS NULL`)
-    .bind(now(), profile.id).run();
+  const res = await c.env.DB.prepare(`UPDATE notifications AS n SET read_at = ?3 WHERE ${VISIBLE} AND n.read_at IS NULL`)
+    .bind(profile.id, profile.ownerUserId, now()).run();
   return c.json({ updated: res.meta.changes });
 });
 
@@ -191,14 +254,15 @@ export const sync = new Hono<AppEnv>();
 sync.get('/', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c);
   const counts = await c.env.DB.prepare(`SELECT
-      (SELECT COUNT(*) FROM notifications WHERE recipient_profile_id = ?1 AND read_at IS NULL AND type NOT IN ('followed', 'new_message')) AS notifications,
+      (SELECT COUNT(*) FROM notifications n WHERE ((n.scope = 'profile' AND n.recipient_profile_id = ?1) OR (n.scope = 'account' AND n.recipient_user_id = ?2))
+         AND n.read_at IS NULL AND n.type NOT IN ('followed', 'new_message', 'viewed_profile')) AS notifications,
       (SELECT COUNT(*) FROM conversation_participants cp WHERE cp.profile_id = ?1 AND cp.hidden_at IS NULL AND cp.muted = 0
          AND EXISTS (SELECT 1 FROM messages m LEFT JOIN conversation_read_state rs ON rs.conversation_id = m.conversation_id AND rs.profile_id = ?1
            WHERE m.conversation_id = cp.conversation_id AND m.sender_profile_id <> ?1 AND m.deleted_at IS NULL
              AND m.created_at > COALESCE(rs.last_read_at, 0))) AS conversations,
       (SELECT COUNT(*) FROM contact_requests WHERE recipient_profile_id = ?1 AND status = 'pending') AS contact_requests,
       (SELECT MAX(c.last_message_at) FROM conversations c JOIN conversation_participants cp ON cp.conversation_id = c.id
-         AND cp.profile_id = ?1) AS last_message_at`).bind(profile.id).first<Record<string, number>>();
+         AND cp.profile_id = ?1) AS last_message_at`).bind(profile.id, profile.ownerUserId).first<Record<string, number>>();
   return c.json({ unread: { notifications: counts?.notifications ?? 0, conversations: counts?.conversations ?? 0,
                             contactRequests: counts?.contact_requests ?? 0 }, lastMessageAt: counts?.last_message_at ?? null,
                   serverTime: now() });
