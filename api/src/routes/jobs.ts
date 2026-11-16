@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, rateLimit, requireAuth, requireProfile } from '../lib/auth';
 import { cardColumns, avatarJoin, card, type CardRow, isPro, loadCards, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/cards';
-import { blockedBetweenUsers, checkText, notBlockedSQL } from '../lib/moderation';
+import { blockedBetweenUsers, checkText, monetizationEnabled, notBlockedSQL } from '../lib/moderation';
 import { clampLimit, decodeCursor, encodeCursor, fail, newId, now, parseJSON } from '../lib/util';
 
 const jobs = new Hono<AppEnv>();
@@ -279,6 +279,31 @@ async function applicationsJSON(env: Env, rows: Record<string, any>[]) {
     const json = mediaJSON(env, m);
     if (m.provider === 'r2' && m.purpose === 'application') json.url = await signedMediaURL(env, m.id);
     byApp.set(m.application_id, [...(byApp.get(m.application_id) ?? []), json]);
+  }
+  // A PRO creator's application that carries no video (sent before the snapshot existed, or seeded) shows the creator's
+  // latest published portfolio videos — the same 10 the apply route would attach today.
+  const bare = rows.filter((a) => !(byApp.get(a.id) as { kind?: string }[] | undefined)?.some((m) => m.kind === 'video'));
+  const creators = [...new Set(bare.map((a) => a.creator_profile_id as string))];
+  if (creators.length) {
+    const marks = creators.map(() => '?').join(',');
+    const pro = monetizationEnabled(env) ? new Set((await env.DB.prepare(`SELECT DISTINCT profile_id FROM subscriptions
+        WHERE profile_id IN (${marks}) AND status = 'active' AND (expires_at IS NULL OR expires_at > ?)`)
+      .bind(...creators, Date.now()).all<{ profile_id: string }>()).results.map((r) => r.profile_id)) : new Set(creators);
+    const proCreators = creators.filter((id) => pro.has(id));
+    if (proCreators.length) {
+      const videos = await env.DB.prepare(`SELECT * FROM (SELECT ${mediaColumns}, m.owner_profile_id AS owner,
+            ROW_NUMBER() OVER (PARTITION BY m.owner_profile_id ORDER BY m.created_at DESC, m.id DESC) AS rn
+          FROM media m WHERE m.owner_profile_id IN (${proCreators.map(() => '?').join(',')}) AND m.kind = 'video'
+            AND m.purpose = 'portfolio' AND m.status = 'ready' AND m.is_public = 1 AND m.review_status = 'approved'
+            AND m.moderation_status IS NULL) WHERE rn <= ? ORDER BY owner, rn`)
+        .bind(...proCreators, APPLY_VIDEO_LIMIT).all<MediaRow & { owner: string }>();
+      const byOwner = new Map<string, unknown[]>();
+      for (const m of videos.results) byOwner.set(m.owner, [...(byOwner.get(m.owner) ?? []), mediaJSON(env, m)]);
+      for (const a of bare) {
+        const latest = byOwner.get(a.creator_profile_id);
+        if (latest?.length) byApp.set(a.id, [...latest, ...(byApp.get(a.id) ?? [])]);
+      }
+    }
   }
   return rows.map((a) => ({
     id: a.id, jobId: a.job_id, message: a.message, status: a.status, createdAt: a.created_at, updatedAt: a.updated_at,

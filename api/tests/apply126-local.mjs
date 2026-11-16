@@ -85,11 +85,21 @@ await test('the set stays as it was sent; a video deleted later leaves it', asyn
   eq(app.media.map((m) => m.id), published.slice(1, 10), 'nine left, no new one');
 });
 
+await test('an older PRO application with no stored videos shows the latest ten', async () => {
+  sql(`DELETE FROM application_media WHERE application_id = '${proApplication}'`);
+  const list = await call(business, 'GET', `/v1/jobs/${job}/applications`);
+  const app = (list.json.items ?? list.json).find((a) => a.id === proApplication);
+  const newer = `med_a126_${pro.profileId}_newer`;
+  eq(app.media.map((m) => m.id), [newer, ...published.slice(1, 10)], 'latest ten');
+});
+
 console.log('FREE Apply');
 await test('carries no videos', async () => {
   const r = await call(free, 'POST', `/v1/jobs/${job}/apply`, { message: 'Hi!' });
   eq(r.status, 201, r.text);
   eq(r.json.media.length, 0, 'media');
+  const list = await call(business, 'GET', `/v1/jobs/${job}/applications`);
+  eq((list.json.items ?? list.json).find((a) => a.id === r.json.id).media.length, 0, 'listed without videos');
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
