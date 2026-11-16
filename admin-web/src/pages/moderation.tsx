@@ -36,8 +36,10 @@ export function ReportStatus({ value }: { value: string }) {
 const Priority = ({ value }: { value: string }) => value === 'normal' ? <span className="cell-muted">Normal</span>
   : <span className={`priority priority--${value}`}>{value === 'urgent' ? 'Urgent' : 'High'}</span>;
 
-export function ModerationPage() {
-  const [tab, setTab] = useRemembered('mod.tab', '');
+/** `reviewsOnly`: the Review Reports section — the same list, only reports about reviews (no type tabs). */
+export function ModerationPage({ reviewsOnly = false }: { reviewsOnly?: boolean } = {}) {
+  const [rememberedTab, setTab] = useRemembered('mod.tab', '');
+  const tab = reviewsOnly ? 'reviews' : rememberedTab;
   const [search, setSearch] = useRemembered('mod.q', '');
   const [category, setCategory] = useRemembered('mod.category', '');
   const [status, setStatus] = useRemembered('mod.status', 'open');
@@ -54,10 +56,12 @@ export function ModerationPage() {
   const st = stats.data;
   return (
     <>
-      <PageHeader title="Moderation" subtitle="Reports about profiles, posts, media, messages and reviews"
+      <PageHeader title={reviewsOnly ? 'Review Reports' : 'Moderation'}
+                  subtitle={reviewsOnly ? 'Reports about reviews: what was reported, by whom, and the review itself'
+                                        : 'Reports about profiles, posts, media, messages and reviews'}
                   actions={<Button small onClick={() => { stats.reload(); list.reload(); }}>Refresh</Button>} />
       <div className="content">
-        {st && (
+        {st && !reviewsOnly && (
           <div className="kpis kpis--5">
             <KPI label="Pending Reports" icon={flagIcon} value={fmtNum(st.pendingReports)} note={st.urgent ? <span className="text-red">{fmtNum(st.urgent)} urgent</span> : 'Waiting for a moderator'} />
             <KPI label="Under Review" icon={flagIcon} value={fmtNum(st.underReview)} note="Taken by a moderator" />
@@ -66,13 +70,13 @@ export function ModerationPage() {
             <KPI label="Restricted Users" icon={usersIcon} value={fmtNum(st.restrictedUsers)} note="Restricted, suspended or banned" />
           </div>
         )}
-        <div className="tabs" role="tablist">
+        {!reviewsOnly && <div className="tabs" role="tablist">
           {TABS.map(([v, l]) => (
             <button key={v} role="tab" aria-selected={tab === v} className={`tab ${tab === v ? 'is-on' : ''}`} onClick={() => filter(setTab)(v)}>
               {l}{tab === v && list.data ? ` · ${fmtNum(list.data.total)}` : ''}
             </button>
           ))}
-        </div>
+        </div>}
         <div className="toolbar">
           <SearchField value={search} onChange={filter(setSearch)} placeholder="Search report ID, user ID, name or @username" />
           <Select label="Category" value={category} onChange={filter(setCategory)}
