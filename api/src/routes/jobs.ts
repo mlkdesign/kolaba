@@ -265,8 +265,12 @@ async function applicationsJSON(env: Env, rows: Record<string, any>[]) {
   const ids = rows.map((r) => r.id);
   const [cards, mediaRows] = await Promise.all([
     loadCards(env, rows.map((r) => r.creator_profile_id)),
+    // FEATURE 126: a portfolio video that was deleted, made private, hidden or rejected since leaves the application's
+    // list (the photos sent with it are the application's own).
     env.DB.prepare(`SELECT am.application_id, ${mediaColumns} FROM application_media am JOIN media m ON m.id = am.media_id
-                    AND m.status = 'ready' WHERE am.application_id IN (${ids.map(() => '?').join(',')}) ORDER BY am.position`)
+                    AND m.status = 'ready' AND (m.purpose = 'application' OR (m.is_public = 1 AND m.review_status = 'approved'
+                    AND m.moderation_status IS NULL))
+                    WHERE am.application_id IN (${ids.map(() => '?').join(',')}) ORDER BY am.position`)
       .bind(...ids).all<MediaRow & { application_id: string }>(),
   ]);
   const { signedMediaURL } = await import('./media');
@@ -283,7 +287,18 @@ async function applicationsJSON(env: Env, rows: Record<string, any>[]) {
   }));
 }
 
-// POST /v1/jobs/:id/apply — creator only; one active application; media only with creator.pro.
+/** FEATURE 126: a PRO application carries the creator's latest published portfolio videos — the server picks them, at
+ *  most 10, newest first (the id breaks ties), and the application keeps that set for good (`application_media`). */
+export const APPLY_VIDEO_LIMIT = 10;
+async function latestPortfolioVideoIds(env: Env, profileId: string): Promise<string[]> {
+  const rows = await env.DB.prepare(`SELECT id FROM media WHERE owner_profile_id = ? AND kind = 'video' AND purpose = 'portfolio'
+      AND status = 'ready' AND is_public = 1 AND review_status = 'approved' AND moderation_status IS NULL
+      ORDER BY created_at DESC, id DESC LIMIT ?`).bind(profileId, APPLY_VIDEO_LIMIT).all<{ id: string }>();
+  return rows.results.map((r) => r.id);
+}
+
+// POST /v1/jobs/:id/apply — creator only; one active application; media only with creator.pro. A PRO application also
+// gets the creator's latest portfolio videos (the server's choice — videos the client sends are ignored).
 jobs.post('/:id/apply', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c, 'creator');
   await rateLimit(c, 'RL_WRITE', `apply:${profile.ownerUserId}`);
@@ -296,18 +311,24 @@ jobs.post('/:id/apply', requireAuth, requireProfile, async (c) => {
   if (await blockedBetweenUsers(c.env, profile.ownerUserId, job!.owner_user_id)) fail(403, 'blocked');
   if (job!.status !== 'published') fail(409, 'job_closed');
   if (job!.deadline && job!.deadline < now()) fail(409, 'deadline_passed');
+  const pro = await isPro(c.env, profile.id);
+  let photoIds: string[] = [];
   if (body.mediaIds.length) {
-    if (!(await isPro(c.env, profile.id))) fail(403, 'pro_required');
-    const owned = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE owner_profile_id = ? AND status = 'ready'
-        AND id IN (${body.mediaIds.map(() => '?').join(',')})`).bind(profile.id, ...body.mediaIds).first<{ n: number }>();
-    if (owned?.n !== new Set(body.mediaIds).size) fail(422, 'media_not_found');
+    if (!pro) fail(403, 'pro_required');
+    const owned = await c.env.DB.prepare(`SELECT id, kind FROM media WHERE owner_profile_id = ? AND status = 'ready'
+        AND id IN (${body.mediaIds.map(() => '?').join(',')})`).bind(profile.id, ...body.mediaIds).all<{ id: string; kind: string }>();
+    if (owned.results.length !== new Set(body.mediaIds).size) fail(422, 'media_not_found');
+    const photos = new Set(owned.results.filter((m) => m.kind === 'photo').map((m) => m.id));
+    photoIds = [...new Set(body.mediaIds)].filter((mid) => photos.has(mid));
   }
+  // The videos first (as the card shows them), then the photos picked for it; never a duplicate.
+  const attached = [...new Set([...(pro ? await latestPortfolioVideoIds(c.env, profile.id) : []), ...photoIds])];
   const id = newId('app');
   try {
     await c.env.DB.batch([
       c.env.DB.prepare(`INSERT INTO applications (id, job_id, creator_profile_id, message, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
         .bind(id, job!.id, profile.id, body.message, now(), now()),
-      ...[...new Set(body.mediaIds)].map((mid, i) =>
+      ...attached.map((mid, i) =>
         c.env.DB.prepare(`INSERT INTO application_media (application_id, media_id, position) VALUES (?, ?, ?)`).bind(id, mid, i)),
     ]);
   } catch (error) {
