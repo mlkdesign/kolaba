@@ -28,28 +28,33 @@ export const avatarJoinOwner = `LEFT JOIN media am ON am.id = p.avatar_media_id 
   AND am.review_status IN ('approved', 'pending', 'flagged')`;
 
 export const cardColumns = `p.id, p.type, p.display_name, p.username, p.city, p.country, p.country_code, p.flag,
-  p.category, p.is_demo, p.status, ${avatarColumns}, ${ratingColumns}`;
+  p.category, p.is_demo, p.status, ${avatarColumns}, ${ratingColumns},
+  (SELECT ps.show_location FROM profile_settings ps WHERE ps.profile_id = p.id) AS show_location`;
 
 export interface CardRow {
   id: string; type: string; display_name: string; username: string; city: string | null; country: string | null;
   country_code: string | null; flag: string | null; category: string | null; is_demo: number; status: string;
   avatar_id: string | null; avatar_provider: string | null; avatar_url: string | null;
   rating: number | null; reviews_count: number; is_pro: number; is_pro_grant?: number;
+  /** Privacy → Show location (0: hidden from everyone but the owner). Absent in prefixed selects: shown. */
+  show_location?: number | null;
 }
 
-export function card(env: Env, row: CardRow, prefix = '') {
+export function card(env: Env, row: CardRow, prefix = '', asOwner = false) {
   const get = <K extends keyof CardRow>(k: K) => (row as unknown as Record<string, unknown>)[prefix + k] as CardRow[K];
   const avatarId = get('avatar_id');
+  // Privacy → Show location off: no place on any card others see (lists, Reels, chats, jobs).
+  const place = asOwner || get('show_location') !== 0;
   return {
     id: get('id'),
     type: get('type'),
     displayName: get('display_name'),
     username: get('username'),
-    city: get('city'),
-    country: get('country'),
-    countryCode: get('country_code'),
-    flag: get('flag'),
-    location: [get('city'), get('country')].filter(Boolean).join(', ') || null,
+    city: place ? get('city') : null,
+    country: place ? get('country') : null,
+    countryCode: place ? get('country_code') : null,
+    flag: place ? get('flag') : null,
+    location: place ? ([get('city'), get('country')].filter(Boolean).join(', ') || null) : null,
     category: get('category'),
     avatarUrl: avatarId ? mediaURL(env, { id: avatarId, provider: get('avatar_provider')!, url: get('avatar_url') }) : null,
     rating: get('rating') ?? null,
@@ -64,7 +69,7 @@ export function card(env: Env, row: CardRow, prefix = '') {
 export async function loadCard(env: Env, id: string, asOwner = false) {
   const row = await env.DB.prepare(`SELECT ${cardColumns} FROM profiles p ${asOwner ? avatarJoinOwner : avatarJoin} WHERE p.id = ?`)
     .bind(id).first<CardRow>();
-  return row ? card(env, row) : null;
+  return row ? card(env, row, '', asOwner) : null;
 }
 
 /** Many cards by id, in one query. */

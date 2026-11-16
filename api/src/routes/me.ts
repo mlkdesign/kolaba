@@ -149,6 +149,59 @@ export async function deleteAccount(env: Env, userId: string): Promise<{ profile
   return { profiles: count?.n ?? 0, files: files.results.length - failed.length, filesFailed: failed };
 }
 
+/** One profile of an account and everything it owns, removed for real (Account Center → delete a profile): its media
+ *  and files, jobs with their applications, chats' messages it sent (a conversation nobody is left in goes too),
+ *  contacts, reviews it wrote or received, notifications, settings. The account and its other profiles stay. */
+export async function deleteProfileData(env: Env, profileId: string): Promise<{ files: number; filesFailed: string[] }> {
+  const files = await env.DB.prepare(`SELECT storage_key FROM media WHERE owner_profile_id = ?1 AND provider = 'r2' AND storage_key IS NOT NULL
+      UNION ALL SELECT storage_key FROM message_voice WHERE message_id IN (SELECT id FROM messages WHERE sender_profile_id = ?1)`)
+    .bind(profileId).all<{ storage_key: string }>();
+  const statements = [
+    `UPDATE conversations SET last_message_id = NULL WHERE last_message_id IN (SELECT id FROM messages WHERE sender_profile_id = ?1)`,
+    `DELETE FROM message_attachments WHERE message_id IN (SELECT id FROM messages WHERE sender_profile_id = ?1) OR media_id IN (SELECT id FROM media WHERE owner_profile_id = ?1)`,
+    `DELETE FROM message_reactions WHERE profile_id = ?1 OR message_id IN (SELECT id FROM messages WHERE sender_profile_id = ?1)`,
+    `DELETE FROM message_voice WHERE message_id IN (SELECT id FROM messages WHERE sender_profile_id = ?1)`,
+    `DELETE FROM messages WHERE sender_profile_id = ?1`,
+    `DELETE FROM application_media WHERE application_id IN (SELECT id FROM applications WHERE creator_profile_id = ?1 OR job_id IN (SELECT id FROM jobs WHERE owner_profile_id = ?1))`,
+    `DELETE FROM applications WHERE creator_profile_id = ?1 OR job_id IN (SELECT id FROM jobs WHERE owner_profile_id = ?1)`,
+    `DELETE FROM saved_jobs WHERE profile_id = ?1 OR job_id IN (SELECT id FROM jobs WHERE owner_profile_id = ?1)`,
+    `DELETE FROM job_media WHERE job_id IN (SELECT id FROM jobs WHERE owner_profile_id = ?1)`,
+    `DELETE FROM jobs WHERE owner_profile_id = ?1`,
+    `DELETE FROM likes WHERE profile_id = ?1 OR media_id IN (SELECT id FROM media WHERE owner_profile_id = ?1)`,
+    `DELETE FROM media_views WHERE viewer_profile_id = ?1 OR media_id IN (SELECT id FROM media WHERE owner_profile_id = ?1)`,
+    `DELETE FROM collection_items WHERE media_id IN (SELECT id FROM media WHERE owner_profile_id = ?1) OR collection_id IN (SELECT id FROM collections WHERE owner_profile_id = ?1)`,
+    `DELETE FROM collections WHERE owner_profile_id = ?1`,
+    `UPDATE profiles SET avatar_media_id = NULL, intro_video_media_id = NULL WHERE id = ?1`,
+    `DELETE FROM media WHERE owner_profile_id = ?1`,
+    `DELETE FROM contact_requests WHERE sender_profile_id = ?1 OR recipient_profile_id = ?1`,
+    `DELETE FROM follows WHERE follower_profile_id = ?1 OR followee_profile_id = ?1`,
+    `DELETE FROM review_requests WHERE requester_profile_id = ?1 OR contact_profile_id = ?1`,
+    `DELETE FROM reviews WHERE author_profile_id = ?1 OR recipient_profile_id = ?1`,
+    `DELETE FROM review_invites WHERE owner_profile_id = ?1 OR accepted_by_profile_id = ?1`,
+    `DELETE FROM notifications WHERE recipient_profile_id = ?1 OR actor_profile_id = ?1`,
+    `DELETE FROM notification_preferences WHERE profile_id = ?1`,
+    `UPDATE reports SET reporter_profile_id = NULL WHERE reporter_profile_id = ?1`,
+    `DELETE FROM conversation_read_state WHERE profile_id = ?1`,
+    `DELETE FROM conversation_participants WHERE profile_id = ?1`,
+    `DELETE FROM messages WHERE conversation_id NOT IN (SELECT conversation_id FROM conversation_participants)`,
+    `DELETE FROM conversations WHERE id NOT IN (SELECT conversation_id FROM conversation_participants)`,
+    `DELETE FROM profile_links WHERE profile_id = ?1`,
+    `DELETE FROM profile_social_accounts WHERE profile_id = ?1`,
+    `DELETE FROM profile_settings WHERE profile_id = ?1`,
+    `DELETE FROM subscriptions WHERE profile_id = ?1`,
+    `DELETE FROM profiles WHERE id = ?1`,
+  ];
+  await env.DB.batch(statements.map((sql) => (sql.includes('?1') ? env.DB.prepare(sql).bind(profileId) : env.DB.prepare(sql))));
+  const failed: string[] = [];
+  if (env.MEDIA) {
+    for (const f of files.results) {
+      try { await env.MEDIA.delete(f.storage_key); } catch { failed.push(f.storage_key); }
+    }
+  }
+  if (failed.length) console.error('profile deletion: files not removed', profileId, failed);
+  return { files: files.results.length - failed.length, filesFailed: failed };
+}
+
 // DELETE /v1/me {confirm: "DELETE", password?} — the account and everything it owns; the sessions end with it. An account
 // with a password confirms it again here (re-authentication); a Google-only account confirms with "DELETE".
 me.delete('/', async (c) => {
