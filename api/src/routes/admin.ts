@@ -489,12 +489,19 @@ admin.patch('/profiles/:id/pro', async (c) => {
   const who = current(c);
 
   if (action === 'revoke') {
+    // FIX 127: removing PRO by hand always says why (kept in the audit log and shown to the person).
+    if (!body.reason) fail(422, 'reason_required', 'A reason is required to remove PRO.');
     if (!adminSub) return c.json({ isPro: Boolean(paid), changed: false });
     await c.env.DB.batch([
       c.env.DB.prepare(`UPDATE subscriptions SET status = 'cancelled', expires_at = ? WHERE id = ?`).bind(t, adminSub.id),
       c.env.DB.prepare(`UPDATE pro_grants SET status = 'revoked' WHERE subscription_id = ? AND status = 'active'`).bind(adminSub.id),
     ]);
     await audit(c, 'pro.revoke', 'profile', id, body.reason || null, { plan, subscriptionId: adminSub.id });
+    // Only this profile, once per removed grant (a repeated submit finds nothing active and returns above).
+    const title = 'PRO status removed';
+    const message = `Your ${proName(plan)} status has been removed by a kolaba administrator.`;
+    await notify(c.env, id, 'pro_removed', null, { plan, title, message, reason: body.reason, subscriptionId: adminSub.id },
+                 { push: { title, body: message }, dedupKey: `pro_removed:${adminSub.id}`, targetType: 'profile', targetId: id });
     return c.json({ isPro: Boolean(paid), changed: true });
   }
 
