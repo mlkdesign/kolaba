@@ -1,5 +1,6 @@
 // Profiles: one creator + up to five business profiles per account; catalog, public page, edit, deactivate.
 import { Hono } from 'hono';
+import { deleteProfileData } from './me';
 import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, currentUser, rateLimit, requireAuth, requireProfile } from '../lib/auth';
@@ -178,21 +179,18 @@ profiles.patch('/:id', requireAuth, async (c) => {
   return c.json(await profilePage(c.env, id, user.id));
 });
 
-// DELETE /v1/profiles/:id — deactivate (soft). The account's last profile can't be removed.
+// DELETE /v1/profiles/:id — Account Center: the profile and everything it owns, removed for real; the account and its
+// other profiles stay. The account's last profile can't be removed (that is deleting the account).
 profiles.delete('/:id', requireAuth, async (c) => {
   const user = currentUser(c);
   const id = c.req.param('id');
+  if (user.isDemo) fail(403, 'demo_account');
   const owned = await c.env.DB.prepare(`SELECT COUNT(*) AS n, SUM(id = ?) AS mine FROM profiles WHERE owner_user_id = ? AND status <> 'deleted'`)
     .bind(id, user.id).first<{ n: number; mine: number }>();
   if (!owned?.mine) fail(403, 'not_profile_owner');
   if (owned!.n <= 1) fail(409, 'last_profile');
-  await c.env.DB.batch([
-    c.env.DB.prepare(`UPDATE profiles SET status = 'deleted', updated_at = ? WHERE id = ?`).bind(now(), id),
-    c.env.DB.prepare(`UPDATE jobs SET status = 'closed', closed_at = ? WHERE owner_profile_id = ? AND status = 'published'`).bind(now(), id),
-    c.env.DB.prepare(`UPDATE contact_requests SET status = 'cancelled' WHERE status = 'pending'
-                      AND (sender_profile_id = ? OR recipient_profile_id = ?)`).bind(id, id),
-  ]);
-  return c.json({ status: 'deactivated' });
+  const result = await deleteProfileData(c.env, id);
+  return c.json({ status: 'deleted', files: result.files });
 });
 
 // GET /v1/profiles?type=creator&q=&cursor= — the catalog (public profiles), keyset by name.
@@ -262,6 +260,8 @@ export async function profilePage(env: Env, id: string, viewerUserId: string | n
     counts,
     introVideo: intro ? mediaJSON(env, intro) : null,
     hideJobPosts: p!.hide_job_posts === 1,
+    // Who may message this profile (the app hides Message when the viewer is kept out).
+    messaging: p!.who_can_message ?? 'everyone',
     visibility: p!.visibility,
     isOwner,
     settings: isOwner ? { showLocation: p!.show_location === 1, whoCanMessage: p!.who_can_message, showLinks: p!.show_links === 1,
