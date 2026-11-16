@@ -143,6 +143,8 @@ export const NOTIFICATION_TYPES: Record<string, { body: string; setting: PushSet
   report_reviewed: { body: 'Your report has been reviewed.', setting: 'activity', push: false, scope: 'profile' },
   // PRO
   pro_granted: { body: 'Your PRO subscription is active.', setting: null, push: true, scope: 'profile' },
+  // An administrator removed the PRO they had given (never a natural expiry): always delivered, whatever the switches.
+  pro_removed: { body: 'Your PRO status has been removed.', setting: null, push: true, scope: 'profile' },
   pro_expired: { body: 'Your PRO subscription has expired.', setting: null, push: true, scope: 'profile' },
   pro_restored: { body: 'Your PRO benefits have been restored.', setting: null, push: true, scope: 'profile' },
   // Account & security (one row for the whole account, never switched off)
@@ -180,6 +182,8 @@ export async function notify(env: Env, recipient: string, type: string, actor: s
         actor_profile_id, target_type, target_id, payload, dedup_key, created_at) VALUES (?, ?, ?, 'profile', ?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, owner.owner_user_id, recipient, type, actor, options.targetType ?? null, options.targetId ?? null,
           JSON.stringify(payload), options.dedupKey ?? null, Date.now()).run();
+  // FIX 127: the recipient's open app hears it at once (its feed and badge re-read); best effort, HTTP stays the truth.
+  if (res.meta.changes) await announce(env, [recipient], id, type);
   if (!res.meta.changes || !preset.push) return;
   let text = options.push;
   if (!text) {
@@ -202,9 +206,20 @@ export async function notifyAccount(env: Env, userId: string, type: string, payl
         actor_profile_id, target_type, target_id, payload, dedup_key, created_at) VALUES (?, ?, NULL, 'account', ?, NULL, ?, ?, ?, ?, ?)`)
     .bind(id, userId, type, options.targetType ?? null, options.targetId ?? null, JSON.stringify(payload),
           options.dedupKey ?? null, Date.now()).run();
+  if (res.meta.changes) {
+    const profiles = await env.DB.prepare(`SELECT id FROM profiles WHERE owner_user_id = ? AND status <> 'deleted'`).bind(userId)
+      .all<{ id: string }>();
+    await announce(env, profiles.results.map((p) => p.id), id, type);
+  }
   if (!res.meta.changes || !preset.push) return;
   await pushToUser(env, userId, { ...(options.push ?? { title: 'kolaba.', body: preset.body }), setting: null, collapseId: id,
                                   data: { kind: 'notification', type, notificationId: id } });
+}
+
+/** A new notification, told to the profiles' realtime sockets (`notification.new`). */
+async function announce(env: Env, profileIds: string[], id: string, type: string) {
+  const { publish } = await import('../realtime');
+  await publish(env, profileIds, { type: 'notification.new', notificationId: id, notificationType: type });
 }
 
 export async function audit(env: Env, actor: string | null, action: string, entityType: string, entityId: string | null,

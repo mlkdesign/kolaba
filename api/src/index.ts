@@ -18,6 +18,7 @@ import { blocks, feedback, reports } from './routes/safety';
 import { assertCanPost, monetizationEnabled } from './lib/moderation';
 import { purgeExpired } from './lib/retention';
 import admin from './routes/admin';
+import { billing } from './routes/billing';
 import { ChatHub } from './realtime';
 import { fail as failWith } from './lib/util';
 
@@ -60,6 +61,23 @@ app.use('/v1/*', async (c, next) => {
   await next();
 });
 
+// Shared links (no auth): `/p/<profile id>`, `/j/<job id>` — Universal Links. With the iOS app installed iOS opens them
+// in the app (the association file below); otherwise the browser lands here and goes on to the web app. A download
+// page can replace the redirect later.
+const APPLE_APP_IDS = ['XU9738YN8V.com.kolaba.app', 'XU9738YN8V.com.jackmilka.kolaba'];
+app.get('/.well-known/apple-app-site-association', (c) => {
+  c.header('Cache-Control', 'public, max-age=3600');
+  return c.json({ applinks: { details: [{ appIDs: APPLE_APP_IDS, components: [{ '/': '/p/*' }, { '/': '/j/*' }] }] } });
+});
+const SHARE_ID = /^[A-Za-z0-9_-]{3,80}$/;
+for (const [prefix, route] of [['p', 'profile'], ['j', 'job']] as const) {
+  app.get(`/${prefix}/:id`, (c) => {
+    const id = c.req.param('id');
+    if (!SHARE_ID.test(id)) return c.json({ error: { code: 'not_found' } }, 404);
+    return c.redirect(`${c.env.APP_URL.replace(/\/?$/, '/')}#/${route}/${id}`, 302);
+  });
+}
+
 // Public app configuration (no auth): what the clients may show.
 app.get('/v1/config', (c) => c.json({ monetizationEnabled: monetizationEnabled(c.env),
   legal: { privacy: `${c.env.APP_URL.replace(/\/?$/, '/')}legal/privacy.html`, terms: `${c.env.APP_URL.replace(/\/?$/, '/')}legal/terms.html`,
@@ -89,6 +107,7 @@ app.route('/v1/reports', reports);
 app.route('/v1/blocks', blocks);
 app.route('/v1/feedback', feedback);
 app.route('/v1/admin', admin);
+app.route('/v1/billing', billing);
 
 // GET /v1/realtime?profile= (WebSocket) — the acting profile's event stream. The session comes from the Authorization
 // header as everywhere else; the profile must belong to it.

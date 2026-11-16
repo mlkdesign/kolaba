@@ -45,8 +45,16 @@ export interface Env {
   /** Secret: the first administrator password. Used once to create the admins row, then never read again. */
   ADMIN_INITIAL_PASSWORD?: string;
 
-  /** "true" switches paid plans on (StoreKit 2 not built yet). Anything else: no PRO anywhere, every feature open. */
+  /** "true": paid plans on — Free by default, PRO from an App Store purchase or an admin grant. Anything else: every
+   *  feature open to everyone. */
   MONETIZATION_ENABLED?: string;
+  /** App Store Server API (src/routes/billing.ts): the app's bundle id (var) and its API key (secrets). */
+  APPSTORE_BUNDLE_ID?: string;
+  APPSTORE_ISSUER_ID?: string;
+  APPSTORE_KEY_ID?: string;
+  APPSTORE_PRIVATE_KEY?: string;
+  /** Tests only: another App Store Server API base URL (never set in production). */
+  APPSTORE_API_URL?: string;
   /** Secret, optional: Google Cloud Vision key for automatic SafeSearch pre-checks of public photos. Unset = off
    *  (everything still goes to manual review). Setting it requires a Privacy Policy update first. */
   GOOGLE_VISION_API_KEY?: string;

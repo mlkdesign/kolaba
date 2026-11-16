@@ -149,7 +149,8 @@ export function UserPage({ id }: { id: string }) {
     const plan = p.type === 'creator' ? 'CREATOR.PRO' : 'BUSINESS.PRO';
     const titles = { grant: `Grant 1 month ${plan}`, extend: `Extend ${plan} by 1 month`, revoke: 'Remove PRO' };
     return extra.open((close) => (
-      <ConfirmModal title={titles[action]} confirmLabel={titles[action]} danger={action === 'revoke'} reason reasonOptional
+      <ConfirmModal title={titles[action]} confirmLabel={titles[action]} danger={action === 'revoke'} reason
+        reasonOptional={action !== 'revoke'}
         onClose={close}
         onConfirm={async (reason) => {
           await api('PATCH', `/profiles/${p.id}/pro`, { action, months: 1, requestKey, reason: reason || undefined });
@@ -158,7 +159,8 @@ export function UserPage({ id }: { id: string }) {
           reload();
         }}
         text={action === 'revoke'
-          ? <>Remove the administrator's PRO from <b>{p.displayName}</b>? It ends now. A paid subscription is never changed here.</>
+          ? <>Remove the administrator's PRO from <b>{p.displayName}</b>? It ends now, for this profile only. The person gets a
+              “PRO status removed” notification with your reason (required). A paid subscription is never changed here.</>
           : action === 'extend'
             ? <>Add one more month of free {plan} to <b>{p.displayName}</b>, after the current grant ends.</>
             : <>Give <b>{p.displayName}</b> one month of free {plan}, from now. Only this profile gets it — not the account's other

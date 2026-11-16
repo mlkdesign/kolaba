@@ -162,6 +162,9 @@ reels.get('/', requireAuth, requireProfile, async (c) => {
   });
 });
 
+/** Reels shows at most this many of a creator's latest videos. */
+export const REELS_VIDEOS_PER_CREATOR = 10;
+
 // GET /v1/reels/creators?cursor= — the iOS feed: one vertical page per creator, each with its videos (horizontal),
 // creators ordered by their latest video; cursor by (latest, id).
 reels.get('/creators', requireAuth, requireProfile, async (c) => {
@@ -183,7 +186,8 @@ reels.get('/creators', requireAuth, requireProfile, async (c) => {
     loadCards(c.env, ids),
     c.env.DB.prepare(`SELECT ${mediaColumns}, EXISTS (SELECT 1 FROM likes l WHERE l.media_id = m.id AND l.profile_id = ?) AS is_liked
         FROM media m WHERE m.owner_profile_id IN (${marks}) AND m.kind = 'video' AND m.purpose IN ('portfolio', 'intro')
-        AND m.status = 'ready' AND m.is_public = 1 AND m.review_status = 'approved' ORDER BY m.position, m.created_at DESC`).bind(profile.id, ...ids).all<MediaRow & { is_liked: number }>(),
+        AND m.status = 'ready' AND m.is_public = 1 AND m.review_status = 'approved' AND m.moderation_status IS NULL
+        ORDER BY m.created_at DESC, m.id DESC`).bind(profile.id, ...ids).all<MediaRow & { is_liked: number }>(),
     c.env.DB.prepare(`SELECT id, bio FROM profiles WHERE id IN (${marks})`).bind(...ids).all<{ id: string; bio: string }>(),
   ]);
   // KOLABA has contacts, not follows: each creator's contact state with the viewer (the page's contact button).
@@ -202,7 +206,8 @@ reels.get('/creators', requireAuth, requireProfile, async (c) => {
   return c.json({
     items: page.map((p) => ({
       author: cards.get(p.id), bio: bio.get(p.id) ?? '', isFollowing: false, contact: contactOf(p.id),
-      videos: videos.results.filter((v) => v.owner_profile_id === p.id).slice(0, 10).map((v) => mediaJSON(c.env, v, { isLiked: v.is_liked === 1 })),
+      // At most the creator's 10 latest videos in the feed (newest first).
+      videos: videos.results.filter((v) => v.owner_profile_id === p.id).slice(0, REELS_VIDEOS_PER_CREATOR).map((v) => mediaJSON(c.env, v, { isLiked: v.is_liked === 1 })),
     })),
     nextCursor: last ? encodeCursor({ t: last.latest, id: last.id }) : null,
   });
