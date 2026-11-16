@@ -40,8 +40,11 @@
     // password comes from the secret ADMIN_INITIAL_PASSWORD (wrangler secret put) and must be changed at first sign-in.
     "ADMIN_EMAILS": "milka19051995@gmail.com",
     "ADMIN_ORIGINS": "https://mlkdesign.github.io",
-    // Paid plans stay off until StoreKit 2 is built: no PRO anywhere, every feature open to everyone.
-    "MONETIZATION_ENABLED": "false",
+    // Paid plans on: everyone is Free; PRO comes from an App Store purchase (StoreKit 2, src/routes/billing.ts) or an
+    // administrator's grant (admin panel). Secrets for purchases: APPSTORE_ISSUER_ID, APPSTORE_KEY_ID,
+    // APPSTORE_PRIVATE_KEY (wrangler secret put) — without them purchases answer billing_not_configured.
+    "MONETIZATION_ENABLED": "true",
+    "APPSTORE_BUNDLE_ID": "com.kolaba.app",
     // Moderation / anti-spam limits (see docs/MODERATION.md).
     "NEW_CONVERSATIONS_PER_DAY": "25",
     "MESSAGES_BEFORE_REPLY": "5",

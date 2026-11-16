@@ -18,6 +18,7 @@ import { blocks, feedback, reports } from './routes/safety';
 import { assertCanPost, monetizationEnabled } from './lib/moderation';
 import { purgeExpired } from './lib/retention';
 import admin from './routes/admin';
+import { billing } from './routes/billing';
 import { ChatHub } from './realtime';
 import { fail as failWith } from './lib/util';
 
@@ -106,6 +107,7 @@ app.route('/v1/reports', reports);
 app.route('/v1/blocks', blocks);
 app.route('/v1/feedback', feedback);
 app.route('/v1/admin', admin);
+app.route('/v1/billing', billing);
 
 // GET /v1/realtime?profile= (WebSocket) — the acting profile's event stream. The session comes from the Authorization
 // header as everywhere else; the profile must belong to it.
