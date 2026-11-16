@@ -26,7 +26,7 @@ import { ContentReviewPage } from './pages/review';
 import { FeedbackPage } from './pages/feedback';
 
 interface Admin { email: string; mustChangePassword: boolean }
-interface Counts { reports: number; urgent: number; contentReview: number; feedback: number }
+interface Counts { reports: number; urgent: number; contentReview: number; reviewReports: number; feedback: number }
 
 export function App() {
   const [admin, setAdmin] = useState<Admin | null>(null);
@@ -160,6 +160,7 @@ const NAV = [
   { group: 'Management', items: [{ key: 'users', label: 'Users', icon: navUsers }, { key: 'jobs', label: 'Jobs', icon: navJobs },
                                  { key: 'media', label: 'Media', icon: navMedia }] },
   { group: 'Safety', items: [{ key: 'moderation', label: 'Moderation', icon: navModeration, count: 'reports' as const },
+                             { key: 'review-reports', label: 'Review Reports', icon: navReview, count: 'reviewReports' as const },
                              { key: 'review', label: 'Content Review', icon: navReview, count: 'contentReview' as const },
                              { key: 'feedback', label: 'Feedback', icon: navFeedback, count: 'feedback' as const }] },
   { group: 'System', items: [{ key: 'logs', label: 'Activity Logs', icon: navLogs }] },
@@ -186,6 +187,7 @@ function Shell({ admin, onSignOut }: { admin: Admin; onSignOut: () => void }) {
   else if (section === 'media') page = <MediaPage owner={route.params.get('owner')} />;
   else if (section === 'logs') page = <LogsPage />;
   else if (section === 'moderation') page = id ? <ReportPage id={id} /> : <ModerationPage />;
+  else if (section === 'review-reports') page = <ModerationPage reviewsOnly />;
   else if (section === 'review') page = <ContentReviewPage />;
   else if (section === 'feedback') page = <FeedbackPage />;
   else page = <NotFound />;

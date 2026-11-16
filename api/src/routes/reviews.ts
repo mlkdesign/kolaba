@@ -14,9 +14,13 @@ async function hasReviewed(env: Env, authorUserId: string, recipient: string) {
     .bind(authorUserId, recipient).first());
 }
 
-/** ReviewPermissions.canReview on the server. */
+/** ReviewPermissions.canReview on the server. Only the other kind reviews: a creator a business, a business a creator
+ *  (never creator → creator, never business → business). */
 async function checkCanReview(env: Env, author: string, authorUser: string, recipient: string) {
   if (author === recipient || (await ownerOf(env, recipient)) === authorUser) fail(403, 'self_review');
+  const types = await env.DB.prepare(`SELECT id, type FROM profiles WHERE id IN (?, ?)`).bind(author, recipient).all<{ id: string; type: string }>();
+  const typeOf = new Map(types.results.map((r) => [r.id, r.type]));
+  if (typeOf.get(author) && typeOf.get(author) === typeOf.get(recipient)) fail(403, 'same_profile_type');
   if (await blockedBetweenProfiles(env, author, recipient)) fail(403, 'blocked');
   if (await hasReviewed(env, authorUser, recipient)) fail(409, 'already_reviewed');
 }
@@ -87,6 +91,40 @@ reviews.post('/', requireAuth, requireProfile, async (c) => {
   await notify(c.env, body.recipientProfileId, 'new_review', profile.id, { reviewId: id },
                { dedupKey: `new_review:${id}`, targetType: 'review', targetId: id });
   return c.json({ id, reviewStatus: 'approved' }, 201);
+});
+
+/** The review, if the signed-in person wrote it (from any of their profiles). */
+async function ownReview(env: Env, id: string, userId: string) {
+  const review = await env.DB.prepare(`SELECT id, author_profile_id, author_user_id, recipient_profile_id FROM reviews
+      WHERE id = ? AND status = 'published'`).bind(id).first<{ id: string; author_profile_id: string; author_user_id: string; recipient_profile_id: string }>();
+  if (!review) fail(404, 'review_not_found');
+  if (review!.author_user_id !== userId) fail(403, 'not_your_review');
+  return review!;
+}
+
+// PATCH /v1/reviews/:id — the author edits their review (the ratings and the text); the text is checked again.
+reviews.patch('/:id', requireAuth, requireProfile, async (c) => {
+  const profile = actingProfile(c);
+  await rateLimit(c, 'RL_WRITE', `review:${profile.ownerUserId}`);
+  const review = await ownReview(c.env, c.req.param('id'), profile.ownerUserId);
+  const body = z.object({
+    quality: z.number().int().min(1).max(5), speed: z.number().int().min(1).max(5),
+    contact: z.number().int().min(1).max(5), comment: z.string().trim().min(1).max(2000),
+  }).parse(await c.req.json());
+  const verdict = checkText(body.comment);
+  await c.env.DB.prepare(`UPDATE reviews SET quality = ?, speed = ?, contact = ?, comment = ?, review_status = ?, review_reason = ?
+      WHERE id = ?`).bind(body.quality, body.speed, body.contact, body.comment, verdict.flagged ? 'flagged' : 'approved',
+      verdict.flagged ? verdict.reasons.join(', ').slice(0, 300) : null, review.id).run();
+  if (verdict.flagged) await autoReport(c.env, { type: 'review', id: review.id, profileId: review.author_profile_id }, verdict, body.comment);
+  return c.json({ id: review.id, reviewStatus: verdict.flagged ? 'flagged' : 'approved' });
+});
+
+// DELETE /v1/reviews/:id — the author removes their review (it leaves the profile and its rating at once).
+reviews.delete('/:id', requireAuth, requireProfile, async (c) => {
+  const profile = actingProfile(c);
+  const review = await ownReview(c.env, c.req.param('id'), profile.ownerUserId);
+  await c.env.DB.prepare(`DELETE FROM reviews WHERE id = ?`).bind(review.id).run();
+  return c.json({ ok: true });
 });
 
 // POST /v1/reviews/requests {contactProfileId} — idempotent: a repeated tap returns the waiting request.

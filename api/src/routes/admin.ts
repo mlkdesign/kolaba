@@ -1248,8 +1248,9 @@ admin.get('/counts', async (c) => {
       (SELECT COUNT(*) FROM reports WHERE status IN ('pending', 'under_review') AND priority = 'urgent') AS urgent,
       (SELECT COUNT(*) FROM media WHERE status = 'ready' AND review_status IN ('pending', 'flagged') AND purpose NOT IN ('chat', 'application', 'poster'))
         + (SELECT COUNT(*) FROM jobs WHERE review_status = 'flagged' AND status <> 'removed') + (SELECT COUNT(*) FROM reviews WHERE review_status = 'flagged') AS review,
+      (SELECT COUNT(*) FROM reports WHERE status IN ('pending', 'under_review') AND target_type = 'review') AS review_reports,
       (SELECT COUNT(*) FROM feedback WHERE status = 'open') AS feedback`).first<Record<string, number>>();
-  return c.json({ reports: s!.reports, urgent: s!.urgent, contentReview: s!.review, feedback: s!.feedback });
+  return c.json({ reports: s!.reports, urgent: s!.urgent, contentReview: s!.review, reviewReports: s!.review_reports, feedback: s!.feedback });
 });
 
 export default admin;
