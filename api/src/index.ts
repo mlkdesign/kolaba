@@ -60,6 +60,23 @@ app.use('/v1/*', async (c, next) => {
   await next();
 });
 
+// Shared links (no auth): `/p/<profile id>`, `/j/<job id>` — Universal Links. With the iOS app installed iOS opens them
+// in the app (the association file below); otherwise the browser lands here and goes on to the web app. A download
+// page can replace the redirect later.
+const APPLE_APP_IDS = ['XU9738YN8V.com.kolaba.app', 'XU9738YN8V.com.jackmilka.kolaba'];
+app.get('/.well-known/apple-app-site-association', (c) => {
+  c.header('Cache-Control', 'public, max-age=3600');
+  return c.json({ applinks: { details: [{ appIDs: APPLE_APP_IDS, components: [{ '/': '/p/*' }, { '/': '/j/*' }] }] } });
+});
+const SHARE_ID = /^[A-Za-z0-9_-]{3,80}$/;
+for (const [prefix, route] of [['p', 'profile'], ['j', 'job']] as const) {
+  app.get(`/${prefix}/:id`, (c) => {
+    const id = c.req.param('id');
+    if (!SHARE_ID.test(id)) return c.json({ error: { code: 'not_found' } }, 404);
+    return c.redirect(`${c.env.APP_URL.replace(/\/?$/, '/')}#/${route}/${id}`, 302);
+  });
+}
+
 // Public app configuration (no auth): what the clients may show.
 app.get('/v1/config', (c) => c.json({ monetizationEnabled: monetizationEnabled(c.env),
   legal: { privacy: `${c.env.APP_URL.replace(/\/?$/, '/')}legal/privacy.html`, terms: `${c.env.APP_URL.replace(/\/?$/, '/')}legal/terms.html`,
