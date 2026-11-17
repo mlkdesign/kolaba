@@ -208,6 +208,55 @@ admin.get('/dashboard', async (c) => {
   });
 });
 
+// ─── storage ───
+
+/** What the stored files are, by their R2 key: `u/<profile>/<purpose>/…` (media), `files/…` (chat files), `voice/…`. */
+function storageGroup(key: string): string {
+  if (key.startsWith('files/') || key.startsWith('voice/')) return 'chat';
+  const purpose = key.startsWith('u/') ? key.split('/')[2] : '';
+  switch (purpose) {
+    case 'portfolio': case 'intro': case 'collection': case 'poster': return 'portfolio';
+    case 'avatar': return 'profile';
+    case 'job': return 'jobs';
+    case 'application': return 'applications';
+    case 'chat': case 'review': return 'chat';
+    default: return 'other';
+  }
+}
+
+// GET /admin/storage — how much the project stores now: every file in R2 (listed, summed by kind) and the D1 database.
+admin.get('/storage', async (c) => {
+  const groups = new Map<string, { bytes: number; files: number }>();
+  let truncated = false;
+  if (c.env.MEDIA) {
+    let cursor: string | undefined;
+    for (let page = 0; ; page++) {
+      if (page >= 100) { truncated = true; break; }
+      const list = await c.env.MEDIA.list({ cursor, limit: 1000 });
+      for (const object of list.objects) {
+        const group = groups.get(storageGroup(object.key)) ?? { bytes: 0, files: 0 };
+        group.bytes += object.size; group.files += 1;
+        groups.set(storageGroup(object.key), group);
+      }
+      if (!list.truncated) break;
+      cursor = list.cursor;
+    }
+  }
+  const probe = await c.env.DB.prepare('SELECT 1').run();
+  const databaseBytes = Number((probe.meta as { size_after?: number }).size_after ?? 0);
+  const order = ['portfolio', 'profile', 'jobs', 'applications', 'chat', 'other'];
+  const items = order.filter((k) => groups.has(k)).map((k) => ({ key: k, ...groups.get(k)! }));
+  const filesBytes = items.reduce((sum, g) => sum + g.bytes, 0);
+  const limitGb = Number(c.env.STORAGE_LIMIT_GB ?? 10);
+  return c.json({
+    files: { bytes: filesBytes, count: items.reduce((sum, g) => sum + g.files, 0), groups: items, available: Boolean(c.env.MEDIA) },
+    database: { bytes: databaseBytes },
+    limitBytes: (Number.isFinite(limitGb) && limitGb > 0 ? limitGb : 10) * 1024 ** 3,
+    truncated,
+    measuredAt: now(),
+  });
+});
+
 // ─── users ───
 
 const userStatus = (s: string) => (s === 'suspended' ? 'blocked' : s);

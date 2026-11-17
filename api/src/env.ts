@@ -21,6 +21,8 @@ export interface Env {
   /** New real accounts allowed per UTC day (public demo protection). */
   SIGNUPS_PER_DAY: string;
   MAX_PHOTO_MB: string;
+  /** Admin dashboard's storage meter: the files' plan limit in GB (default 10 — R2's free storage). */
+  STORAGE_LIMIT_GB?: string;
   MAX_VIDEO_MB: string;
   MAX_VIDEO_SECONDS: string;
   /** Comma-separated e-mails allowed to sign up (empty: anyone). Until a sending domain is verified, Resend only

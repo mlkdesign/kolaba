@@ -346,3 +346,20 @@ h1, h2, p { margin: 0; }
   .profiles { grid-template-columns: 1fr; }
   .media-strip { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* Dashboard — Storage meter */
+.storage__total { display: flex; align-items: baseline; gap: 10px; }
+.storage__total b { font-size: 24px; font-weight: 600; }
+.storage__total span { color: var(--text-3); font-size: 12px; }
+.storage__bar { display: flex; height: 12px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.storage__bar span { display: block; height: 100%; min-width: 0; }
+.storage__bar span + span { box-shadow: -1px 0 0 var(--surface); }
+.storage__legend { list-style: none; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 24px; }
+.storage__legend li { display: grid; grid-template-columns: 10px 1fr auto; align-items: center; column-gap: 8px; font-size: 12px; }
+.storage__legend i { width: 10px; height: 10px; border-radius: 3px; }
+.storage__legend span { color: var(--text-2); }
+.storage__legend b { font-weight: 600; }
+.storage__legend em { grid-column: 2 / 4; font-style: normal; color: var(--text-3); font-size: 11px; }
+.storage__note { color: var(--text-3); font-size: 11px; }
+@media (max-width: 900px) { .storage__legend { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .storage__legend { grid-template-columns: 1fr; } }

@@ -135,6 +135,16 @@ export interface Dashboard {
   recent: { type: 'user.registered' | 'job.published'; id: string; title: string; subtitle: string | null; at: number }[];
 }
 
+/** GET /admin/storage — the project's stored files (R2, by kind) and its database (D1), against the plan's limit. */
+export interface StorageUsage {
+  files: { bytes: number; count: number; available: boolean;
+           groups: { key: 'portfolio' | 'profile' | 'jobs' | 'applications' | 'chat' | 'other'; bytes: number; files: number }[] };
+  database: { bytes: number };
+  limitBytes: number;
+  truncated: boolean;
+  measuredAt: number;
+}
+
 export function query(params: Record<string, string | number | undefined | null>): string {
   const s = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') s.set(k, String(v));
