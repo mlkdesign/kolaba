@@ -57,6 +57,8 @@ const none = await person('none', 'creator');
 const free = await person('free', 'creator');
 const grant = (p, tag) => sql(`INSERT INTO subscriptions (id, profile_id, plan, status, source, started_at) VALUES ('sub_f128_${tag}_${stamp}', '${p.profileId}', 'creator_pro', 'active', 'test', ${stamp})`);
 grant(pro, 'pro'); grant(few, 'few'); grant(none, 'none');
+// This suite publishes four jobs from one business; the Free allowance (2 a month, tests/limits-local.mjs) isn't what it tests.
+sql(`INSERT INTO subscriptions (id, profile_id, plan, status, source, started_at) VALUES ('sub_f128_biz_${stamp}', '${business.profileId}', 'business_pro', 'active', 'test', ${stamp})`);
 const published = Array.from({ length: 12 }, (_, i) => video(pro, i + 1, i + 10));
 video(pro, 'private', 0, { is_public: 0 });
 video(pro, 'rejected', 0, { review_status: 'rejected' });

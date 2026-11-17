@@ -5,6 +5,7 @@ import type { AppEnv, Env } from '../env';
 import { actingProfile, rateLimit, requireAuth, requireProfile } from '../lib/auth';
 import { cardColumns, avatarJoin, card, type CardRow, isPro, loadCards, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/cards';
 import { blockedBetweenUsers, checkText, monetizationEnabled, notBlockedSQL } from '../lib/moderation';
+import { jobPostSpentSQL, jobPostsUsage, limitReached, spendJobPost } from '../lib/entitlements';
 import { clampLimit, decodeCursor, encodeCursor, fail, newId, now, parseJSON } from '../lib/util';
 
 const jobs = new Hono<AppEnv>();
@@ -156,15 +157,22 @@ jobs.post('/', requireAuth, requireProfile, async (c) => {
   const body = JobBody.parse(raw);
   const publish = raw?.publish === true;
   const id = newId('job');
-  await c.env.DB.prepare(`INSERT INTO jobs (id, owner_profile_id, title, description, category, tags, location, country_code, city, flag,
+  // A publication spends one of the account's job posts (Entitlements): the spend and the insert are one D1 batch,
+  // the insert conditional on the spend — over the limit nothing is created. A draft spends nothing.
+  const spend = publish ? await spendJobPost(c.env, profile, id) : null;
+  const insert = c.env.DB.prepare(`INSERT INTO jobs (id, owner_profile_id, title, description, category, tags, location, country_code, city, flag,
       is_worldwide, languages, compensation_type, budget_min, budget_max, currency, deliverables, deadline, status, published_at,
-      created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      created_at, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE ? = 0 OR ${jobPostSpentSQL}`)
     .bind(id, profile.id, body.title, body.description, body.category ?? null, JSON.stringify(body.tags), body.isWorldwide ? 'Worldwide' : body.location,
           body.countryCode ?? null, body.city ?? null, flagOf(body.countryCode), Number(body.isWorldwide), JSON.stringify(body.languages),
           body.compensationType, body.compensationType === 'fixed' || body.compensationType === 'range' ? body.budgetMin ?? null : null,
           body.compensationType === 'range' ? body.budgetMax ?? null : null,
           ['fixed', 'range'].includes(body.compensationType) ? body.currency ?? null : null, JSON.stringify(body.deliverables),
-          body.deadline ?? null, publish ? 'published' : 'draft', publish ? now() : null, now(), now()).run();
+          body.deadline ?? null, publish ? 'published' : 'draft', publish ? now() : null, now(), now(), publish ? 1 : 0, id);
+  const results = await c.env.DB.batch(spend ? [spend.statement, insert] : [insert]);
+  const inserted = results[results.length - 1];
+  if (!inserted.meta.changes) limitReached(await jobPostsUsage(c.env, profile));
   await setJobMedia(c.env, id, profile.id, body);
   await screenJob(c.env, id, body.title, body.description, body.tags);
   const row = await c.env.DB.prepare(`SELECT * FROM jobs WHERE id = ?`).bind(id).first<Record<string, any>>();
@@ -229,8 +237,18 @@ jobs.post('/:id/:action{publish|close}', requireAuth, requireProfile, async (c) 
   const profile = actingProfile(c, 'business');
   const job = await ownedJob(c.env, c.req.param('id'), profile.id);
   if (c.req.param('action') === 'publish') {
-    await c.env.DB.prepare(`UPDATE jobs SET status = 'published', published_at = COALESCE(published_at, ?), closed_at = NULL,
-        updated_at = ? WHERE id = ?`).bind(now(), now(), job.id).run();
+    if (job.published_at == null) {
+      // First publication of a draft: spends a job post (atomic with the update, as in POST /).
+      const spend = await spendJobPost(c.env, profile, job.id);
+      const [, updated] = await c.env.DB.batch([spend.statement,
+        c.env.DB.prepare(`UPDATE jobs SET status = 'published', published_at = ?, closed_at = NULL, updated_at = ?
+            WHERE id = ? AND published_at IS NULL AND ${jobPostSpentSQL}`).bind(now(), now(), job.id, job.id)]);
+      if (!updated.meta.changes) limitReached(await jobPostsUsage(c.env, profile));
+    } else {
+      // Re-opening the same job (Archive → active) is not a new publication: its post was spent when first published.
+      await c.env.DB.prepare(`UPDATE jobs SET status = 'published', closed_at = NULL, updated_at = ? WHERE id = ?`)
+        .bind(now(), job.id).run();
+    }
   } else {
     if (job.status !== 'published') fail(409, 'invalid_transition');
     await c.env.DB.prepare(`UPDATE jobs SET status = 'closed', closed_at = ?, updated_at = ? WHERE id = ?`).bind(now(), now(), job.id).run();

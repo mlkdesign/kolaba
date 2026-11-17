@@ -126,7 +126,7 @@ app.get('/v1/realtime', async (c) => {
 app.notFound((c) => c.json({ error: { code: 'not_found' } }, 404));
 
 app.onError((error, c) => {
-  if (error instanceof ApiError) return c.json({ error: { code: error.code, message: error.message } }, error.status);
+  if (error instanceof ApiError) return c.json({ error: { ...error.details, code: error.code, message: error.message } }, error.status);
   if (error instanceof ZodError) {
     const custom = error.issues.find((i) => i.code === 'custom')?.message;
     return c.json({ error: { code: custom ?? 'invalid_request', fields: error.issues.map((i) => i.path.join('.')) } }, 400);

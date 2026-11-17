@@ -1,6 +1,7 @@
 // Admin panel API (/v1/admin/*). A separate auth system: admins + admin_sessions (never users / sessions), short
 // sessions (8 h absolute, 60 min idle), bearer token kept only in the admin tab's memory. Every change is written to
 // admin_logs. All SQL is parameterised; every body is validated with zod; request bodies are capped at 16 KB.
+import { DEFAULT_PLAN_CONFIG, loadPlanConfig, validPlanConfig } from '../lib/entitlements';
 import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
@@ -539,6 +540,28 @@ admin.patch('/profiles/:id/pro', async (c) => {
                                                   messageKey: 'pro_granted' },
                { push: { title, body: message }, dedupKey: `pro_granted:${grantId}`, targetType: 'profile', targetId: id });
   return c.json({ isPro: true, grantId, expiresAt, changed: true });
+});
+
+// ─── plan limits (Entitlements & Usage Limits) ───
+
+// GET /v1/admin/plan-config — the plans' limits in force (stored, or the defaults). null = unlimited.
+admin.get('/plan-config', async (c) => {
+  const row = await c.env.DB.prepare(`SELECT updated_at, updated_by FROM plan_config WHERE id = 'current'`)
+    .first<{ updated_at: number; updated_by: string | null }>();
+  return c.json({ config: await loadPlanConfig(c.env), defaults: DEFAULT_PLAN_CONFIG, updatedAt: row?.updated_at ?? null,
+                  updatedBy: row?.updated_by ?? null });
+});
+
+// PUT /v1/admin/plan-config {config, reason} — takes effect on the next request; no app or Worker release needed.
+admin.put('/plan-config', async (c) => {
+  const a = c.get('admin')!;
+  const body = z.object({ config: z.unknown(), reason: Reason }).parse(await c.req.json());
+  const config = validPlanConfig(body.config);
+  await c.env.DB.prepare(`INSERT INTO plan_config (id, config, updated_at, updated_by) VALUES ('current', ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at, updated_by = excluded.updated_by`)
+    .bind(JSON.stringify(config), now(), a.email).run();
+  await audit(c, 'plan_config.update', 'plan_config', 'current', body.reason, { config });
+  return c.json({ config });
 });
 
 // ─── jobs ───

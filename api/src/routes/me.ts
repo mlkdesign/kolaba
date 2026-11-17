@@ -6,6 +6,7 @@ import type { AppEnv, Env } from '../env';
 import { actingProfile, currentUser, requireAuth, requireProfile } from '../lib/auth';
 import { fail, newId, now } from '../lib/util';
 import { canTestPro } from './auth';
+import { entitlementsSnapshot } from '../lib/entitlements';
 import { monetizationEnabled } from '../lib/moderation';
 import { verifyPassword } from '../lib/password';
 
@@ -83,6 +84,14 @@ me.put('/pro-test', requireProfile, async (c) => {
   return c.json({ pro });
 });
 
+// GET /v1/me/entitlements — the acting profile's plan, its limits and what it has used (Entitlements & Usage Limits):
+// portfolio videos (creator profile), job posts (the account's, shared by all its business profiles), collections,
+// video length. The app reads this; the writes check the same rules themselves.
+me.get('/entitlements', requireProfile, async (c) => {
+  c.header('Cache-Control', 'no-store');
+  return c.json(await entitlementsSnapshot(c.env, actingProfile(c)));
+});
+
 /** Everything an account owns, removed for real. Shared things: a conversation stays for the other side (this
  *  account's messages go with its profiles); reviews it wrote and received go; jobs go with their applications. R2
  *  files are deleted after the rows; a file that fails is reported, never blocks the deletion. */
@@ -129,6 +138,7 @@ export async function deleteAccount(env: Env, userId: string): Promise<{ profile
     `DELETE FROM profile_social_accounts WHERE profile_id IN ${P}`,
     `DELETE FROM profile_settings WHERE profile_id IN ${P}`,
     `DELETE FROM subscriptions WHERE profile_id IN ${P}`,
+    `DELETE FROM usage_events WHERE user_id = ?1`,
     `DELETE FROM profiles WHERE owner_user_id = ?1`,
     `DELETE FROM sessions WHERE user_id = ?1`,
     `DELETE FROM device_tokens WHERE user_id = ?1`,
