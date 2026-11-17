@@ -26,10 +26,9 @@ const JobBody = z.object({
   deliverables: z.array(z.object({ kind: z.enum(['reels', 'photos', 'stories', 'videos']), count: z.number().int().min(1).max(100) }))
     .max(8).default([]),
   deadline: z.number().int().positive().nullable().optional(),
-  /** Legacy (before FIX 128): the old top gallery — its first photo becomes the Cover, the rest References. */
-  mediaIds: z.array(z.string()).max(11).optional(),
-  /** FIX 128: one optional Cover photo (null removes it) and up to 10 Reference Media, the Cover not counted. */
-  coverMediaId: z.string().nullable().optional(),
+  /** FIX 128: a job's media are its References — up to 10 photos / videos, in order (no Cover). `mediaIds` is the
+   *  older name of the same list. */
+  mediaIds: z.array(z.string()).max(10).optional(),
   referenceMediaIds: z.array(z.string()).max(10).optional(),
 }).superRefine((j, ctx) => {
   if (j.compensationType === 'fixed' && (j.budgetMin == null || !j.currency)) ctx.addIssue({ code: 'custom', message: 'budget_required' });
@@ -48,25 +47,18 @@ async function jobsJSON(env: Env, rows: Record<string, any>[], viewer: string | 
   const marks = ids.map(() => '?').join(',');
   const [owners, mediaRows, stats] = await Promise.all([
     loadCards(env, rows.map((r) => r.owner_profile_id)),
-    // A job's Cover and References: approved ones for everyone; its owner also sees those still waiting for review.
-    env.DB.prepare(`SELECT x.job_id, x.is_cover, ${mediaColumns} FROM (
-          SELECT id AS job_id, cover_media_id AS media_id, 1 AS is_cover, -1 AS position FROM jobs WHERE id IN (${marks}) AND cover_media_id IS NOT NULL
-          UNION ALL SELECT job_id, media_id, 0, position FROM job_media WHERE job_id IN (${marks})) x
-        JOIN media m ON m.id = x.media_id AND m.status = 'ready'
-          AND (m.review_status = 'approved' OR (m.owner_profile_id = ? AND m.review_status IN ('pending', 'flagged')))
-        ORDER BY x.position, m.id`).bind(...ids, ...ids, viewer).all<MediaRow & { job_id: string; is_cover: number }>(),
+    // A job's References: approved ones for everyone; its owner also sees those still waiting for review.
+    env.DB.prepare(`SELECT jm.job_id, ${mediaColumns} FROM job_media jm JOIN media m ON m.id = jm.media_id AND m.status = 'ready'
+                    AND (m.review_status = 'approved' OR (m.owner_profile_id = ? AND m.review_status IN ('pending', 'flagged')))
+                    WHERE jm.job_id IN (${marks}) ORDER BY jm.position, m.id`).bind(viewer, ...ids).all<MediaRow & { job_id: string }>(),
     env.DB.prepare(`SELECT j.id,
         (SELECT COUNT(*) FROM applications a WHERE a.job_id = j.id AND a.status = 'submitted' AND EXISTS (SELECT 1 FROM profiles cp WHERE cp.id = a.creator_profile_id AND cp.status = 'active')) AS applications_count,
         (SELECT a.id FROM applications a WHERE a.job_id = j.id AND a.creator_profile_id = ? AND a.status = 'submitted') AS my_application_id,
         EXISTS (SELECT 1 FROM saved_jobs s WHERE s.job_id = j.id AND s.profile_id = ?) AS is_saved
         FROM jobs j WHERE j.id IN (${marks})`).bind(viewer, viewer, ...ids).all<Record<string, any>>(),
   ]);
-  const covers = new Map<string, ReturnType<typeof mediaJSON>>();
   const references = new Map<string, ReturnType<typeof mediaJSON>[]>();
-  for (const m of mediaRows.results) {
-    if (m.is_cover) covers.set(m.job_id, mediaJSON(env, m));
-    else references.set(m.job_id, [...(references.get(m.job_id) ?? []), mediaJSON(env, m)]);
-  }
+  for (const m of mediaRows.results) references.set(m.job_id, [...(references.get(m.job_id) ?? []), mediaJSON(env, m)]);
   const statsById = new Map(stats.results.map((s) => [s.id, s]));
   return rows.map((j) => {
     const s = statsById.get(j.id) ?? {};
@@ -77,9 +69,9 @@ async function jobsJSON(env: Env, rows: Record<string, any>[], viewer: string | 
       languages: parseJSON(j.languages, []), compensationType: j.compensation_type, budgetMin: j.budget_min,
       budgetMax: j.budget_max, currency: j.currency, deliverables: parseJSON(j.deliverables, []), deadline: j.deadline,
       status: j.status, reviewStatus: j.review_status ?? 'approved', publishedAt: j.published_at, closedAt: j.closed_at, createdAt: j.created_at, viewsCount: j.views_count,
-      isDemo: j.is_demo === 1, cover: covers.get(j.id) ?? null, references: references.get(j.id) ?? [],
-      // Older apps read one list: the Cover first, then the References.
-      media: [...(covers.has(j.id) ? [covers.get(j.id)!] : []), ...(references.get(j.id) ?? [])], applicationsCount: s.applications_count ?? 0,
+      isDemo: j.is_demo === 1, references: references.get(j.id) ?? [],
+      // Older apps read the same list by its older name.
+      media: references.get(j.id) ?? [], applicationsCount: s.applications_count ?? 0,
       myApplicationId: s.my_application_id ?? null, isSaved: s.is_saved === 1,
       acceptsApplications: j.status === 'published' && (!j.deadline || j.deadline > now()),
     };
@@ -138,35 +130,21 @@ jobs.get('/:id', requireAuth, requireProfile, async (c) => {
   return c.json((await jobsJSON(c.env, [row!], profile.id))[0]);
 });
 
-/** FIX 128: a job's Cover (one photo, optional) and References (up to 10 photos / videos, in order) — separate: the
- *  Cover is never a Reference, removing one never touches the other. Only the owner's own ready media. A field left
- *  out is left as it was; the legacy `mediaIds` list sets both (its first photo is the Cover). */
-async function setJobMedia(env: Env, jobId: string, ownerId: string, body: { mediaIds?: string[]; coverMediaId?: string | null;
-                                                                             referenceMediaIds?: string[] }) {
-  let cover = body.coverMediaId;
-  let refs = body.referenceMediaIds;
-  if (cover === undefined && refs === undefined && body.mediaIds) {
-    const unique = [...new Set(body.mediaIds)];
-    const kinds = unique.length ? new Map((await env.DB.prepare(`SELECT id, kind FROM media WHERE id IN (${unique.map(() => '?').join(',')})`)
-      .bind(...unique).all<{ id: string; kind: string }>()).results.map((r) => [r.id, r.kind])) : new Map<string, string>();
-    cover = unique.find((id) => kinds.get(id) === 'photo') ?? null;
-    refs = unique.filter((id) => id !== cover);
-  }
-  if (cover === undefined && refs === undefined) return;
-  refs = refs ? [...new Set(refs)].filter((id) => id !== cover) : undefined;
-  if (refs && refs.length > 10) fail(422, 'too_many_references');
-  const check = [...(cover ? [cover] : []), ...(refs ?? [])];
-  if (check.length) {
-    const owned = await env.DB.prepare(`SELECT id, kind FROM media WHERE owner_profile_id = ? AND status = 'ready'
-        AND id IN (${check.map(() => '?').join(',')})`).bind(ownerId, ...check).all<{ id: string; kind: string }>();
-    if (owned.results.length !== new Set(check).size) fail(422, 'media_not_found');
-    if (cover && owned.results.find((m) => m.id === cover)?.kind !== 'photo') fail(422, 'cover_must_be_photo');
+/** FIX 128: a job's References — up to 10 photos / videos, in order; only the owner's own ready media. Left out: left
+ *  as it was. */
+async function setJobMedia(env: Env, jobId: string, ownerId: string, body: { mediaIds?: string[]; referenceMediaIds?: string[] }) {
+  const list = body.referenceMediaIds ?? body.mediaIds;
+  if (!list) return;
+  const refs = [...new Set(list)];
+  if (refs.length > 10) fail(422, 'too_many_references');
+  if (refs.length) {
+    const owned = await env.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE owner_profile_id = ? AND status = 'ready'
+        AND id IN (${refs.map(() => '?').join(',')})`).bind(ownerId, ...refs).first<{ n: number }>();
+    if (owned?.n !== refs.length) fail(422, 'media_not_found');
   }
   await env.DB.batch([
-    ...(cover !== undefined ? [env.DB.prepare(`UPDATE jobs SET cover_media_id = ? WHERE id = ?`).bind(cover, jobId),
-                               env.DB.prepare(`DELETE FROM job_media WHERE job_id = ? AND media_id = ?`).bind(jobId, cover ?? '')] : []),
-    ...(refs ? [env.DB.prepare(`DELETE FROM job_media WHERE job_id = ?`).bind(jobId),
-                ...refs.map((mid, i) => env.DB.prepare(`INSERT INTO job_media (job_id, media_id, position) VALUES (?, ?, ?)`).bind(jobId, mid, i))] : []),
+    env.DB.prepare(`DELETE FROM job_media WHERE job_id = ?`).bind(jobId),
+    ...refs.map((mid, i) => env.DB.prepare(`INSERT INTO job_media (job_id, media_id, position) VALUES (?, ?, ?)`).bind(jobId, mid, i)),
   ]);
 }
 

@@ -1,5 +1,5 @@
 // Stock pictures for the demo content only (Unsplash, Unsplash License — free use, hotlinked from images.unsplash.com):
-// each demo business gets a themed logo picture (avatar) and its demo job a cover gallery; four demo creators who
+// each demo business gets a themed logo picture (avatar) and its demo jobs reference photos; four demo creators who
 // have no videos get a portrait. Writes SQL that touches rows with is_demo = 1 only, never replaces an avatar that
 // is set, and is idempotent (INSERT OR IGNORE). Usage: node seed/stock-images.mjs > seed/stock-images.sql
 import { readFileSync } from 'node:fs';
@@ -23,17 +23,12 @@ for (const line of readFileSync(new URL('./stock-images.txt', import.meta.url), 
   const owner = `p.display_name = ${q(name)} AND p.type = 'business'`;
   out.push(media(`med_stk_${logo}`, owner, 'avatar', url(logo, 480, 480), 480, 480, 0));
   out.push(`UPDATE profiles SET avatar_media_id = ${q(`med_stk_${logo}`)} WHERE display_name = ${q(name)} AND type = 'business' AND is_demo = 1 AND avatar_media_id IS NULL;`);
-  // FIX 128: the first photo is a fresh demo job's Cover, the others its References (a job that has either is left alone).
-  covers.forEach((id, i) => out.push(media(`med_stk_${id}`, owner, 'job', url(id, 740, 400), 740, 400, i)));
-  if (covers.length) {
-    out.push(`UPDATE jobs SET cover_media_id = ${q(`med_stk_${covers[0]}`)} WHERE cover_media_id IS NULL AND is_demo = 1
-  AND owner_profile_id IN (SELECT p.id FROM profiles p WHERE ${owner} AND p.is_demo = 1)
-  AND NOT EXISTS (SELECT 1 FROM job_media x WHERE x.job_id = jobs.id);`);
-  }
-  covers.slice(1).forEach((id, i) => {
+  // FIX 128: a demo job's References (no Cover) — only for a job that has none of its own yet.
+  covers.forEach((id, i) => {
+    out.push(media(`med_stk_${id}`, owner, 'job', url(id, 740, 400), 740, 400, i));
     out.push(`INSERT OR IGNORE INTO job_media (job_id, media_id, position)
   SELECT j.id, ${q(`med_stk_${id}`)}, ${i} FROM jobs j JOIN profiles p ON p.id = j.owner_profile_id
-  WHERE ${owner} AND p.is_demo = 1 AND j.is_demo = 1 AND j.cover_media_id = ${q(`med_stk_${covers[0]}`)};`);
+  WHERE ${owner} AND p.is_demo = 1 AND j.is_demo = 1 AND NOT EXISTS (SELECT 1 FROM job_media x JOIN media m ON m.id = x.media_id WHERE x.job_id = j.id AND m.id NOT LIKE 'med_stk_%');`);
   });
 }
 console.log(out.join('\n'));

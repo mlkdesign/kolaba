@@ -1,4 +1,4 @@
-// FIX 128 local API checks — dynamic PRO application videos, job Cover + References, review media gated by PRO.
+// FIX 128 local API checks — dynamic PRO application videos, job References, review media gated by PRO.
 //   cd api && npx wrangler dev --env local --port 8799 --var RESEND_API_KEY: --var TEST_CODE_INBOX: --var MONETIZATION_ENABLED:true
 //   node tests/fix128-local.mjs "$PWD"      (local D1 only — never against production)
 import { execFileSync } from 'node:child_process';
@@ -104,42 +104,37 @@ await test('PRO back shows the videos available now (deleted ones stay gone)', a
   eq((await listed(proApp)).media.some((m) => m.id === published[0]), false, 'deleted not back');
 });
 
-console.log('Jobs: Cover + References');
+console.log('Jobs: References only (no Cover)');
 const jobMedia = (n, kind = 'photo') => {
   const id = `med_f128_job_${n}_${stamp}`;
   sql(`INSERT INTO media (id, owner_profile_id, kind, purpose, provider, url, status, is_public, review_status, created_at)
        VALUES ('${id}', '${business.profileId}', '${kind}', 'job', 'external', 'https://example.com/${id}', 'ready', 1, 'approved', ${stamp})`);
   return id;
 };
-const cover = jobMedia('cover');
 const refs = Array.from({ length: 10 }, (_, i) => jobMedia(`ref${i}`, i % 3 === 0 ? 'video' : 'photo'));
 let job2;
-await test('one Cover and 10 References, separate', async () => {
-  const r = await call(business, 'POST', '/v1/jobs', { title: 'With media', description: 'x', publish: true, coverMediaId: cover, referenceMediaIds: refs });
+await test('10 References, photos and videos in order; no cover field', async () => {
+  const r = await call(business, 'POST', '/v1/jobs', { title: 'With media', description: 'x', publish: true, referenceMediaIds: refs });
   eq(r.status, 201, r.text); job2 = r.json.id;
-  eq(r.json.cover?.id, cover, 'cover'); eq(r.json.references.map((m) => m.id), refs, 'references');
+  eq(r.json.references.map((m) => m.id), refs, 'references'); eq('cover' in r.json, false, 'no cover');
+  eq(r.json.media.map((m) => m.id), refs, 'legacy list = references');
 });
-await test('11 References are refused; the Cover is not counted', async () => {
+await test('11 References are refused', async () => {
   const r = await call(business, 'PATCH', `/v1/jobs/${job2}`, { title: 'With media', description: 'x', referenceMediaIds: [...refs, jobMedia('extra')] });
   eq(r.status >= 400, true, `status ${r.status}`);
 });
-await test('a video can\'t be the Cover', async () => {
-  const r = await call(business, 'PATCH', `/v1/jobs/${job2}`, { title: 'With media', description: 'x', coverMediaId: refs[0] });
-  eq(r.json?.error?.code ?? r.json?.error ?? r.text.slice(0, 40), 'cover_must_be_photo', 'code');
+await test('a Reference removed, the order changed', async () => {
+  const next = [refs[2], ...refs.slice(3), refs[1]];
+  const r = await call(business, 'PATCH', `/v1/jobs/${job2}`, { title: 'With media', description: 'x', referenceMediaIds: next });
+  eq(r.json.references.map((m) => m.id), next, 'order');
 });
-await test('removing the Cover keeps the References; removing a Reference keeps the Cover', async () => {
-  let r = await call(business, 'PATCH', `/v1/jobs/${job2}`, { title: 'With media', description: 'x', coverMediaId: null });
-  eq(r.json.cover, null, 'no cover'); eq(r.json.references.length, 10, 'refs kept');
-  r = await call(business, 'PATCH', `/v1/jobs/${job2}`, { title: 'With media', description: 'x', coverMediaId: cover, referenceMediaIds: refs.slice(1) });
-  eq(r.json.cover?.id, cover, 'cover back'); eq(r.json.references.map((m) => m.id), refs.slice(1), 'one ref less');
+await test('the older mediaIds list is the References', async () => {
+  const r = await call(business, 'POST', '/v1/jobs', { title: 'Legacy', description: 'x', publish: true, mediaIds: [refs[0], refs[1]] });
+  eq(r.json.references.map((m) => m.id), [refs[0], refs[1]], 'refs');
 });
-await test('the legacy list: first photo is the Cover, the rest References', async () => {
-  const r = await call(business, 'POST', '/v1/jobs', { title: 'Legacy', description: 'x', publish: true, mediaIds: [refs[0], cover, refs[1]] });
-  eq(r.json.cover?.id, cover, 'cover'); eq(r.json.references.map((m) => m.id), [refs[0], refs[1]], 'refs');
-});
-await test('a job without media: no cover, no references', async () => {
+await test('a job without media: no references', async () => {
   const r = await call(business, 'POST', '/v1/jobs', { title: 'Bare', description: 'x', publish: true });
-  eq(r.json.cover, null, 'cover'); eq(r.json.references, [], 'refs'); eq(r.json.media, [], 'legacy list');
+  eq(r.json.references, [], 'refs'); eq(r.json.media, [], 'legacy list');
 });
 
 console.log('Reviews with media');

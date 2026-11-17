@@ -957,7 +957,7 @@ async function purgeReviewMedia(env: Env, reviewId: string) {
   for (const m of linked.results) {
     const used = await env.DB.prepare(`SELECT
         EXISTS (SELECT 1 FROM review_media WHERE media_id = ?1) OR EXISTS (SELECT 1 FROM message_attachments WHERE media_id = ?1)
-        OR EXISTS (SELECT 1 FROM job_media WHERE media_id = ?1) OR EXISTS (SELECT 1 FROM jobs WHERE cover_media_id = ?1)
+        OR EXISTS (SELECT 1 FROM job_media WHERE media_id = ?1)
         OR EXISTS (SELECT 1 FROM collection_items WHERE media_id = ?1) OR EXISTS (SELECT 1 FROM collections WHERE cover_media_id = ?1)
         OR EXISTS (SELECT 1 FROM profiles WHERE avatar_media_id = ?1 OR intro_video_media_id = ?1) AS used`).bind(m.id).first<{ used: number }>();
     if (used?.used) continue;
