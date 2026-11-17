@@ -113,6 +113,8 @@ export interface Usage {
   periodEnd?: number;
   resetsAt?: number;
   maxDurationSeconds?: number | null;
+  /** FEATURE 130: job-post slots an administrator added on top of the plan. */
+  bonus?: number;
   plan: 'free' | 'pro';
 }
 
@@ -155,19 +157,32 @@ export async function portfolioVideosUsage(env: Env, profile: ActingProfile, con
 export async function jobPostsUsage(env: Env, profile: ActingProfile, config?: PlanConfig,
                                     proActive?: boolean): Promise<Usage> {
   const cfg = config ?? await loadPlanConfig(env);
-  const pro = !monetizationEnabled(env) || (proActive ?? (await businessPro(env, profile.ownerUserId)).active);
-  const limit = (pro ? cfg.business.pro : cfg.business.free).job_posts_per_month;
-  const since = now() - JOB_POST_WINDOW;
+  const [pro, slots] = await Promise.all([
+    proActive !== undefined || !monetizationEnabled(env) ? Promise.resolve(!monetizationEnabled(env) || !!proActive)
+      : businessPro(env, profile.ownerUserId).then((s) => s.active),
+    jobPostSlots(env, profile.ownerUserId),
+  ]);
+  const base = (pro ? cfg.business.pro : cfg.business.free).job_posts_per_month;
+  // FEATURE 130: slots an administrator added on top of the plan; a reset counts only what's published after it.
+  const limit = base == null ? null : base + slots.bonus;
+  const since = Math.max(now() - JOB_POST_WINDOW, slots.resetAt ?? 0);
   // The publications still holding a slot, oldest first: the oldest one's slot is the next to come back.
   const rows = await env.DB.prepare(`SELECT created_at FROM usage_events WHERE user_id = ? AND feature = 'job_posts'
       AND created_at > ? ORDER BY created_at`).bind(profile.ownerUserId, since).all<{ created_at: number }>();
   const used = rows.results.length;
   const usage = counted('job_posts', 'account', limit, used, 0, pro);
-  const base = profile.type === 'business' ? usage : { ...usage, allowed: false, reason: 'wrong_profile_type' };
+  const shown = profile.type === 'business' ? usage : { ...usage, allowed: false, reason: 'wrong_profile_type' };
   // When a slot comes back: the oldest counted publication + 30 days (the next one, if the limit is reached).
   const nextFree = limit != null && used >= limit && used > 0 ? rows.results[used - limit].created_at + JOB_POST_WINDOW : undefined;
-  return { ...base, period: 'rolling_30_days', periodStart: since, periodEnd: now(),
+  return { ...shown, bonus: slots.bonus, period: 'rolling_30_days', periodStart: since, periodEnd: now(),
            resetsAt: nextFree ?? (used ? rows.results[0].created_at + JOB_POST_WINDOW : undefined) };
+}
+
+/** FEATURE 130: the account's extra job-post slots and the last reset (an administrator's). */
+export async function jobPostSlots(env: Env, userId: string): Promise<{ bonus: number; resetAt: number | null }> {
+  const row = await env.DB.prepare(`SELECT job_posts_bonus, job_posts_reset_at FROM users WHERE id = ?`).bind(userId)
+    .first<{ job_posts_bonus: number | null; job_posts_reset_at: number | null }>();
+  return { bonus: Math.max(0, row?.job_posts_bonus ?? 0), resetAt: row?.job_posts_reset_at ?? null };
 }
 
 /** Everything the app shows about the acting profile's plan and limits (GET /v1/me/entitlements). */
@@ -242,7 +257,7 @@ export async function spendJobPost(env: Env, profile: ActingProfile, jobId: stri
       SELECT ?, ?, ?, 'job_posts', ?, ?, ?
        WHERE ? IS NULL OR (SELECT COUNT(*) FROM usage_events WHERE user_id = ? AND feature = 'job_posts' AND created_at > ?) < ?`)
     .bind(newId('use'), profile.ownerUserId, profile.id, subjectId, monthPeriod(t).start, t,
-          usage.limit, profile.ownerUserId, t - JOB_POST_WINDOW, usage.limit);
+          usage.limit, profile.ownerUserId, Math.max(t - JOB_POST_WINDOW, usage.periodStart ?? 0), usage.limit);
   return { statement, usage, subjectId };
 }
 export const jobPostSpentSQL = `EXISTS (SELECT 1 FROM usage_events WHERE feature = 'job_posts' AND subject_id = ?)`;

@@ -178,6 +178,29 @@ export function UserPage({ id }: { id: string }) {
       text={<>Let <b>{u.email}</b> post, message and apply again now.</>} />
   ));
   const edit = (p: AdminProfile) => extra.open((close) => <EditProfile profile={p} onClose={close} onSaved={reload} />);
+  // FEATURE 130: job-post slots of the account — more on top of the plan, fewer, or the used ones given back.
+  const slots = (action: 'add' | 'remove' | 'reset') => u && extra.open((close) => {
+    const titles = { add: 'Add job post slots', remove: 'Remove job post slots', reset: 'Reset used job posts' };
+    let amount = 1;
+    return (
+      <ConfirmModal title={titles[action]} confirmLabel={titles[action]} danger={action === 'remove'} reason reasonOptional
+        onClose={close}
+        onConfirm={async (reason) => {
+          await api('POST', `/users/${u.id}/job-posts`, { action, amount: action === 'reset' ? undefined : amount, reason: reason || undefined });
+          toast.ok(titles[action], `${u.email} · recorded in Activity Logs.`);
+          reload();
+        }}
+        text={action === 'reset'
+          ? <>Give <b>{u.email}</b> its used job posts back: only publications from now on count against the limit. Nothing is deleted.</>
+          : <>
+              <span>{action === 'add' ? 'Extra slots on top of the plan for' : 'Fewer extra slots for'} <b>{u.email}</b> (all its business profiles share them).</span>
+              <label className="field" style={{ marginTop: 12, display: 'block' }}>
+                <span>Slots</span>
+                <input type="number" min={1} max={100} defaultValue={1} onChange={(e) => { amount = Math.max(1, Math.min(100, Number(e.target.value) || 1)); }} />
+              </label>
+            </>} />
+    );
+  });
   // A message from the kolaba team in the app's Notifications: the whole account (once, on all its profiles) or one profile.
   const message = (target: { scope: 'account'; id: string; name: string } | { scope: 'profile'; id: string; name: string }) =>
     extra.open((close) => <SendNotification target={target} onClose={close} onSent={reload} />);
@@ -210,6 +233,13 @@ export function UserPage({ id }: { id: string }) {
                 <div><dt>Published jobs</dt><dd>{fmtNum(u.counts.jobs)}{u.counts.jobs > 0 && <> · <a href={href(`/jobs?owner=${u.id}`)}>View</a></>}</dd></div>
                 <div><dt>Uploaded media</dt><dd>{fmtNum(u.counts.media)}{u.counts.media > 0 && <> · <a href={href(`/media?owner=${u.id}`)}>View</a></>}</dd></div>
                 <div><dt>Active app sessions</dt><dd>{fmtNum(u.counts.sessions)}</dd></div>
+                {u.jobPosts && <div className="facts__wide"><dt>Job post slots (30 days)</dt><dd>
+                  {u.jobPosts.unlimited ? 'Unlimited (PRO)' : `${fmtNum(u.jobPosts.used)} of ${fmtNum(u.jobPosts.limit ?? 0)} used`}
+                  {u.jobPosts.bonus > 0 && ` · +${u.jobPosts.bonus} extra`}
+                  {' '}<Button small onClick={() => slots('add')}>Add slots</Button>
+                  {u.jobPosts.bonus > 0 && <> <Button small variant="ghost" onClick={() => slots('remove')}>Remove slots</Button></>}
+                  {u.jobPosts.used > 0 && <> <Button small variant="ghost" onClick={() => slots('reset')}>Reset used</Button></>}
+                </dd></div>}
                 {u.status === 'blocked' && <div className="facts__wide"><dt>{u.bannedAt ? 'Banned permanently' : 'Blocked'}</dt><dd>{fmtDateTime(u.blockedAt)} — {u.blockedReason}</dd></div>}
                 {u.restrictedUntil && <div className="facts__wide"><dt>Restricted</dt><dd>Until {fmtDateTime(u.restrictedUntil)}{u.restrictionReason ? ` — ${u.restrictionReason}` : ''}</dd></div>}
                 {u.status === 'deleted' && <div className="facts__wide"><dt>Deleted</dt><dd>{fmtDateTime(u.deletedAt)} — {u.deletedReason}</dd></div>}

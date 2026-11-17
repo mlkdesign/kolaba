@@ -100,6 +100,9 @@ export interface UserDetail extends UserRow {
   emailVerifiedAt: number | null; emailVerification: string | null; blockedAt: number | null; deletedAt: number | null;
   deletedReason: string | null; counts: { jobs: number; media: number; sessions: number };
   bannedAt: number | null; restrictedUntil: number | null; restrictionReason: string | null;
+  /** FEATURE 130: the account's job-post slots (null without a business profile). */
+  jobPosts: { limit: number | null; used: number; remaining: number | null; unlimited: boolean; bonus: number;
+              resetsAt: number | null; countedSince: number | null } | null;
   logs: { id: number; admin_email: string; action: string; result: string; reason: string | null; created_at: number }[];
 }
 export interface JobRow {

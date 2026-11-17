@@ -1,7 +1,7 @@
 // Admin panel API (/v1/admin/*). A separate auth system: admins + admin_sessions (never users / sessions), short
 // sessions (8 h absolute, 60 min idle), bearer token kept only in the admin tab's memory. Every change is written to
 // admin_logs. All SQL is parameterised; every body is validated with zod; request bodies are capped at 16 KB.
-import { DEFAULT_PLAN_CONFIG, loadPlanConfig, validPlanConfig } from '../lib/entitlements';
+import { DEFAULT_PLAN_CONFIG, jobPostsUsage, loadPlanConfig, validPlanConfig } from '../lib/entitlements';
 import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
@@ -311,7 +311,12 @@ admin.get('/users/:id', async (c) => {
         WHERE entity_id = ? OR entity_id IN (${marks}) ORDER BY created_at DESC LIMIT 10`).bind(id, ...ids).all(),
   ]);
   const subByProfile = new Map(subs.results.map((s) => [s.profile_id, s]));
+  // FEATURE 130: the account's job-post slots (shared by all its business profiles) — only when it has a business.
+  const business = ps.find((p) => p.type === 'business');
+  const slots = business ? await jobPostsUsage(c.env, { id: business.id, type: 'business', ownerUserId: id }) : null;
   return c.json({
+    jobPosts: slots && { limit: slots.limit, used: slots.used, remaining: slots.remaining, unlimited: slots.unlimited,
+                         bonus: slots.bonus ?? 0, resetsAt: slots.resetsAt ?? null, countedSince: slots.periodStart ?? null },
     id: u!.id, email: u!.email, status: userStatus(u!.status), isDemo: u!.is_demo === 1, createdAt: u!.created_at,
     emailVerifiedAt: u!.email_verified_at, emailVerification: u!.email_verification, blockedReason: u!.blocked_reason,
     blockedAt: u!.blocked_at, deletedAt: u!.deleted_at, deletedReason: u!.deleted_reason, accountType: accountType(ps),
@@ -973,7 +978,7 @@ async function notifyContentDecision(env: Env, type: string, id: string, removed
 /** FIX 128: a review removed by moderation takes its attachments with it — the links go, and each file nothing else
  *  uses (another review, a message, a job, a collection, a profile) is deleted from storage. The review row stays
  *  (removed: out of the profile and its rating), and the decision is in the audit log with the report. */
-async function purgeReviewMedia(env: Env, reviewId: string) {
+export async function purgeReviewMedia(env: Env, reviewId: string) {
   const linked = await env.DB.prepare(`SELECT m.id, m.storage_key, m.poster_media_id FROM review_media rm JOIN media m ON m.id = rm.media_id
       WHERE rm.review_id = ?`).bind(reviewId).all<{ id: string; storage_key: string | null; poster_media_id: string | null }>();
   await env.DB.prepare(`DELETE FROM review_media WHERE review_id = ?`).bind(reviewId).run();
@@ -1127,6 +1132,31 @@ admin.post('/reports/:id/action', async (c) => {
 });
 
 // POST /v1/admin/users/:id/sanction — the same sanctions from a user's page (no report).
+// POST /admin/users/:id/job-posts {action: 'add' | 'remove' | 'reset', amount?, reason?} — FEATURE 130: more job-post
+// slots for a business account (on top of its plan), fewer, or the used ones back (only later publications count).
+admin.post('/users/:id/job-posts', async (c) => {
+  const id = c.req.param('id');
+  const body = z.object({ action: z.enum(['add', 'remove', 'reset']), amount: z.number().int().min(1).max(100).optional(),
+                          reason: z.string().trim().max(300).optional() }).parse(await c.req.json());
+  const user = await c.env.DB.prepare(`SELECT id, job_posts_bonus FROM users WHERE id = ?`).bind(id)
+    .first<{ id: string; job_posts_bonus: number }>();
+  if (!user) fail(404, 'user_not_found');
+  const hasBusiness = await c.env.DB.prepare(`SELECT 1 AS ok FROM profiles WHERE owner_user_id = ? AND type = 'business' AND status <> 'deleted'`)
+    .bind(id).first();
+  if (!hasBusiness) fail(422, 'no_business_profile');
+  const amount = body.amount ?? 1;
+  if (body.action === 'reset') {
+    await c.env.DB.prepare(`UPDATE users SET job_posts_reset_at = ? WHERE id = ?`).bind(now(), id).run();
+  } else {
+    const bonus = Math.max(0, (user!.job_posts_bonus ?? 0) + (body.action === 'add' ? amount : -amount));
+    await c.env.DB.prepare(`UPDATE users SET job_posts_bonus = ? WHERE id = ?`).bind(bonus, id).run();
+  }
+  const action = body.action === 'reset' ? 'job_posts.reset' : body.action === 'add' ? 'job_posts.add_slots' : 'job_posts.remove_slots';
+  await log(c.env, { admin: current(c), action, entityType: 'user', entityId: id, reason: body.reason ?? null,
+                     detail: body.action === 'reset' ? undefined : { amount } });
+  return c.json({ status: 'done' });
+});
+
 admin.post('/users/:id/sanction', async (c) => {
   const id = c.req.param('id');
   const body = ReportAction.parse(await c.req.json());

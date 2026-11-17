@@ -6,6 +6,7 @@ import type { AppEnv, Env } from '../env';
 import { actingProfile, clientIP, rateLimit, requireAuth, requireProfile } from '../lib/auth';
 import { isPro, loadCard, loadCards, mediaColumns, mediaJSON, type MediaRow, notify, ownerOf } from '../lib/cards';
 import { signedMediaURL } from './media';
+import { purgeReviewMedia } from './admin';
 import { clampLimit, fail, newId, newToken, now, pairKey, sha256Hex } from '../lib/util';
 
 const reviews = new Hono<AppEnv>();
@@ -163,8 +164,16 @@ reviews.patch('/:id', requireAuth, requireProfile, async (c) => {
   return c.json({ id: review.id, reviewStatus: verdict.flagged ? 'flagged' : 'approved' });
 });
 
-// DELETE /v1/reviews/:id — FIX 128: a review is removed only through Report → moderation (admin), never directly.
-reviews.delete('/:id', requireAuth, requireProfile, async () => fail(403, 'delete_via_report'));
+// DELETE /v1/reviews/:id — FEATURE 130: the author deletes their own review (anyone else still only reports it): it's
+// hidden (out of the profile and its rating; a new review of the same profile can be written), its attachments go.
+reviews.delete('/:id', requireAuth, requireProfile, async (c) => {
+  const profile = actingProfile(c);
+  await rateLimit(c, 'RL_WRITE', `review:${profile.ownerUserId}`);
+  const review = await ownReview(c.env, c.req.param('id'), profile.ownerUserId);
+  await c.env.DB.prepare(`UPDATE reviews SET status = 'hidden' WHERE id = ?`).bind(review.id).run();
+  await purgeReviewMedia(c.env, review.id);
+  return c.json({ ok: true });
+});
 
 // POST /v1/reviews/requests {contactProfileId} — idempotent: a repeated tap returns the waiting request.
 reviews.post('/requests', requireAuth, requireProfile, async (c) => {

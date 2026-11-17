@@ -116,10 +116,11 @@ await test('Business PRO: unlimited', async () => {
 await test('a creator can\'t create a job', async () => {
   eq((await call(pro, 'POST', '/v1/jobs', jobBody())).status, 403, 'creator');
 });
-await test('validation: description required, 2 languages, positive price, 100-char title', async () => {
+await test('validation: description required, any number of languages (≤ 50), positive price, 100-char title', async () => {
   const bad = async (b) => (await call(business, 'POST', '/v1/jobs', jobBody(b))).status;
   eq(await bad({ description: '   ' }), 400, 'description');
-  eq(await bad({ languages: ['en', 'tr', 'uk'] }), 400, 'languages');
+  eq(await bad({ languages: ['en', 'tr', 'uk', 'de', 'fr'] }), 201, 'five languages');
+  eq(await bad({ languages: Array.from({ length: 51 }, () => 'en') }), 400, 'over 50');
   eq(await bad({ compensationType: 'fixed', budgetMin: 0, currency: 'USD' }), 400, 'price 0');
   eq(await bad({ compensationType: 'fixed', budgetMin: -5, currency: 'USD' }), 400, 'negative');
   eq(await bad({ title: 'x'.repeat(101) }), 400, 'title');

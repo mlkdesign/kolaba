@@ -24,8 +24,8 @@ const JobBody = z.object({
    *  country / city. Empty or left out: the single place above (or worldwide). */
   places: z.array(z.object({ countryCode: z.string().toUpperCase().regex(/^[A-Z]{2}$/),
                              city: z.string().trim().min(1).max(60).nullable().optional() })).max(5).optional(),
-  // FEATURE 129: at most two preferred languages (none: any language).
-  languages: z.array(z.string().regex(/^[a-z]{2,3}$/)).max(2).default([]),
+  // FEATURE 130: any number of preferred languages (none: any language) — up to 50.
+  languages: z.array(z.string().regex(/^[a-z]{2,3}$/)).max(50).default([]),
   compensationType: z.enum(['not_selected', 'barter', 'fixed', 'range']).default('not_selected'),
   budgetMin: z.number().nonnegative().max(10_000_000).nullable().optional(),
   budgetMax: z.number().nonnegative().max(10_000_000).nullable().optional(),

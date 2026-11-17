@@ -77,11 +77,13 @@ await test('the author edits: scores and text replaced, one review', async () =>
   eq(list.json.items[0].comment, 'Updated after the second job.', 'text');
   eq(list.json.items[0].quality, 3, 'quality');
 });
-await test('FIX 128: nobody deletes a review directly (only Report → moderation); it stays', async () => {
+await test('FEATURE 130: only the author deletes their review — then it is off the profile', async () => {
+  const other = await call(b.as(b.business), 'DELETE', `/v1/reviews/${reviewId}`);
+  eq(other.status, 403, other.text);
   const r = await call(a.as(a.creator), 'DELETE', `/v1/reviews/${reviewId}`);
-  eq(r.json?.error?.code, 'delete_via_report', r.text);
+  eq(r.status, 200, r.text);
   const list = await call(null, 'GET', `/v1/reviews?profileId=${b.business}`);
-  eq(list.json.items.length, 1, 'still one review');
+  eq(list.json.items.length, 0, 'no reviews left');
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

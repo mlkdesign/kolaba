@@ -176,8 +176,8 @@ await test('PRO lost: text and rating stay, media hidden; PRO back: media again'
   sql(`UPDATE subscriptions SET status = 'active' WHERE profile_id = '${pro.profileId}'`);
   review = await reviewOf(pro); eq(review.media.length, 3, 'back');
 });
-await test('the author can\'t delete a review directly', async () => {
-  const r = await call(business, 'DELETE', `/v1/reviews/${reviewId}`);
+await test('FEATURE 130: only the author may delete a review — the person it is about can\'t', async () => {
+  const r = await call(pro, 'DELETE', `/v1/reviews/${reviewId}`);
   eq(r.status, 403, r.text);
 });
 await test('a portfolio video deleted never touches review media', async () => {
