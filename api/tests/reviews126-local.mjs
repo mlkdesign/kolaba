@@ -67,7 +67,7 @@ await test('someone else cannot edit or delete it', async () => {
   const e = await call(b.as(b.creator), 'PATCH', `/v1/reviews/${reviewId}`, { quality: 1, speed: 1, contact: 1, comment: 'x' });
   eq(e.json?.error?.code, 'not_your_review', e.text);
   const d = await call(b.as(b.creator), 'DELETE', `/v1/reviews/${reviewId}`);
-  eq(d.json?.error?.code, 'not_your_review', d.text);
+  eq(d.status, 403, d.text);
 });
 await test('the author edits: scores and text replaced, one review', async () => {
   const r = await call(a.as(a.creator), 'PATCH', `/v1/reviews/${reviewId}`, { quality: 3, speed: 3, contact: 4, comment: 'Updated after the second job.' });
@@ -77,16 +77,13 @@ await test('the author edits: scores and text replaced, one review', async () =>
   eq(list.json.items[0].comment, 'Updated after the second job.', 'text');
   eq(list.json.items[0].quality, 3, 'quality');
 });
-await test('the author deletes: gone from the profile, a new one is possible', async () => {
+await test('FEATURE 130: only the author deletes their review — then it is off the profile', async () => {
+  const other = await call(b.as(b.business), 'DELETE', `/v1/reviews/${reviewId}`);
+  eq(other.status, 403, other.text);
   const r = await call(a.as(a.creator), 'DELETE', `/v1/reviews/${reviewId}`);
   eq(r.status, 200, r.text);
   const list = await call(null, 'GET', `/v1/reviews?profileId=${b.business}`);
-  eq(list.json.items.length, 0, 'no reviews');
-  eq((await call(a.as(a.creator), 'POST', '/v1/reviews', body(b.business))).status, 201, 'reviewed again');
-});
-await test('a deleted review cannot be edited', async () => {
-  const r = await call(a.as(a.creator), 'PATCH', `/v1/reviews/${reviewId}`, { quality: 5, speed: 5, contact: 5, comment: 'x' });
-  eq(r.json?.error?.code, 'review_not_found', r.text);
+  eq(list.json.items.length, 0, 'no reviews left');
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

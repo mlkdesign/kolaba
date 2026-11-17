@@ -6,11 +6,24 @@ import type { AppEnv, Env } from '../env';
 import { actingProfile, currentUser, requireAuth, requireProfile } from '../lib/auth';
 import { fail, newId, now } from '../lib/util';
 import { canTestPro } from './auth';
+import { entitlementsSnapshot } from '../lib/entitlements';
 import { monetizationEnabled } from '../lib/moderation';
 import { verifyPassword } from '../lib/password';
+import { mediaColumns, mediaJSON, type MediaRow } from '../lib/cards';
+import { visibleMediaSQL } from '../lib/moderation';
 
 const me = new Hono<AppEnv>();
 me.use('*', requireAuth);
+
+// GET /v1/me/liked-media — FEATURE 130: Settings → Liked media: the videos this profile liked, the latest like first
+// (only ones still public and approved).
+me.get('/liked-media', requireProfile, async (c) => {
+  const profile = actingProfile(c);
+  const rows = await c.env.DB.prepare(`SELECT ${mediaColumns} FROM likes l JOIN media m ON m.id = l.media_id
+      WHERE l.profile_id = ? AND m.status = 'ready' AND m.is_public = 1 AND ${visibleMediaSQL('m')}
+      ORDER BY l.created_at DESC LIMIT 200`).bind(profile.id).all<MediaRow>();
+  return c.json({ items: rows.results.map((m) => mediaJSON(c.env, m)) });
+});
 
 // The iOS switches (SettingsNotificationsPage): stored per account.
 // Categories (Notifications ТЗ §7): Jobs & Apply (newApplications, projectUpdates = saved jobs), Contacts
@@ -83,6 +96,14 @@ me.put('/pro-test', requireProfile, async (c) => {
   return c.json({ pro });
 });
 
+// GET /v1/me/entitlements — the acting profile's plan, its limits and what it has used (Entitlements & Usage Limits):
+// portfolio videos (creator profile), job posts (the account's, shared by all its business profiles), collections,
+// video length. The app reads this; the writes check the same rules themselves.
+me.get('/entitlements', requireProfile, async (c) => {
+  c.header('Cache-Control', 'no-store');
+  return c.json(await entitlementsSnapshot(c.env, actingProfile(c)));
+});
+
 /** Everything an account owns, removed for real. Shared things: a conversation stays for the other side (this
  *  account's messages go with its profiles); reviews it wrote and received go; jobs go with their applications. R2
  *  files are deleted after the rows; a file that fails is reported, never blocks the deletion. */
@@ -129,6 +150,7 @@ export async function deleteAccount(env: Env, userId: string): Promise<{ profile
     `DELETE FROM profile_social_accounts WHERE profile_id IN ${P}`,
     `DELETE FROM profile_settings WHERE profile_id IN ${P}`,
     `DELETE FROM subscriptions WHERE profile_id IN ${P}`,
+    `DELETE FROM usage_events WHERE user_id = ?1`,
     `DELETE FROM profiles WHERE owner_user_id = ?1`,
     `DELETE FROM sessions WHERE user_id = ?1`,
     `DELETE FROM device_tokens WHERE user_id = ?1`,

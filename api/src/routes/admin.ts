@@ -1,6 +1,7 @@
 // Admin panel API (/v1/admin/*). A separate auth system: admins + admin_sessions (never users / sessions), short
 // sessions (8 h absolute, 60 min idle), bearer token kept only in the admin tab's memory. Every change is written to
 // admin_logs. All SQL is parameterised; every body is validated with zod; request bodies are capped at 16 KB.
+import { DEFAULT_PLAN_CONFIG, jobPostsUsage, loadPlanConfig, validPlanConfig } from '../lib/entitlements';
 import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
@@ -207,6 +208,55 @@ admin.get('/dashboard', async (c) => {
   });
 });
 
+// ─── storage ───
+
+/** What the stored files are, by their R2 key: `u/<profile>/<purpose>/…` (media), `files/…` (chat files), `voice/…`. */
+function storageGroup(key: string): string {
+  if (key.startsWith('files/') || key.startsWith('voice/')) return 'chat';
+  const purpose = key.startsWith('u/') ? key.split('/')[2] : '';
+  switch (purpose) {
+    case 'portfolio': case 'intro': case 'collection': case 'poster': return 'portfolio';
+    case 'avatar': return 'profile';
+    case 'job': return 'jobs';
+    case 'application': return 'applications';
+    case 'chat': case 'review': return 'chat';
+    default: return 'other';
+  }
+}
+
+// GET /admin/storage — how much the project stores now: every file in R2 (listed, summed by kind) and the D1 database.
+admin.get('/storage', async (c) => {
+  const groups = new Map<string, { bytes: number; files: number }>();
+  let truncated = false;
+  if (c.env.MEDIA) {
+    let cursor: string | undefined;
+    for (let page = 0; ; page++) {
+      if (page >= 100) { truncated = true; break; }
+      const list = await c.env.MEDIA.list({ cursor, limit: 1000 });
+      for (const object of list.objects) {
+        const group = groups.get(storageGroup(object.key)) ?? { bytes: 0, files: 0 };
+        group.bytes += object.size; group.files += 1;
+        groups.set(storageGroup(object.key), group);
+      }
+      if (!list.truncated) break;
+      cursor = list.cursor;
+    }
+  }
+  const probe = await c.env.DB.prepare('SELECT 1').run();
+  const databaseBytes = Number((probe.meta as { size_after?: number }).size_after ?? 0);
+  const order = ['portfolio', 'profile', 'jobs', 'applications', 'chat', 'other'];
+  const items = order.filter((k) => groups.has(k)).map((k) => ({ key: k, ...groups.get(k)! }));
+  const filesBytes = items.reduce((sum, g) => sum + g.bytes, 0);
+  const limitGb = Number(c.env.STORAGE_LIMIT_GB ?? 10);
+  return c.json({
+    files: { bytes: filesBytes, count: items.reduce((sum, g) => sum + g.files, 0), groups: items, available: Boolean(c.env.MEDIA) },
+    database: { bytes: databaseBytes },
+    limitBytes: (Number.isFinite(limitGb) && limitGb > 0 ? limitGb : 10) * 1024 ** 3,
+    truncated,
+    measuredAt: now(),
+  });
+});
+
 // ─── users ───
 
 const userStatus = (s: string) => (s === 'suspended' ? 'blocked' : s);
@@ -254,9 +304,9 @@ admin.get('/users', async (c) => {
   const params: unknown[] = [];
   const text = q(c);
   if (text) {
-    where.push(`(lower(u.email) LIKE ? ESCAPE '\\' OR u.id = ? OR EXISTS (SELECT 1 FROM profiles p WHERE p.owner_user_id = u.id
+    where.push(`(lower(u.email) LIKE ? ESCAPE '\\' OR lower(COALESCE(u.released_email, '')) LIKE ? ESCAPE '\\' OR u.id = ? OR EXISTS (SELECT 1 FROM profiles p WHERE p.owner_user_id = u.id
       AND (lower(p.display_name) LIKE ? ESCAPE '\\' OR lower(p.username) LIKE ? ESCAPE '\\' OR p.id = ?)))`);
-    params.push(like(text), text, like(text), like(text.replace(/^@/, '')), text);
+    params.push(like(text), like(text), text, like(text), like(text.replace(/^@/, '')), text);
   }
   const hasType = (type: string) => `EXISTS (SELECT 1 FROM profiles p WHERE p.owner_user_id = u.id AND p.type = '${type}' AND p.status <> 'deleted')`;
   const type = c.req.query('type');
@@ -275,16 +325,16 @@ admin.get('/users', async (c) => {
 
   const [total, rows] = await Promise.all([
     c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users u WHERE ${where.join(' AND ')}`).bind(...params).first<{ n: number }>(),
-    c.env.DB.prepare(`SELECT u.id, u.email, u.status, u.is_demo, u.created_at, u.blocked_reason FROM users u
+    c.env.DB.prepare(`SELECT u.id, u.email, u.released_email, u.status, u.is_demo, u.created_at, u.blocked_reason FROM users u
         WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...params, limit, offset)
-      .all<{ id: string; email: string; status: string; is_demo: number; created_at: number; blocked_reason: string | null }>(),
+      .all<{ id: string; email: string; released_email: string | null; status: string; is_demo: number; created_at: number; blocked_reason: string | null }>(),
   ]);
   const profiles = await profilesFor(c.env, rows.results.map((r) => r.id));
   return c.json({
     total: total?.n ?? 0, page: pageNo, limit,
     items: rows.results.map((u) => {
       const ps = profiles.get(u.id) ?? [];
-      return { id: u.id, email: u.email, status: userStatus(u.status), isDemo: u.is_demo === 1, createdAt: u.created_at,
+      return { id: u.id, email: u.released_email ?? u.email, emailReused: Boolean(u.released_email), status: userStatus(u.status), isDemo: u.is_demo === 1, createdAt: u.created_at,
                blockedReason: u.blocked_reason, accountType: accountType(ps), isPro: ps.some((p) => p.isPro), profiles: ps };
     }),
   });
@@ -292,7 +342,7 @@ admin.get('/users', async (c) => {
 
 admin.get('/users/:id', async (c) => {
   const id = c.req.param('id');
-  const u = await c.env.DB.prepare(`SELECT id, email, status, is_demo, created_at, updated_at, email_verified_at, email_verification,
+  const u = await c.env.DB.prepare(`SELECT id, email, released_email, status, is_demo, created_at, updated_at, email_verified_at, email_verification,
       blocked_reason, blocked_at, deleted_at, deleted_reason, banned_at, restricted_until, restriction_reason FROM users WHERE id = ?`).bind(id).first<Record<string, any>>();
   if (!u) fail(404, 'user_not_found');
   const ps = (await profilesFor(c.env, [id])).get(id) ?? [];
@@ -310,8 +360,14 @@ admin.get('/users/:id', async (c) => {
         WHERE entity_id = ? OR entity_id IN (${marks}) ORDER BY created_at DESC LIMIT 10`).bind(id, ...ids).all(),
   ]);
   const subByProfile = new Map(subs.results.map((s) => [s.profile_id, s]));
+  // FEATURE 130: the account's job-post slots (shared by all its business profiles) — only when it has a business.
+  const business = ps.find((p) => p.type === 'business');
+  const slots = business ? await jobPostsUsage(c.env, { id: business.id, type: 'business', ownerUserId: id }) : null;
   return c.json({
-    id: u!.id, email: u!.email, status: userStatus(u!.status), isDemo: u!.is_demo === 1, createdAt: u!.created_at,
+    jobPosts: slots && { limit: slots.limit, used: slots.used, remaining: slots.remaining, unlimited: slots.unlimited,
+                         bonus: slots.bonus ?? 0, resetsAt: slots.resetsAt ?? null, countedSince: slots.periodStart ?? null },
+    // FEATURE 135: a deleted account whose address a new account took: its own e-mail stays visible here.
+    id: u!.id, email: u!.released_email ?? u!.email, emailReused: Boolean(u!.released_email), status: userStatus(u!.status), isDemo: u!.is_demo === 1, createdAt: u!.created_at,
     emailVerifiedAt: u!.email_verified_at, emailVerification: u!.email_verification, blockedReason: u!.blocked_reason,
     blockedAt: u!.blocked_at, deletedAt: u!.deleted_at, deletedReason: u!.deleted_reason, accountType: accountType(ps),
     bannedAt: u!.banned_at ?? null,
@@ -400,6 +456,13 @@ admin.patch('/users/:id/status', async (c) => {
     ]);
   } else {
     if (u!.status !== 'deleted') fail(409, 'invalid_transition');
+    // FEATURE 135: its e-mail was taken by a new account meanwhile — the old one can't come back under it.
+    const released = await db.prepare(`SELECT released_email FROM users WHERE id = ?`).bind(id).first<{ released_email: string | null }>();
+    if (released?.released_email) {
+      const taken = await db.prepare(`SELECT 1 AS ok FROM users WHERE email = ? AND id <> ?`).bind(released.released_email, id).first();
+      if (taken) fail(409, 'email_reused', 'A new account uses this e-mail now.');
+      await db.prepare(`UPDATE users SET email = ?, released_email = NULL WHERE id = ?`).bind(released.released_email, id).run();
+    }
     await db.batch([
       db.prepare(`UPDATE users SET status = 'active', deleted_at = NULL, deleted_reason = NULL, blocked_reason = NULL, blocked_at = NULL,
           updated_at = ? WHERE id = ?`).bind(t, id),
@@ -539,6 +602,28 @@ admin.patch('/profiles/:id/pro', async (c) => {
                                                   messageKey: 'pro_granted' },
                { push: { title, body: message }, dedupKey: `pro_granted:${grantId}`, targetType: 'profile', targetId: id });
   return c.json({ isPro: true, grantId, expiresAt, changed: true });
+});
+
+// ─── plan limits (Entitlements & Usage Limits) ───
+
+// GET /v1/admin/plan-config — the plans' limits in force (stored, or the defaults). null = unlimited.
+admin.get('/plan-config', async (c) => {
+  const row = await c.env.DB.prepare(`SELECT updated_at, updated_by FROM plan_config WHERE id = 'current'`)
+    .first<{ updated_at: number; updated_by: string | null }>();
+  return c.json({ config: await loadPlanConfig(c.env), defaults: DEFAULT_PLAN_CONFIG, updatedAt: row?.updated_at ?? null,
+                  updatedBy: row?.updated_by ?? null });
+});
+
+// PUT /v1/admin/plan-config {config, reason} — takes effect on the next request; no app or Worker release needed.
+admin.put('/plan-config', async (c) => {
+  const a = c.get('admin')!;
+  const body = z.object({ config: z.unknown(), reason: Reason }).parse(await c.req.json());
+  const config = validPlanConfig(body.config);
+  await c.env.DB.prepare(`INSERT INTO plan_config (id, config, updated_at, updated_by) VALUES ('current', ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at, updated_by = excluded.updated_by`)
+    .bind(JSON.stringify(config), now(), a.email).run();
+  await audit(c, 'plan_config.update', 'plan_config', 'current', body.reason, { config });
+  return c.json({ config });
 });
 
 // ─── jobs ───
@@ -947,6 +1032,25 @@ async function notifyContentDecision(env: Env, type: string, id: string, removed
                { dedupKey: `${notice}:${type}:${id}:${now()}`, targetType: type === 'post' ? 'job' : type, targetId: id });
 }
 
+/** FIX 128: a review removed by moderation takes its attachments with it — the links go, and each file nothing else
+ *  uses (another review, a message, a job, a collection, a profile) is deleted from storage. The review row stays
+ *  (removed: out of the profile and its rating), and the decision is in the audit log with the report. */
+export async function purgeReviewMedia(env: Env, reviewId: string) {
+  const linked = await env.DB.prepare(`SELECT m.id, m.storage_key, m.poster_media_id FROM review_media rm JOIN media m ON m.id = rm.media_id
+      WHERE rm.review_id = ?`).bind(reviewId).all<{ id: string; storage_key: string | null; poster_media_id: string | null }>();
+  await env.DB.prepare(`DELETE FROM review_media WHERE review_id = ?`).bind(reviewId).run();
+  for (const m of linked.results) {
+    const used = await env.DB.prepare(`SELECT
+        EXISTS (SELECT 1 FROM review_media WHERE media_id = ?1) OR EXISTS (SELECT 1 FROM message_attachments WHERE media_id = ?1)
+        OR EXISTS (SELECT 1 FROM job_media WHERE media_id = ?1)
+        OR EXISTS (SELECT 1 FROM collection_items WHERE media_id = ?1) OR EXISTS (SELECT 1 FROM collections WHERE cover_media_id = ?1)
+        OR EXISTS (SELECT 1 FROM profiles WHERE avatar_media_id = ?1 OR intro_video_media_id = ?1) AS used`).bind(m.id).first<{ used: number }>();
+    if (used?.used) continue;
+    await env.DB.prepare(`UPDATE media SET status = 'deleted', deleted_at = ? WHERE id = ?`).bind(now(), m.id).run();
+    if (m.storage_key && env.MEDIA) await env.MEDIA.delete(m.storage_key).catch(() => undefined);
+  }
+}
+
 async function setContentRemoved(env: Env, type: string, id: string, removed: boolean, reason: string | null) {
   await notifyContentDecision(env, type, id, removed, reason);
   const t = now();
@@ -958,7 +1062,9 @@ async function setContentRemoved(env: Env, type: string, id: string, removed: bo
       await env.DB.prepare(`UPDATE media SET review_status = ?, review_reason = ?, reviewed_at = ? WHERE id = ?`)
         .bind(removed ? 'removed' : 'approved', removed ? reason : null, t, id).run(); return;
     case 'review':
-      await env.DB.prepare(`UPDATE reviews SET review_status = ?, review_reason = ? WHERE id = ?`).bind(removed ? 'removed' : 'approved', removed ? reason : null, id).run(); return;
+      await env.DB.prepare(`UPDATE reviews SET review_status = ?, review_reason = ? WHERE id = ?`).bind(removed ? 'removed' : 'approved', removed ? reason : null, id).run();
+      if (removed) await purgeReviewMedia(env, id);
+      return;
     case 'message':
       await env.DB.prepare(`UPDATE messages SET deleted_at = ? WHERE id = ?`).bind(removed ? t : null, id).run(); return;
     case 'user':
@@ -1083,6 +1189,31 @@ admin.post('/reports/:id/action', async (c) => {
 });
 
 // POST /v1/admin/users/:id/sanction — the same sanctions from a user's page (no report).
+// POST /admin/users/:id/job-posts {action: 'add' | 'remove' | 'reset', amount?, reason?} — FEATURE 130: more job-post
+// slots for a business account (on top of its plan), fewer, or the used ones back (only later publications count).
+admin.post('/users/:id/job-posts', async (c) => {
+  const id = c.req.param('id');
+  const body = z.object({ action: z.enum(['add', 'remove', 'reset']), amount: z.number().int().min(1).max(100).optional(),
+                          reason: z.string().trim().max(300).optional() }).parse(await c.req.json());
+  const user = await c.env.DB.prepare(`SELECT id, job_posts_bonus FROM users WHERE id = ?`).bind(id)
+    .first<{ id: string; job_posts_bonus: number }>();
+  if (!user) fail(404, 'user_not_found');
+  const hasBusiness = await c.env.DB.prepare(`SELECT 1 AS ok FROM profiles WHERE owner_user_id = ? AND type = 'business' AND status <> 'deleted'`)
+    .bind(id).first();
+  if (!hasBusiness) fail(422, 'no_business_profile');
+  const amount = body.amount ?? 1;
+  if (body.action === 'reset') {
+    await c.env.DB.prepare(`UPDATE users SET job_posts_reset_at = ? WHERE id = ?`).bind(now(), id).run();
+  } else {
+    const bonus = Math.max(0, (user!.job_posts_bonus ?? 0) + (body.action === 'add' ? amount : -amount));
+    await c.env.DB.prepare(`UPDATE users SET job_posts_bonus = ? WHERE id = ?`).bind(bonus, id).run();
+  }
+  const action = body.action === 'reset' ? 'job_posts.reset' : body.action === 'add' ? 'job_posts.add_slots' : 'job_posts.remove_slots';
+  await log(c.env, { admin: current(c), action, entityType: 'user', entityId: id, reason: body.reason ?? null,
+                     detail: body.action === 'reset' ? undefined : { amount } });
+  return c.json({ status: 'done' });
+});
+
 admin.post('/users/:id/sanction', async (c) => {
   const id = c.req.param('id');
   const body = ReportAction.parse(await c.req.json());

@@ -6,6 +6,8 @@ import type { AppEnv, Env } from '../env';
 import { actingProfile, currentUser, rateLimit, requireAuth, requireProfile } from '../lib/auth';
 import { isPro, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/cards';
 import { fail, newId, now, sha256Hex } from '../lib/util';
+import { limitReached, PENDING_UPLOAD_TTL, PORTFOLIO_VIDEOS_COUNT_SQL, portfolioVideosUsage } from '../lib/entitlements';
+import { mp4DurationSeconds } from '../lib/mp4';
 import { checkImage, PUBLIC_REVIEW_PURPOSES } from '../lib/moderation';
 
 const media = new Hono<AppEnv>();
@@ -13,15 +15,18 @@ const media = new Hono<AppEnv>();
 const PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
 const VIDEO_TYPES = ['video/mp4', 'video/quicktime'];
 /** How many of a purpose a profile may keep (the iOS limits). */
+/** Portfolio videos are not here: their limit is the plan's (src/lib/entitlements.ts). */
 const COUNT_LIMITS: Record<string, Record<string, number>> = {
-  portfolio: { photo: 30, video: 12 },
+  portfolio: { photo: 30 },
   avatar: { photo: 10 },
   intro: { video: 1 },
 };
 const PRO_PURPOSES = new Set(['intro', 'collection', 'application']);
 
 const UploadRequest = z.object({
-  purpose: z.enum(['avatar', 'portfolio', 'intro', 'collection', 'job', 'application', 'chat', 'poster']),
+  // FIX 128: 'review' — a business's attachment to a review of a creator; stored as a private file (purpose 'chat':
+  // never public, served only through short-lived signed URLs), linked to its review in review_media.
+  purpose: z.enum(['avatar', 'portfolio', 'intro', 'collection', 'job', 'application', 'chat', 'poster', 'review']),
   kind: z.enum(['photo', 'video']),
   mime: z.string().toLowerCase(),
   bytes: z.number().int().positive(),
@@ -49,7 +54,10 @@ media.post('/uploads', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c);
   await rateLimit(c, 'RL_WRITE', `upload:${profile.ownerUserId}`);
   if (!c.env.MEDIA) fail(503, 'storage_unavailable', 'File storage (R2) is not enabled yet.');
-  const body = UploadRequest.parse(await c.req.json());
+  const request = UploadRequest.parse(await c.req.json());
+  const keyPurpose = request.purpose;
+  if (request.purpose === 'review' && profile.type !== 'business') fail(403, 'business_profile_required');
+  const body = { ...request, purpose: request.purpose === 'review' ? 'chat' as const : request.purpose };
   const types = body.kind === 'photo' ? PHOTO_TYPES : VIDEO_TYPES;
   if (!types.includes(body.mime)) fail(415, 'invalid_mime_type');
   const maxBytes = Number(body.kind === 'photo' ? c.env.MAX_PHOTO_MB : c.env.MAX_VIDEO_MB) * 1024 * 1024;
@@ -65,26 +73,43 @@ media.post('/uploads', requireAuth, requireProfile, async (c) => {
         AND m.created_at > ? AND m.id IS NOT COALESCE(p.avatar_media_id, '')`).bind(profile.id, now() - 3_600_000).first<{ n: number }>();
     if ((others?.n ?? 0) >= 1) fail(409, 'media_limit_reached', 'A business profile has one photo.');
   }
+  // Abandoned pending uploads don't hold the quota for ever.
+  await c.env.DB.prepare(`UPDATE media SET status = 'failed' WHERE owner_profile_id = ? AND status = 'pending' AND created_at < ?`)
+    .bind(profile.id, now() - PENDING_UPLOAD_TTL).run();
+  // Creator portfolio videos (Entitlements): the plan's count and duration limits. The duration is declared here and
+  // checked again from the file itself when it arrives (PUT) — the client's word is never enough.
+  const portfolioVideo = body.purpose === 'portfolio' && body.kind === 'video';
+  const videoPlan = portfolioVideo ? await portfolioVideosUsage(c.env, profile) : null;
+  if (videoPlan) {
+    // No declared length (a client that couldn't read it): the file's own length decides when it arrives (PUT).
+    if (body.duration && videoPlan.maxDurationSeconds != null && body.duration > videoPlan.maxDurationSeconds + 0.5) {
+      fail(422, 'video_too_long', `Up to ${videoPlan.maxDurationSeconds} seconds per video.`);
+    }
+    if (!videoPlan.allowed) limitReached(videoPlan);
+  }
   const limit = body.purpose === 'avatar' && profile.type === 'business' ? 0 : COUNT_LIMITS[body.purpose]?.[body.kind];
   if (limit) {
     const used = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE owner_profile_id = ? AND purpose = ? AND kind = ?
         AND status IN ('pending', 'ready')`).bind(profile.id, body.purpose, body.kind).first<{ n: number }>();
     if ((used?.n ?? 0) >= limit) fail(409, 'media_limit_reached');
   }
-  // Abandoned pending uploads don't hold the quota for ever.
-  await c.env.DB.prepare(`UPDATE media SET status = 'failed' WHERE owner_profile_id = ? AND status = 'pending' AND created_at < ?`)
-    .bind(profile.id, now() - 3_600_000).run();
   const id = newId('med');
   const ext = body.mime.split('/')[1].replace('quicktime', 'mov').replace('jpeg', 'jpg');
-  const key = `u/${profile.id}/${body.purpose}/${id}.${ext}`;
-  await c.env.DB.prepare(`INSERT INTO media (id, owner_profile_id, kind, purpose, provider, storage_key, mime, bytes, width, height,
+  const key = `u/${profile.id}/${keyPurpose}/${id}.${ext}`;
+  // A portfolio video's place is taken atomically: the count (ready + recent pending uploads) and the insert are one
+  // statement, so parallel uploads can't go past the plan's limit (null: unlimited).
+  const videoLimit = videoPlan ? videoPlan.limit : null;
+  const created = await c.env.DB.prepare(`INSERT INTO media (id, owner_profile_id, kind, purpose, provider, storage_key, mime, bytes, width, height,
       duration, title, poster_media_id, status, is_public, review_status, created_at)
-      VALUES (?, ?, ?, ?, 'r2', ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
+      SELECT ?, ?, ?, ?, 'r2', ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?
+       WHERE ? = 0 OR ? IS NULL OR ${PORTFOLIO_VIDEOS_COUNT_SQL} < ?`)
     .bind(id, profile.id, body.kind, body.purpose, key, body.mime, body.bytes, body.width ?? null, body.height ?? null,
           body.duration ?? null, body.title ?? null, body.posterMediaId ?? null,
           ['chat', 'application'].includes(body.purpose) ? 0 : 1,
           // New public media waits for a moderator before anyone else sees it (App Review 1.2).
-          PUBLIC_REVIEW_PURPOSES.has(body.purpose) ? 'pending' : 'approved', now()).run();
+          PUBLIC_REVIEW_PURPOSES.has(body.purpose) ? 'pending' : 'approved', now(),
+          portfolioVideo ? 1 : 0, videoLimit, profile.id, now() - PENDING_UPLOAD_TTL, videoLimit).run();
+  if (!created.meta.changes) limitReached(await portfolioVideosUsage(c.env, profile));
   return c.json({ mediaId: id, uploadUrl: `${c.env.API_URL}/v1/media/uploads/${id}`, method: 'PUT', maxBytes }, 201);
 });
 
@@ -130,7 +155,23 @@ media.put('/uploads/:id', requireAuth, requireProfile, async (c) => {
     await c.env.DB.prepare(`UPDATE media SET status = 'failed' WHERE id = ?`).bind(row!.id).run();
     fail(422, 'upload_failed');
   }
-  await c.env.DB.prepare(`UPDATE media SET status = 'ready' WHERE id = ?`).bind(row!.id).run();
+  // A video's real length, read from the stored file (MP4 / QuickTime 'mvhd'): a portfolio video longer than the
+  // plan allows — or one whose length can't be read — is refused and removed; any other video is held to
+  // MAX_VIDEO_SECONDS. The declared duration is replaced by the measured one.
+  let duration = row!.duration ?? null;
+  if (row!.kind === 'video') {
+    const measured = await mp4DurationSeconds(c.env.MEDIA!, row!.storage_key, row!.bytes).catch(() => null);
+    const portfolio = row!.purpose === 'portfolio';
+    const max = portfolio ? (await portfolioVideosUsage(c.env, profile)).maxDurationSeconds : Number(c.env.MAX_VIDEO_SECONDS);
+    const tooLong = measured != null && max != null && measured > max + 0.5;
+    if (tooLong || (portfolio && measured == null)) {
+      await c.env.DB.prepare(`UPDATE media SET status = 'failed' WHERE id = ?`).bind(row!.id).run();
+      c.executionCtx.waitUntil(c.env.MEDIA!.delete(row!.storage_key));
+      fail(422, tooLong ? 'video_too_long' : 'video_unreadable', tooLong ? `Up to ${max} seconds per video.` : undefined);
+    }
+    if (measured != null) duration = Math.round(measured * 100) / 100;
+  }
+  await c.env.DB.prepare(`UPDATE media SET status = 'ready', duration = ? WHERE id = ?`).bind(duration, row!.id).run();
   // Optional automatic pre-check (only when configured): a likely-unsafe photo or video poster is marked 'flagged' so
   // moderators see it first. It never approves anything by itself.
   if (row!.kind === 'photo' && c.env.GOOGLE_VISION_API_KEY && ['pending', 'flagged'].includes(row!.review_status ?? '')) {
@@ -147,7 +188,7 @@ media.put('/uploads/:id', requireAuth, requireProfile, async (c) => {
         .bind(JSON.stringify({ vision: verdict.detail }), verdict.flagged ? 1 : 0, row!.id, target?.id ?? row!.id).run();
     })().catch(() => {}));
   }
-  return c.json(mediaJSON(c.env, { ...row!, status: 'ready' } as MediaRow));
+  return c.json(mediaJSON(c.env, { ...row!, status: 'ready', duration } as MediaRow));
 });
 
 async function signature(env: Env, id: string, expires: number) {

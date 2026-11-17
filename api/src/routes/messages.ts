@@ -133,6 +133,12 @@ export async function conversationList(env: Env, profileId: string, limit: numbe
       FROM conversation_participants cp JOIN conversations c ON c.id = cp.conversation_id
       LEFT JOIN conversation_read_state rs ON rs.conversation_id = c.id AND rs.profile_id = ?1
       WHERE cp.profile_id = ?1 AND cp.hidden_at IS NULL AND (c.last_message_id IS NOT NULL OR c.created_at > ?4)
+        -- FEATURE 131: a chat with someone blocked (either way) is hidden for both — kept, back once unblocked.
+        AND NOT EXISTS (SELECT 1 FROM conversation_participants o JOIN profiles op ON op.id = o.profile_id
+              JOIN profiles mine ON mine.id = ?1
+              JOIN blocks b ON (b.blocker_user_id = mine.owner_user_id AND b.blocked_user_id = op.owner_user_id)
+                            OR (b.blocker_user_id = op.owner_user_id AND b.blocked_user_id = mine.owner_user_id)
+             WHERE o.conversation_id = c.id AND o.profile_id <> ?1)
         AND (?2 IS NULL OR (COALESCE(c.last_message_at, c.created_at), c.id) < (?2, ?3))
       ORDER BY activity_at DESC, c.id DESC LIMIT ?5`)
     .bind(profileId, cursor?.t ?? null, cursor?.id ?? null, now() - 86_400_000, limit + 1).all<Record<string, any>>();

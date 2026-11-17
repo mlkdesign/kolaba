@@ -65,7 +65,7 @@ const job = (await call(business, 'POST', '/v1/jobs', { title: 'UGC for a villa'
 
 console.log('PRO Apply');
 let proApplication;
-await test('carries the 10 newest published videos, newest first', async () => {
+await test('shows the 10 newest published videos, newest first', async () => {
   const r = await call(pro, 'POST', `/v1/jobs/${job}/apply`, { message: 'Hi!' });
   eq(r.status, 201, r.text);
   proApplication = r.json.id;
@@ -77,19 +77,15 @@ await test('videos the client sends are ignored (no duplicates, nobody else\'s)'
   eq(r.status, 201, r.text);
   eq(r.json.media.map((m) => m.id), published.slice(0, 10), 'still the server\'s ten');
 });
-await test('the set stays as it was sent; a video deleted later leaves it', async () => {
-  video(pro, 'newer', 0);
-  sql(`UPDATE media SET status = 'deleted' WHERE id = '${published[0]}'`);
-  const list = await call(business, 'GET', `/v1/jobs/${job}/applications`);
-  const app = (list.json.items ?? list.json).find((a) => a.id === proApplication);
-  eq(app.media.map((m) => m.id), published.slice(1, 10), 'nine left, no new one');
-});
+// FIX 128: an application no longer keeps a set — tests/fix128-local.mjs checks the dynamic one.
 
 console.log('FREE Apply');
 await test('carries no videos', async () => {
   const r = await call(free, 'POST', `/v1/jobs/${job}/apply`, { message: 'Hi!' });
   eq(r.status, 201, r.text);
   eq(r.json.media.length, 0, 'media');
+  const list = await call(business, 'GET', `/v1/jobs/${job}/applications`);
+  eq((list.json.items ?? list.json).find((a) => a.id === r.json.id).media.length, 0, 'listed without videos');
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

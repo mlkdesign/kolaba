@@ -3,7 +3,7 @@ import { HTTPException } from 'hono/http-exception';
 /** An API refusal: HTTP status + a machine-readable code the web app maps to a message. */
 export class ApiError extends HTTPException {
   constructor(status: 400 | 401 | 403 | 404 | 409 | 410 | 413 | 415 | 422 | 429 | 500 | 503, readonly code: string,
-              message?: string) {
+              message?: string, readonly details?: Record<string, unknown>) {
     super(status, { message: message ?? code });
   }
 }

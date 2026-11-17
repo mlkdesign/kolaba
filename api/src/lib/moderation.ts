@@ -121,6 +121,17 @@ export async function blockedBetweenUsers(env: Env, a: string, b: string): Promi
   return Boolean(row);
 }
 
+/** FEATURE 131: how the viewer stands with another account — `blockedByMe` (the viewer blocked them: a bare card),
+ *  `blockedMe` (they blocked the viewer: the viewer can't see them at all — "not found"), or `none`. */
+export async function blockState(env: Env, viewer: string | null, other: string): Promise<'none' | 'blockedByMe' | 'blockedMe'> {
+  if (!viewer || viewer === other) return 'none';
+  const rows = await env.DB.prepare(`SELECT blocker_user_id FROM blocks WHERE (blocker_user_id = ?1 AND blocked_user_id = ?2)
+      OR (blocker_user_id = ?2 AND blocked_user_id = ?1)`).bind(viewer, other).all<{ blocker_user_id: string }>();
+  if (rows.results.some((r) => r.blocker_user_id === other)) return 'blockedMe';
+  if (rows.results.some((r) => r.blocker_user_id === viewer)) return 'blockedByMe';
+  return 'none';
+}
+
 /** Same, for two profiles (their owner accounts). */
 export async function blockedBetweenProfiles(env: Env, a: string, b: string): Promise<boolean> {
   const rows = await env.DB.prepare(`SELECT id, owner_user_id FROM profiles WHERE id IN (?, ?)`).bind(a, b)

@@ -1,5 +1,5 @@
 // Stock pictures for the demo content only (Unsplash, Unsplash License — free use, hotlinked from images.unsplash.com):
-// each demo business gets a themed logo picture (avatar) and its demo job a cover gallery; four demo creators who
+// each demo business gets a themed logo picture (avatar) and its demo jobs reference photos; four demo creators who
 // have no videos get a portrait. Writes SQL that touches rows with is_demo = 1 only, never replaces an avatar that
 // is set, and is idempotent (INSERT OR IGNORE). Usage: node seed/stock-images.mjs > seed/stock-images.sql
 import { readFileSync } from 'node:fs';
@@ -23,6 +23,7 @@ for (const line of readFileSync(new URL('./stock-images.txt', import.meta.url), 
   const owner = `p.display_name = ${q(name)} AND p.type = 'business'`;
   out.push(media(`med_stk_${logo}`, owner, 'avatar', url(logo, 480, 480), 480, 480, 0));
   out.push(`UPDATE profiles SET avatar_media_id = ${q(`med_stk_${logo}`)} WHERE display_name = ${q(name)} AND type = 'business' AND is_demo = 1 AND avatar_media_id IS NULL;`);
+  // FIX 128: a demo job's References (no Cover) — only for a job that has none of its own yet.
   covers.forEach((id, i) => {
     out.push(media(`med_stk_${id}`, owner, 'job', url(id, 740, 400), 740, 400, i));
     out.push(`INSERT OR IGNORE INTO job_media (job_id, media_id, position)

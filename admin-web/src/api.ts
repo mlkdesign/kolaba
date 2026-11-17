@@ -90,6 +90,8 @@ export interface AdminProfile extends Card {
 }
 export interface UserRow {
   id: string; email: string; status: 'active' | 'blocked' | 'deleted'; isDemo: boolean; createdAt: number; blockedReason: string | null;
+  /** FEATURE 135: deleted, and a new account registered with its e-mail since. */
+  emailReused?: boolean;
   accountType: 'creator' | 'business' | 'both' | 'none'; isPro: boolean; profiles: AdminProfile[];
 }
 export interface LogRow {
@@ -100,6 +102,9 @@ export interface UserDetail extends UserRow {
   emailVerifiedAt: number | null; emailVerification: string | null; blockedAt: number | null; deletedAt: number | null;
   deletedReason: string | null; counts: { jobs: number; media: number; sessions: number };
   bannedAt: number | null; restrictedUntil: number | null; restrictionReason: string | null;
+  /** FEATURE 130: the account's job-post slots (null without a business profile). */
+  jobPosts: { limit: number | null; used: number; remaining: number | null; unlimited: boolean; bonus: number;
+              resetsAt: number | null; countedSince: number | null } | null;
   logs: { id: number; admin_email: string; action: string; result: string; reason: string | null; created_at: number }[];
 }
 export interface JobRow {
@@ -128,6 +133,16 @@ export interface Dashboard {
   stats: { totalUsers: number; blockedUsers: number; creatorProfiles: number; businessProfiles: number; totalJobs: number;
            activeJobs: number; hiddenJobs: number; proAccounts: number };
   recent: { type: 'user.registered' | 'job.published'; id: string; title: string; subtitle: string | null; at: number }[];
+}
+
+/** GET /admin/storage — the project's stored files (R2, by kind) and its database (D1), against the plan's limit. */
+export interface StorageUsage {
+  files: { bytes: number; count: number; available: boolean;
+           groups: { key: 'portfolio' | 'profile' | 'jobs' | 'applications' | 'chat' | 'other'; bytes: number; files: number }[] };
+  database: { bytes: number };
+  limitBytes: number;
+  truncated: boolean;
+  measuredAt: number;
 }
 
 export function query(params: Record<string, string | number | undefined | null>): string {

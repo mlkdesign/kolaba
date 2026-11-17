@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, currentUser, rateLimit, requireAuth, requireProfile } from '../lib/auth';
 import { avatarJoin, avatarJoinOwner, card, cardColumns, type CardRow, isPro, loadCard, mediaColumns, mediaJSON, type MediaRow } from '../lib/cards';
-import { assertCanPost, autoReport, checkText, monetizationEnabled, notBlockedSQL, visibleMediaSQL } from '../lib/moderation';
+import { assertCanPost, autoReport, blockState, checkText, monetizationEnabled, notBlockedSQL, visibleMediaSQL } from '../lib/moderation';
 import { clampLimit, decodeCursor, encodeCursor, fail, newId, now, parseJSON } from '../lib/util';
 
 const profiles = new Hono<AppEnv>();
@@ -225,7 +225,22 @@ export async function profilePage(env: Env, id: string, viewerUserId: string | n
   id = p!.id; // an old /profile/<username> link: the profile's own id from here on
   const isOwner = p!.owner_user_id === viewerUserId;
   if (!isOwner && p!.status !== 'active') fail(404, 'profile_not_found');
+  // FEATURE 131: blocked — whoever was blocked never sees the profile ("not found"); the one who blocked sees a bare card
+  // (a placeholder for the photo, the name, the place, the description) and Unblock.
+  const block = isOwner ? 'none' : await blockState(env, viewerUserId, p!.owner_user_id);
+  if (block === 'blockedMe') fail(404, 'profile_not_found');
   const base = (await loadCard(env, id, isOwner))!;
+  if (block === 'blockedByMe') {
+    const showLocation = p!.show_location === 1;
+    return {
+      ...base, avatarUrl: null, avatarPosterUrl: null, isPro: false,
+      city: showLocation ? base.city : null, country: showLocation ? base.country : null,
+      location: showLocation ? base.location : null,
+      bio: p!.bio, website: null, languages: [], links: [], socialAccounts: [], ratings: null,
+      counts: { portfolio: 0, jobs: 0, contacts: 0, likes: 0 }, introVideo: null, hideJobPosts: true,
+      messaging: 'nobody', visibility: p!.visibility, isOwner: false, blockedByMe: true,
+    };
+  }
   const [links, social, ratings, intro, counts] = await Promise.all([
     env.DB.prepare(`SELECT kind, url FROM profile_links WHERE profile_id = ? ORDER BY position`).bind(id).all<{ kind: string; url: string }>(),
     env.DB.prepare(`SELECT platform, handle, followers FROM profile_social_accounts WHERE profile_id = ?`).bind(id).all(),
@@ -280,6 +295,7 @@ profiles.get('/:id/media', async (c) => {
   const purpose = c.req.query('purpose') ?? 'portfolio';
   const kind = c.req.query('kind');
   const isOwner = await ownedByViewer(c.env, id, c.get('user')?.id);
+  if (!isOwner && await blockedForViewer(c.env, id, c.get('user')?.id)) return c.json({ items: [] });
   const rows = await c.env.DB.prepare(`SELECT ${mediaColumns} FROM media m WHERE m.owner_profile_id = ?1 AND m.purpose = ?2
       AND m.status = 'ready' AND m.is_public = 1 AND (?3 IS NULL OR m.kind = ?3) AND ${visibleMediaSQL('m', isOwner ? '?1' : undefined)}
       ORDER BY m.position, m.created_at DESC LIMIT 100`)
@@ -287,11 +303,19 @@ profiles.get('/:id/media', async (c) => {
   return c.json({ items: rows.results.map((m) => mediaJSON(c.env, m)) });
 });
 
+/** FEATURE 131: blocked either way — nothing of the profile's content for this viewer. */
+async function blockedForViewer(env: Env, profileId: string, viewerUserId: string | undefined): Promise<boolean> {
+  if (!viewerUserId) return false;
+  const owner = await env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(profileId).first<{ owner_user_id: string }>();
+  return owner ? (await blockState(env, viewerUserId, owner.owner_user_id)) !== 'none' : false;
+}
+
 // GET /v1/profiles/:id/collections — public collections (the owner sees private ones too) with covers and counts.
 profiles.get('/:id/collections', async (c) => {
   const id = c.req.param('id');
   const isOwner = c.get('user') ? (await c.env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(id)
     .first<{ owner_user_id: string }>())?.owner_user_id === c.get('user')!.id : false;
+  if (!isOwner && await blockedForViewer(c.env, id, c.get('user')?.id)) return c.json({ items: [] });
   const rows = await c.env.DB.prepare(`SELECT col.*, (SELECT COUNT(*) FROM collection_items ci JOIN media m ON m.id = ci.media_id
         AND m.status = 'ready' AND ${visibleMediaSQL('m', isOwner ? 'col.owner_profile_id' : undefined)} WHERE ci.collection_id = col.id) AS items_count,
       COALESCE(col.cover_media_id, (SELECT ci.media_id FROM collection_items ci WHERE ci.collection_id = col.id ORDER BY ci.position LIMIT 1)) AS cover_id
@@ -327,6 +351,7 @@ profiles.get('/:id/jobs', requireAuth, requireProfile, async (c) => {
   if (!owner) fail(404, 'profile_not_found');
   const isOwner = owner!.owner_user_id === viewer.ownerUserId;
   if (owner!.hidden && !isOwner) return c.json({ items: [], hidden: true });
+  if (!isOwner && (await blockState(c.env, viewer.ownerUserId, owner!.owner_user_id)) !== 'none') return c.json({ items: [], hidden: true });
   const rows = await c.env.DB.prepare(`SELECT * FROM jobs WHERE owner_profile_id = ? AND ${isOwner ? "status <> 'removed'" : "status = 'published'"}
       ORDER BY COALESCE(published_at, created_at) DESC LIMIT 50`).bind(id).all<Record<string, any>>();
   const { jobsJSON } = await import('./jobs');
