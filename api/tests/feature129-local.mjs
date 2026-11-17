@@ -127,6 +127,15 @@ await test('validation: description required, 2 languages, positive price, 100-c
   eq(await bad({ compensationType: 'fixed', budgetMin: 300, currency: 'USD' }), 201, 'a price');
 });
 
+await test('several places: kept in order, no duplicates, the first is the job\'s country', async () => {
+  const r = await call(business, 'POST', '/v1/jobs', jobBody({ countryCode: 'ID', city: 'Bali', places: [
+    { countryCode: 'ID', city: 'Bali' }, { countryCode: 'TR' }, { countryCode: 'ID', city: 'Bali' }] }));
+  eq(r.status, 201, r.text);
+  eq(r.json.places, [{ countryCode: 'ID', city: 'Bali' }, { countryCode: 'TR', city: null }], 'places');
+  eq(r.json.countryCode, 'ID', 'primary');
+  eq((await call(business, 'POST', '/v1/jobs', jobBody({ places: Array.from({ length: 6 }, () => ({ countryCode: 'ID' })) }))).status, 400, 'six');
+});
+
 console.log('Apply');
 const job = (await call(business, 'POST', '/v1/jobs', jobBody())).json.id;
 const vids = Array.from({ length: 12 }, (_, i) => video(pro, i + 1, i + 1));

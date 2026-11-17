@@ -20,6 +20,10 @@ const JobBody = z.object({
   countryCode: z.string().toUpperCase().regex(/^[A-Z]{2}$/).nullable().optional(),
   city: z.string().trim().max(60).nullable().optional(),
   isWorldwide: z.boolean().default(false),
+  /** FEATURE 129: the places a job is for (up to 5): a whole country, or a city in it. The first is also the job's
+   *  country / city. Empty or left out: the single place above (or worldwide). */
+  places: z.array(z.object({ countryCode: z.string().toUpperCase().regex(/^[A-Z]{2}$/),
+                             city: z.string().trim().min(1).max(60).nullable().optional() })).max(5).optional(),
   // FEATURE 129: at most two preferred languages (none: any language).
   languages: z.array(z.string().regex(/^[a-z]{2,3}$/)).max(2).default([]),
   compensationType: z.enum(['not_selected', 'barter', 'fixed', 'range']).default('not_selected'),
@@ -71,6 +75,7 @@ async function jobsJSON(env: Env, rows: Record<string, any>[], viewer: string | 
       id: j.id, ownerProfileId: j.owner_profile_id, owner: owners.get(j.owner_profile_id) ?? null, title: j.title,
       description: j.description, category: j.category, tags: parseJSON(j.tags, []), location: j.location,
       countryCode: j.country_code, city: j.city, flag: j.is_worldwide ? '🌍' : j.flag, isWorldwide: j.is_worldwide === 1,
+      places: parseJSON(j.places, []),
       languages: parseJSON(j.languages, []), compensationType: j.compensation_type, budgetMin: j.budget_min,
       budgetMax: j.budget_max, currency: j.currency, deliverables: parseJSON(j.deliverables, []), deadline: j.deadline,
       status: j.status, reviewStatus: j.review_status ?? 'approved', publishedAt: j.published_at, closedAt: j.closed_at, createdAt: j.created_at, viewsCount: j.views_count,
@@ -153,6 +158,15 @@ async function setJobMedia(env: Env, jobId: string, ownerId: string, body: { med
   ]);
 }
 
+/** FEATURE 129: the job's places (up to 5, no duplicates). Left out: as they were. */
+async function setJobPlaces(env: Env, jobId: string, places: { countryCode: string; city?: string | null }[] | undefined) {
+  if (!places) return;
+  const seen = new Set<string>();
+  const unique = places.map((p) => ({ countryCode: p.countryCode, city: p.city ?? null }))
+    .filter((p) => !seen.has(`${p.countryCode}|${p.city ?? ''}`) && seen.add(`${p.countryCode}|${p.city ?? ''}`));
+  await env.DB.prepare(`UPDATE jobs SET places = ? WHERE id = ?`).bind(JSON.stringify(unique), jobId).run();
+}
+
 // POST /v1/jobs {…, publish} — business only.
 jobs.post('/', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c, 'business');
@@ -198,6 +212,7 @@ jobs.post('/', requireAuth, requireProfile, async (c) => {
   const inserted = results[results.length - 1];
   if (!inserted.meta.changes) limitReached(await jobPostsUsage(c.env, profile));
   await setJobMedia(c.env, id, profile.id, body);
+  await setJobPlaces(c.env, id, body.places);
   await screenJob(c.env, id, body.title, body.description, body.tags);
   const row = await c.env.DB.prepare(`SELECT * FROM jobs WHERE id = ?`).bind(id).first<Record<string, any>>();
   return c.json((await jobsJSON(c.env, [row!], profile.id))[0], 201);
@@ -225,6 +240,7 @@ jobs.patch('/:id', requireAuth, requireProfile, async (c) => {
           ['fixed', 'range'].includes(body.compensationType) ? body.currency ?? null : null, JSON.stringify(body.deliverables),
           body.deadline ?? null, now(), job.id).run();
   await setJobMedia(c.env, job.id, profile.id, body);
+  await setJobPlaces(c.env, job.id, body.places);
   await screenJob(c.env, job.id, body.title, body.description, body.tags);
   if (job.status === 'published') await notifySavers(c.env, job.id, 'saved_job_updated', body.title);
   const row = await c.env.DB.prepare(`SELECT * FROM jobs WHERE id = ?`).bind(job.id).first<Record<string, any>>();
