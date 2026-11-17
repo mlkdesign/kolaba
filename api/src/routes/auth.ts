@@ -92,6 +92,20 @@ async function sessionPayload(env: Env, userId: string, token: string) {
   };
 }
 
+/** FEATURE 135: an account an administrator deleted doesn't hold its e-mail — registering with that address again
+ *  frees it: the old account keeps all its data (its address moves to `released_email`, its Google link goes), and a
+ *  new account is made. A blocked (suspended) or banned account keeps its address: no new account with it. */
+async function releaseDeletedAccount(env: Env, email: string) {
+  const old = await env.DB.prepare(`SELECT id FROM users WHERE email = ? AND status = 'deleted'`).bind(email).first<{ id: string }>();
+  if (!old) return;
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE users SET released_email = email, email = ?, updated_at = ? WHERE id = ?`)
+      .bind(`deleted+${old.id}@users.kolaba.invalid`, now(), old.id),
+    env.DB.prepare(`DELETE FROM auth_identities WHERE user_id = ?`).bind(old.id),
+    env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(old.id),
+  ]);
+}
+
 auth.post('/signup', async (c) => {
   await rateLimit(c, 'RL_AUTH', `signup:${clientIP(c)}`);
   const raw = await c.req.json();
@@ -101,6 +115,10 @@ auth.post('/signup', async (c) => {
   const problem = passwordProblem(password);
   if (problem) fail(422, problem);
   if (await isBannedEmail(c.env, email)) fail(403, 'registration_blocked');
+  await releaseDeletedAccount(c.env, email);
+  // A blocked account's address can't start a new account.
+  const holder = await c.env.DB.prepare(`SELECT status FROM users WHERE email = ?`).bind(email).first<{ status: string }>();
+  if (holder?.status === 'suspended') fail(403, 'account_suspended');
   if (!c.env.RESEND_API_KEY) fail(503, 'registration_closed', 'Registration opens once e-mail delivery is configured.');
   // Closed test: any address may sign up — its code goes to the test inbox, so only the team can complete it.
   const allowed = (c.env.SIGNUP_ALLOWED_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
@@ -111,8 +129,8 @@ auth.post('/signup', async (c) => {
     .first<{ n: number }>();
   if ((today?.n ?? 0) >= Number(c.env.SIGNUPS_PER_DAY || 50)) fail(429, 'signups_paused');
 
-  const existing = await c.env.DB.prepare(`SELECT id, email_verified_at FROM users WHERE email = ?`).bind(email)
-    .first<{ id: string; email_verified_at: number | null }>();
+  const existing = await c.env.DB.prepare(`SELECT id, email_verified_at, status FROM users WHERE email = ?`).bind(email)
+    .first<{ id: string; email_verified_at: number | null; status: string }>();
   if (existing?.email_verified_at) fail(409, 'email_taken');
   const { hash, salt, scheme } = await hashPassword(password);
   let userId = existing?.id;
@@ -166,6 +184,8 @@ auth.post('/login', async (c) => {
   const ok = user?.password_hash && user.password_salt && user.password_scheme
     ? await verifyPassword(password, user.password_hash, user.password_salt, user.password_scheme)
     : (await hashPassword(password), false); // same work either way (timing)
+  // FEATURE 135: a deleted account doesn't sign in (its address may be registered again).
+  if (user?.status === 'deleted') fail(403, 'account_deleted');
   if (!ok || !user) {
     if (user) {
       const failed = user.failed_logins + 1;
@@ -217,9 +237,18 @@ auth.post('/google', async (c) => {
   const linked = await c.env.DB.prepare(`SELECT u.id, u.status FROM auth_identities i JOIN users u ON u.id = i.user_id
       WHERE i.provider = 'google' AND i.provider_user_id = ?`).bind(sub).first<{ id: string; status: string }>();
   if (linked) {
-    if (linked.status !== 'active') fail(403, 'account_suspended');
-    return signIn(linked.id, false);
+    // FEATURE 135: a deleted account's Google link is let go — the person continues as someone new below.
+    if (linked.status === 'deleted') {
+      const row = await c.env.DB.prepare(`SELECT email FROM users WHERE id = ?`).bind(linked.id).first<{ email: string }>();
+      if (row) await releaseDeletedAccount(c.env, row.email);
+      await c.env.DB.prepare(`DELETE FROM auth_identities WHERE user_id = ? AND provider = 'google'`).bind(linked.id).run();
+    } else if (linked.status !== 'active') {
+      fail(403, 'account_suspended');
+    } else {
+      return signIn(linked.id, false);
+    }
   }
+  await releaseDeletedAccount(c.env, email);
 
   const addIdentity = (userId: string) => c.env.DB.prepare(`INSERT INTO auth_identities (id, user_id, provider, provider_user_id, email, created_at)
       VALUES (?, ?, 'google', ?, ?, ?)`).bind(newId('aid'), userId, sub, email, now()).run();

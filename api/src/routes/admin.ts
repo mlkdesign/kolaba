@@ -255,9 +255,9 @@ admin.get('/users', async (c) => {
   const params: unknown[] = [];
   const text = q(c);
   if (text) {
-    where.push(`(lower(u.email) LIKE ? ESCAPE '\\' OR u.id = ? OR EXISTS (SELECT 1 FROM profiles p WHERE p.owner_user_id = u.id
+    where.push(`(lower(u.email) LIKE ? ESCAPE '\\' OR lower(COALESCE(u.released_email, '')) LIKE ? ESCAPE '\\' OR u.id = ? OR EXISTS (SELECT 1 FROM profiles p WHERE p.owner_user_id = u.id
       AND (lower(p.display_name) LIKE ? ESCAPE '\\' OR lower(p.username) LIKE ? ESCAPE '\\' OR p.id = ?)))`);
-    params.push(like(text), text, like(text), like(text.replace(/^@/, '')), text);
+    params.push(like(text), like(text), text, like(text), like(text.replace(/^@/, '')), text);
   }
   const hasType = (type: string) => `EXISTS (SELECT 1 FROM profiles p WHERE p.owner_user_id = u.id AND p.type = '${type}' AND p.status <> 'deleted')`;
   const type = c.req.query('type');
@@ -276,16 +276,16 @@ admin.get('/users', async (c) => {
 
   const [total, rows] = await Promise.all([
     c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users u WHERE ${where.join(' AND ')}`).bind(...params).first<{ n: number }>(),
-    c.env.DB.prepare(`SELECT u.id, u.email, u.status, u.is_demo, u.created_at, u.blocked_reason FROM users u
+    c.env.DB.prepare(`SELECT u.id, u.email, u.released_email, u.status, u.is_demo, u.created_at, u.blocked_reason FROM users u
         WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...params, limit, offset)
-      .all<{ id: string; email: string; status: string; is_demo: number; created_at: number; blocked_reason: string | null }>(),
+      .all<{ id: string; email: string; released_email: string | null; status: string; is_demo: number; created_at: number; blocked_reason: string | null }>(),
   ]);
   const profiles = await profilesFor(c.env, rows.results.map((r) => r.id));
   return c.json({
     total: total?.n ?? 0, page: pageNo, limit,
     items: rows.results.map((u) => {
       const ps = profiles.get(u.id) ?? [];
-      return { id: u.id, email: u.email, status: userStatus(u.status), isDemo: u.is_demo === 1, createdAt: u.created_at,
+      return { id: u.id, email: u.released_email ?? u.email, emailReused: Boolean(u.released_email), status: userStatus(u.status), isDemo: u.is_demo === 1, createdAt: u.created_at,
                blockedReason: u.blocked_reason, accountType: accountType(ps), isPro: ps.some((p) => p.isPro), profiles: ps };
     }),
   });
@@ -293,7 +293,7 @@ admin.get('/users', async (c) => {
 
 admin.get('/users/:id', async (c) => {
   const id = c.req.param('id');
-  const u = await c.env.DB.prepare(`SELECT id, email, status, is_demo, created_at, updated_at, email_verified_at, email_verification,
+  const u = await c.env.DB.prepare(`SELECT id, email, released_email, status, is_demo, created_at, updated_at, email_verified_at, email_verification,
       blocked_reason, blocked_at, deleted_at, deleted_reason, banned_at, restricted_until, restriction_reason FROM users WHERE id = ?`).bind(id).first<Record<string, any>>();
   if (!u) fail(404, 'user_not_found');
   const ps = (await profilesFor(c.env, [id])).get(id) ?? [];
@@ -317,7 +317,8 @@ admin.get('/users/:id', async (c) => {
   return c.json({
     jobPosts: slots && { limit: slots.limit, used: slots.used, remaining: slots.remaining, unlimited: slots.unlimited,
                          bonus: slots.bonus ?? 0, resetsAt: slots.resetsAt ?? null, countedSince: slots.periodStart ?? null },
-    id: u!.id, email: u!.email, status: userStatus(u!.status), isDemo: u!.is_demo === 1, createdAt: u!.created_at,
+    // FEATURE 135: a deleted account whose address a new account took: its own e-mail stays visible here.
+    id: u!.id, email: u!.released_email ?? u!.email, emailReused: Boolean(u!.released_email), status: userStatus(u!.status), isDemo: u!.is_demo === 1, createdAt: u!.created_at,
     emailVerifiedAt: u!.email_verified_at, emailVerification: u!.email_verification, blockedReason: u!.blocked_reason,
     blockedAt: u!.blocked_at, deletedAt: u!.deleted_at, deletedReason: u!.deleted_reason, accountType: accountType(ps),
     bannedAt: u!.banned_at ?? null,
@@ -406,6 +407,13 @@ admin.patch('/users/:id/status', async (c) => {
     ]);
   } else {
     if (u!.status !== 'deleted') fail(409, 'invalid_transition');
+    // FEATURE 135: its e-mail was taken by a new account meanwhile — the old one can't come back under it.
+    const released = await db.prepare(`SELECT released_email FROM users WHERE id = ?`).bind(id).first<{ released_email: string | null }>();
+    if (released?.released_email) {
+      const taken = await db.prepare(`SELECT 1 AS ok FROM users WHERE email = ? AND id <> ?`).bind(released.released_email, id).first();
+      if (taken) fail(409, 'email_reused', 'A new account uses this e-mail now.');
+      await db.prepare(`UPDATE users SET email = ?, released_email = NULL WHERE id = ?`).bind(released.released_email, id).run();
+    }
     await db.batch([
       db.prepare(`UPDATE users SET status = 'active', deleted_at = NULL, deleted_reason = NULL, blocked_reason = NULL, blocked_at = NULL,
           updated_at = ? WHERE id = ?`).bind(t, id),

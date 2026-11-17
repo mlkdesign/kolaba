@@ -90,6 +90,8 @@ export interface AdminProfile extends Card {
 }
 export interface UserRow {
   id: string; email: string; status: 'active' | 'blocked' | 'deleted'; isDemo: boolean; createdAt: number; blockedReason: string | null;
+  /** FEATURE 135: deleted, and a new account registered with its e-mail since. */
+  emailReused?: boolean;
   accountType: 'creator' | 'business' | 'both' | 'none'; isPro: boolean; profiles: AdminProfile[];
 }
 export interface LogRow {
