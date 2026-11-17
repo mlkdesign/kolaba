@@ -947,6 +947,25 @@ async function notifyContentDecision(env: Env, type: string, id: string, removed
                { dedupKey: `${notice}:${type}:${id}:${now()}`, targetType: type === 'post' ? 'job' : type, targetId: id });
 }
 
+/** FIX 128: a review removed by moderation takes its attachments with it — the links go, and each file nothing else
+ *  uses (another review, a message, a job, a collection, a profile) is deleted from storage. The review row stays
+ *  (removed: out of the profile and its rating), and the decision is in the audit log with the report. */
+async function purgeReviewMedia(env: Env, reviewId: string) {
+  const linked = await env.DB.prepare(`SELECT m.id, m.storage_key, m.poster_media_id FROM review_media rm JOIN media m ON m.id = rm.media_id
+      WHERE rm.review_id = ?`).bind(reviewId).all<{ id: string; storage_key: string | null; poster_media_id: string | null }>();
+  await env.DB.prepare(`DELETE FROM review_media WHERE review_id = ?`).bind(reviewId).run();
+  for (const m of linked.results) {
+    const used = await env.DB.prepare(`SELECT
+        EXISTS (SELECT 1 FROM review_media WHERE media_id = ?1) OR EXISTS (SELECT 1 FROM message_attachments WHERE media_id = ?1)
+        OR EXISTS (SELECT 1 FROM job_media WHERE media_id = ?1) OR EXISTS (SELECT 1 FROM jobs WHERE cover_media_id = ?1)
+        OR EXISTS (SELECT 1 FROM collection_items WHERE media_id = ?1) OR EXISTS (SELECT 1 FROM collections WHERE cover_media_id = ?1)
+        OR EXISTS (SELECT 1 FROM profiles WHERE avatar_media_id = ?1 OR intro_video_media_id = ?1) AS used`).bind(m.id).first<{ used: number }>();
+    if (used?.used) continue;
+    await env.DB.prepare(`UPDATE media SET status = 'deleted', deleted_at = ? WHERE id = ?`).bind(now(), m.id).run();
+    if (m.storage_key && env.MEDIA) await env.MEDIA.delete(m.storage_key).catch(() => undefined);
+  }
+}
+
 async function setContentRemoved(env: Env, type: string, id: string, removed: boolean, reason: string | null) {
   await notifyContentDecision(env, type, id, removed, reason);
   const t = now();
@@ -958,7 +977,9 @@ async function setContentRemoved(env: Env, type: string, id: string, removed: bo
       await env.DB.prepare(`UPDATE media SET review_status = ?, review_reason = ?, reviewed_at = ? WHERE id = ?`)
         .bind(removed ? 'removed' : 'approved', removed ? reason : null, t, id).run(); return;
     case 'review':
-      await env.DB.prepare(`UPDATE reviews SET review_status = ?, review_reason = ? WHERE id = ?`).bind(removed ? 'removed' : 'approved', removed ? reason : null, id).run(); return;
+      await env.DB.prepare(`UPDATE reviews SET review_status = ?, review_reason = ? WHERE id = ?`).bind(removed ? 'removed' : 'approved', removed ? reason : null, id).run();
+      if (removed) await purgeReviewMedia(env, id);
+      return;
     case 'message':
       await env.DB.prepare(`UPDATE messages SET deleted_at = ? WHERE id = ?`).bind(removed ? t : null, id).run(); return;
     case 'user':

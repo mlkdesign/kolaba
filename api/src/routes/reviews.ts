@@ -4,10 +4,48 @@ import { autoReport, blockedBetweenProfiles, checkText } from '../lib/moderation
 import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { actingProfile, clientIP, rateLimit, requireAuth, requireProfile } from '../lib/auth';
-import { loadCard, loadCards, notify, ownerOf } from '../lib/cards';
+import { isPro, loadCard, loadCards, mediaColumns, mediaJSON, type MediaRow, notify, ownerOf } from '../lib/cards';
+import { signedMediaURL } from './media';
 import { clampLimit, fail, newId, newToken, now, pairKey, sha256Hex } from '../lib/util';
 
 const reviews = new Hono<AppEnv>();
+
+export const REVIEW_MEDIA_LIMIT = 10;
+
+/** FIX 128: the media a business attached to its reviews of a creator — shown only while that creator has PRO (checked
+ *  here, on the server); otherwise none are sent at all (the files and their links are kept, and show again with PRO).
+ *  Private files: short-lived signed URLs, never a storage path. */
+async function reviewMedia(env: Env, recipientProfileId: string, reviewIds: string[]) {
+  const byReview = new Map<string, ReturnType<typeof mediaJSON>[]>();
+  if (!reviewIds.length || !(await isPro(env, recipientProfileId))) return byReview;
+  const rows = await env.DB.prepare(`SELECT rm.review_id, ${mediaColumns} FROM review_media rm JOIN media m ON m.id = rm.media_id
+      AND m.status = 'ready' AND m.review_status NOT IN ('rejected', 'removed')
+      WHERE rm.review_id IN (${reviewIds.map(() => '?').join(',')}) ORDER BY rm.position, m.id`)
+    .bind(...reviewIds).all<MediaRow & { review_id: string }>();
+  for (const m of rows.results) {
+    const json = mediaJSON(env, m);
+    if (m.provider === 'r2') json.url = await signedMediaURL(env, m.id);
+    if (m.poster_media_id) json.posterUrl = await signedMediaURL(env, m.poster_media_id);
+    byReview.set(m.review_id, [...(byReview.get(m.review_id) ?? []), json]);
+  }
+  return byReview;
+}
+
+/** Media a business may attach to a review: its own ready private uploads (`purpose: 'review'`), not yet on a review,
+ *  at most 10 photos and videos together, and only about a creator with PRO. */
+async function checkReviewMedia(env: Env, authorId: string, authorType: string, recipientId: string, mediaIds: string[]) {
+  const unique = [...new Set(mediaIds)];
+  if (!unique.length) return unique;
+  if (unique.length > REVIEW_MEDIA_LIMIT) fail(422, 'too_many_media');
+  if (authorType !== 'business') fail(403, 'business_profile_required');
+  const recipient = await env.DB.prepare(`SELECT type FROM profiles WHERE id = ?`).bind(recipientId).first<{ type: string }>();
+  if (recipient?.type !== 'creator' || !(await isPro(env, recipientId))) fail(403, 'recipient_pro_required');
+  const owned = await env.DB.prepare(`SELECT COUNT(*) AS n FROM media m WHERE m.owner_profile_id = ? AND m.status = 'ready'
+      AND m.purpose = 'chat' AND m.is_public = 0 AND m.id IN (${unique.map(() => '?').join(',')})
+      AND NOT EXISTS (SELECT 1 FROM review_media rm WHERE rm.media_id = m.id)`).bind(authorId, ...unique).first<{ n: number }>();
+  if (owned?.n !== unique.length) fail(422, 'media_not_found');
+  return unique;
+}
 
 async function hasReviewed(env: Env, authorUserId: string, recipient: string) {
   return Boolean(await env.DB.prepare(`SELECT 1 AS ok FROM reviews WHERE author_user_id = ? AND recipient_profile_id = ? AND status = 'published'`)
@@ -39,11 +77,13 @@ reviews.get('/', async (c) => {
         AVG(contact) AS contact, COUNT(*) AS count FROM reviews WHERE recipient_profile_id = ? AND status = 'published'
         AND review_status = 'approved'`).bind(profileId).first(),
   ]);
-  const authors = await loadCards(c.env, rows.results.map((r) => r.author_profile_id));
+  const [authors, media] = await Promise.all([loadCards(c.env, rows.results.map((r) => r.author_profile_id)),
+                                              reviewMedia(c.env, profileId, rows.results.map((r) => r.id))]);
   return c.json({
     summary,
     items: rows.results.map((r) => ({ id: r.id, quality: r.quality, speed: r.speed, contact: r.contact, comment: r.comment,
-      rating: (r.quality + r.speed + r.contact) / 3, createdAt: r.created_at, author: authors.get(r.author_profile_id) ?? null })),
+      rating: (r.quality + r.speed + r.contact) / 3, createdAt: r.created_at, author: authors.get(r.author_profile_id) ?? null,
+      authorProfileId: r.author_profile_id, media: media.get(r.id) ?? [] })),
   });
 });
 
@@ -55,6 +95,7 @@ reviews.post('/', requireAuth, requireProfile, async (c) => {
     recipientProfileId: z.string(), quality: z.number().int().min(1).max(5), speed: z.number().int().min(1).max(5),
     contact: z.number().int().min(1).max(5), comment: z.string().trim().min(1).max(2000),
     requestId: z.string().optional(), inviteId: z.string().optional(),
+    mediaIds: z.array(z.string()).max(REVIEW_MEDIA_LIMIT).default([]),
   }).parse(await c.req.json());
   const recipient = await c.env.DB.prepare(`SELECT status FROM profiles WHERE id = ?`).bind(body.recipientProfileId).first<{ status: string }>();
   if (!recipient || recipient.status !== 'active') fail(404, 'profile_not_found');
@@ -65,6 +106,7 @@ reviews.post('/', requireAuth, requireProfile, async (c) => {
     if (!invite) fail(404, 'invalid_invite');
     if (invite!.status !== 'active') fail(409, 'invite_used');
   }
+  const mediaIds = await checkReviewMedia(c.env, profile.id, profile.type, body.recipientProfileId, body.mediaIds);
   const id = newId('rev');
   try {
     await c.env.DB.batch([
@@ -75,6 +117,8 @@ reviews.post('/', requireAuth, requireProfile, async (c) => {
       c.env.DB.prepare(`UPDATE review_requests SET status = 'completed', completed_at = ? WHERE status = 'pending'
           AND requester_profile_id = ? AND contact_profile_id = ?`).bind(now(), body.recipientProfileId, profile.id),
       c.env.DB.prepare(`UPDATE review_invites SET status = 'used', used_at = ? WHERE id = ? AND status = 'active'`).bind(now(), body.inviteId ?? ''),
+      ...mediaIds.map((mid, i) => c.env.DB.prepare(`INSERT INTO review_media (review_id, media_id, uploaded_by_profile_id, position, created_at)
+          VALUES (?, ?, ?, ?, ?)`).bind(id, mid, profile.id, i, now())),
     ]);
   } catch (error) {
     if (String(error).includes('UNIQUE')) fail(409, 'already_reviewed');
@@ -119,13 +163,8 @@ reviews.patch('/:id', requireAuth, requireProfile, async (c) => {
   return c.json({ id: review.id, reviewStatus: verdict.flagged ? 'flagged' : 'approved' });
 });
 
-// DELETE /v1/reviews/:id — the author removes their review (it leaves the profile and its rating at once).
-reviews.delete('/:id', requireAuth, requireProfile, async (c) => {
-  const profile = actingProfile(c);
-  const review = await ownReview(c.env, c.req.param('id'), profile.ownerUserId);
-  await c.env.DB.prepare(`DELETE FROM reviews WHERE id = ?`).bind(review.id).run();
-  return c.json({ ok: true });
-});
+// DELETE /v1/reviews/:id — FIX 128: a review is removed only through Report → moderation (admin), never directly.
+reviews.delete('/:id', requireAuth, requireProfile, async () => fail(403, 'delete_via_report'));
 
 // POST /v1/reviews/requests {contactProfileId} — idempotent: a repeated tap returns the waiting request.
 reviews.post('/requests', requireAuth, requireProfile, async (c) => {

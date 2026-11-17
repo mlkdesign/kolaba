@@ -26,7 +26,11 @@ const JobBody = z.object({
   deliverables: z.array(z.object({ kind: z.enum(['reels', 'photos', 'stories', 'videos']), count: z.number().int().min(1).max(100) }))
     .max(8).default([]),
   deadline: z.number().int().positive().nullable().optional(),
-  mediaIds: z.array(z.string()).max(10).optional(),
+  /** Legacy (before FIX 128): the old top gallery — its first photo becomes the Cover, the rest References. */
+  mediaIds: z.array(z.string()).max(11).optional(),
+  /** FIX 128: one optional Cover photo (null removes it) and up to 10 Reference Media, the Cover not counted. */
+  coverMediaId: z.string().nullable().optional(),
+  referenceMediaIds: z.array(z.string()).max(10).optional(),
 }).superRefine((j, ctx) => {
   if (j.compensationType === 'fixed' && (j.budgetMin == null || !j.currency)) ctx.addIssue({ code: 'custom', message: 'budget_required' });
   if (j.compensationType === 'range' && (j.budgetMin == null || j.budgetMax == null || !j.currency || j.budgetMin > j.budgetMax)) {
@@ -44,18 +48,25 @@ async function jobsJSON(env: Env, rows: Record<string, any>[], viewer: string | 
   const marks = ids.map(() => '?').join(',');
   const [owners, mediaRows, stats] = await Promise.all([
     loadCards(env, rows.map((r) => r.owner_profile_id)),
-    // A job's photos: approved ones for everyone; its owner also sees those still waiting for review.
-    env.DB.prepare(`SELECT jm.job_id, ${mediaColumns} FROM job_media jm JOIN media m ON m.id = jm.media_id AND m.status = 'ready'
-                    AND (m.review_status = 'approved' OR (m.owner_profile_id = ? AND m.review_status IN ('pending', 'flagged')))
-                    WHERE jm.job_id IN (${marks}) ORDER BY jm.position`).bind(viewer, ...ids).all<MediaRow & { job_id: string }>(),
+    // A job's Cover and References: approved ones for everyone; its owner also sees those still waiting for review.
+    env.DB.prepare(`SELECT x.job_id, x.is_cover, ${mediaColumns} FROM (
+          SELECT id AS job_id, cover_media_id AS media_id, 1 AS is_cover, -1 AS position FROM jobs WHERE id IN (${marks}) AND cover_media_id IS NOT NULL
+          UNION ALL SELECT job_id, media_id, 0, position FROM job_media WHERE job_id IN (${marks})) x
+        JOIN media m ON m.id = x.media_id AND m.status = 'ready'
+          AND (m.review_status = 'approved' OR (m.owner_profile_id = ? AND m.review_status IN ('pending', 'flagged')))
+        ORDER BY x.position, m.id`).bind(...ids, ...ids, viewer).all<MediaRow & { job_id: string; is_cover: number }>(),
     env.DB.prepare(`SELECT j.id,
         (SELECT COUNT(*) FROM applications a WHERE a.job_id = j.id AND a.status = 'submitted' AND EXISTS (SELECT 1 FROM profiles cp WHERE cp.id = a.creator_profile_id AND cp.status = 'active')) AS applications_count,
         (SELECT a.id FROM applications a WHERE a.job_id = j.id AND a.creator_profile_id = ? AND a.status = 'submitted') AS my_application_id,
         EXISTS (SELECT 1 FROM saved_jobs s WHERE s.job_id = j.id AND s.profile_id = ?) AS is_saved
         FROM jobs j WHERE j.id IN (${marks})`).bind(viewer, viewer, ...ids).all<Record<string, any>>(),
   ]);
-  const mediaByJob = new Map<string, ReturnType<typeof mediaJSON>[]>();
-  for (const m of mediaRows.results) mediaByJob.set(m.job_id, [...(mediaByJob.get(m.job_id) ?? []), mediaJSON(env, m)]);
+  const covers = new Map<string, ReturnType<typeof mediaJSON>>();
+  const references = new Map<string, ReturnType<typeof mediaJSON>[]>();
+  for (const m of mediaRows.results) {
+    if (m.is_cover) covers.set(m.job_id, mediaJSON(env, m));
+    else references.set(m.job_id, [...(references.get(m.job_id) ?? []), mediaJSON(env, m)]);
+  }
   const statsById = new Map(stats.results.map((s) => [s.id, s]));
   return rows.map((j) => {
     const s = statsById.get(j.id) ?? {};
@@ -66,7 +77,9 @@ async function jobsJSON(env: Env, rows: Record<string, any>[], viewer: string | 
       languages: parseJSON(j.languages, []), compensationType: j.compensation_type, budgetMin: j.budget_min,
       budgetMax: j.budget_max, currency: j.currency, deliverables: parseJSON(j.deliverables, []), deadline: j.deadline,
       status: j.status, reviewStatus: j.review_status ?? 'approved', publishedAt: j.published_at, closedAt: j.closed_at, createdAt: j.created_at, viewsCount: j.views_count,
-      isDemo: j.is_demo === 1, media: mediaByJob.get(j.id) ?? [], applicationsCount: s.applications_count ?? 0,
+      isDemo: j.is_demo === 1, cover: covers.get(j.id) ?? null, references: references.get(j.id) ?? [],
+      // Older apps read one list: the Cover first, then the References.
+      media: [...(covers.has(j.id) ? [covers.get(j.id)!] : []), ...(references.get(j.id) ?? [])], applicationsCount: s.applications_count ?? 0,
       myApplicationId: s.my_application_id ?? null, isSaved: s.is_saved === 1,
       acceptsApplications: j.status === 'published' && (!j.deadline || j.deadline > now()),
     };
@@ -125,17 +138,35 @@ jobs.get('/:id', requireAuth, requireProfile, async (c) => {
   return c.json((await jobsJSON(c.env, [row!], profile.id))[0]);
 });
 
-async function setJobMedia(env: Env, jobId: string, ownerId: string, mediaIds: string[] | undefined) {
-  if (!mediaIds) return;
-  const unique = [...new Set(mediaIds)];
-  if (unique.length) {
-    const owned = await env.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE owner_profile_id = ? AND status = 'ready'
-        AND id IN (${unique.map(() => '?').join(',')})`).bind(ownerId, ...unique).first<{ n: number }>();
-    if (owned?.n !== unique.length) fail(422, 'media_not_found');
+/** FIX 128: a job's Cover (one photo, optional) and References (up to 10 photos / videos, in order) — separate: the
+ *  Cover is never a Reference, removing one never touches the other. Only the owner's own ready media. A field left
+ *  out is left as it was; the legacy `mediaIds` list sets both (its first photo is the Cover). */
+async function setJobMedia(env: Env, jobId: string, ownerId: string, body: { mediaIds?: string[]; coverMediaId?: string | null;
+                                                                             referenceMediaIds?: string[] }) {
+  let cover = body.coverMediaId;
+  let refs = body.referenceMediaIds;
+  if (cover === undefined && refs === undefined && body.mediaIds) {
+    const unique = [...new Set(body.mediaIds)];
+    const kinds = unique.length ? new Map((await env.DB.prepare(`SELECT id, kind FROM media WHERE id IN (${unique.map(() => '?').join(',')})`)
+      .bind(...unique).all<{ id: string; kind: string }>()).results.map((r) => [r.id, r.kind])) : new Map<string, string>();
+    cover = unique.find((id) => kinds.get(id) === 'photo') ?? null;
+    refs = unique.filter((id) => id !== cover);
+  }
+  if (cover === undefined && refs === undefined) return;
+  refs = refs ? [...new Set(refs)].filter((id) => id !== cover) : undefined;
+  if (refs && refs.length > 10) fail(422, 'too_many_references');
+  const check = [...(cover ? [cover] : []), ...(refs ?? [])];
+  if (check.length) {
+    const owned = await env.DB.prepare(`SELECT id, kind FROM media WHERE owner_profile_id = ? AND status = 'ready'
+        AND id IN (${check.map(() => '?').join(',')})`).bind(ownerId, ...check).all<{ id: string; kind: string }>();
+    if (owned.results.length !== new Set(check).size) fail(422, 'media_not_found');
+    if (cover && owned.results.find((m) => m.id === cover)?.kind !== 'photo') fail(422, 'cover_must_be_photo');
   }
   await env.DB.batch([
-    env.DB.prepare(`DELETE FROM job_media WHERE job_id = ?`).bind(jobId),
-    ...unique.map((mid, i) => env.DB.prepare(`INSERT INTO job_media (job_id, media_id, position) VALUES (?, ?, ?)`).bind(jobId, mid, i)),
+    ...(cover !== undefined ? [env.DB.prepare(`UPDATE jobs SET cover_media_id = ? WHERE id = ?`).bind(cover, jobId),
+                               env.DB.prepare(`DELETE FROM job_media WHERE job_id = ? AND media_id = ?`).bind(jobId, cover ?? '')] : []),
+    ...(refs ? [env.DB.prepare(`DELETE FROM job_media WHERE job_id = ?`).bind(jobId),
+                ...refs.map((mid, i) => env.DB.prepare(`INSERT INTO job_media (job_id, media_id, position) VALUES (?, ?, ?)`).bind(jobId, mid, i))] : []),
   ]);
 }
 
@@ -156,7 +187,7 @@ jobs.post('/', requireAuth, requireProfile, async (c) => {
           body.compensationType === 'range' ? body.budgetMax ?? null : null,
           ['fixed', 'range'].includes(body.compensationType) ? body.currency ?? null : null, JSON.stringify(body.deliverables),
           body.deadline ?? null, publish ? 'published' : 'draft', publish ? now() : null, now(), now()).run();
-  await setJobMedia(c.env, id, profile.id, body.mediaIds);
+  await setJobMedia(c.env, id, profile.id, body);
   await screenJob(c.env, id, body.title, body.description, body.tags);
   const row = await c.env.DB.prepare(`SELECT * FROM jobs WHERE id = ?`).bind(id).first<Record<string, any>>();
   return c.json((await jobsJSON(c.env, [row!], profile.id))[0], 201);
@@ -183,7 +214,7 @@ jobs.patch('/:id', requireAuth, requireProfile, async (c) => {
           body.compensationType === 'range' ? body.budgetMax ?? null : null,
           ['fixed', 'range'].includes(body.compensationType) ? body.currency ?? null : null, JSON.stringify(body.deliverables),
           body.deadline ?? null, now(), job.id).run();
-  await setJobMedia(c.env, job.id, profile.id, body.mediaIds);
+  await setJobMedia(c.env, job.id, profile.id, body);
   await screenJob(c.env, job.id, body.title, body.description, body.tags);
   if (job.status === 'published') await notifySavers(c.env, job.id, 'saved_job_updated', body.title);
   const row = await c.env.DB.prepare(`SELECT * FROM jobs WHERE id = ?`).bind(job.id).first<Record<string, any>>();
@@ -262,68 +293,43 @@ const ApplyBody = z.object({ message: z.string().trim().min(1).max(2000), mediaI
 
 async function applicationsJSON(env: Env, rows: Record<string, any>[]) {
   if (!rows.length) return [];
-  const ids = rows.map((r) => r.id);
-  const [cards, mediaRows] = await Promise.all([
-    loadCards(env, rows.map((r) => r.creator_profile_id)),
-    // FEATURE 126: a portfolio video that was deleted, made private, hidden or rejected since leaves the application's
-    // list (the photos sent with it are the application's own).
-    env.DB.prepare(`SELECT am.application_id, ${mediaColumns} FROM application_media am JOIN media m ON m.id = am.media_id
-                    AND m.status = 'ready' AND (m.purpose = 'application' OR (m.is_public = 1 AND m.review_status = 'approved'
-                    AND m.moderation_status IS NULL))
-                    WHERE am.application_id IN (${ids.map(() => '?').join(',')}) ORDER BY am.position`)
-      .bind(...ids).all<MediaRow & { application_id: string }>(),
-  ]);
-  const { signedMediaURL } = await import('./media');
-  const byApp = new Map<string, unknown[]>();
-  for (const m of mediaRows.results) {
-    const json = mediaJSON(env, m);
-    if (m.provider === 'r2' && m.purpose === 'application') json.url = await signedMediaURL(env, m.id);
-    byApp.set(m.application_id, [...(byApp.get(m.application_id) ?? []), json]);
-  }
-  // A PRO creator's application that carries no video (sent before the snapshot existed, or seeded) shows the creator's
-  // latest published portfolio videos — the same 10 the apply route would attach today.
-  const bare = rows.filter((a) => !(byApp.get(a.id) as { kind?: string }[] | undefined)?.some((m) => m.kind === 'video'));
-  const creators = [...new Set(bare.map((a) => a.creator_profile_id as string))];
-  if (creators.length) {
-    const marks = creators.map(() => '?').join(',');
-    const pro = monetizationEnabled(env) ? new Set((await env.DB.prepare(`SELECT DISTINCT profile_id FROM subscriptions
-        WHERE profile_id IN (${marks}) AND status = 'active' AND (expires_at IS NULL OR expires_at > ?)`)
-      .bind(...creators, Date.now()).all<{ profile_id: string }>()).results.map((r) => r.profile_id)) : new Set(creators);
-    const proCreators = creators.filter((id) => pro.has(id));
-    if (proCreators.length) {
-      const videos = await env.DB.prepare(`SELECT * FROM (SELECT ${mediaColumns}, m.owner_profile_id AS owner,
-            ROW_NUMBER() OVER (PARTITION BY m.owner_profile_id ORDER BY m.created_at DESC, m.id DESC) AS rn
-          FROM media m WHERE m.owner_profile_id IN (${proCreators.map(() => '?').join(',')}) AND m.kind = 'video'
-            AND m.purpose = 'portfolio' AND m.status = 'ready' AND m.is_public = 1 AND m.review_status = 'approved'
-            AND m.moderation_status IS NULL) WHERE rn <= ? ORDER BY owner, rn`)
-        .bind(...proCreators, APPLY_VIDEO_LIMIT).all<MediaRow & { owner: string }>();
-      const byOwner = new Map<string, unknown[]>();
-      for (const m of videos.results) byOwner.set(m.owner, [...(byOwner.get(m.owner) ?? []), mediaJSON(env, m)]);
-      for (const a of bare) {
-        const latest = byOwner.get(a.creator_profile_id);
-        if (latest?.length) byApp.set(a.id, [...latest, ...(byApp.get(a.id) ?? [])]);
-      }
-    }
-  }
+  const creators = [...new Set(rows.map((r) => r.creator_profile_id as string))];
+  const [cards, videos] = await Promise.all([loadCards(env, creators), latestPortfolioVideos(env, creators)]);
   return rows.map((a) => ({
     id: a.id, jobId: a.job_id, message: a.message, status: a.status, createdAt: a.created_at, updatedAt: a.updated_at,
     withdrawnAt: a.withdrawn_at, isShortlisted: Boolean(a.shortlisted_at), applicant: cards.get(a.creator_profile_id) ?? null,
-    media: byApp.get(a.id) ?? [],
+    media: videos.get(a.creator_profile_id) ?? [],
   }));
 }
 
-/** FEATURE 126: a PRO application carries the creator's latest published portfolio videos — the server picks them, at
- *  most 10, newest first (the id breaks ties), and the application keeps that set for good (`application_media`). */
+/** FIX 128: an application shows its creator's portfolio as it is now — the latest published videos (at most 10,
+ *  newest first, the id breaking ties), picked when the application is read, and only while the creator has PRO
+ *  (checked here, on the server). Nothing is stored with the application: a video deleted, hidden or rejected leaves
+ *  every application at once, a new one joins them, and PRO lost hides them all (PRO back shows what's there then).
+ *  One query for every creator on the page. */
 export const APPLY_VIDEO_LIMIT = 10;
-async function latestPortfolioVideoIds(env: Env, profileId: string): Promise<string[]> {
-  const rows = await env.DB.prepare(`SELECT id FROM media WHERE owner_profile_id = ? AND kind = 'video' AND purpose = 'portfolio'
-      AND status = 'ready' AND is_public = 1 AND review_status = 'approved' AND moderation_status IS NULL
-      ORDER BY created_at DESC, id DESC LIMIT ?`).bind(profileId, APPLY_VIDEO_LIMIT).all<{ id: string }>();
-  return rows.results.map((r) => r.id);
+export async function latestPortfolioVideos(env: Env, profileIds: string[]): Promise<Map<string, ReturnType<typeof mediaJSON>[]>> {
+  const byOwner = new Map<string, ReturnType<typeof mediaJSON>[]>();
+  if (!profileIds.length) return byOwner;
+  const marks = profileIds.map(() => '?').join(',');
+  const pro = monetizationEnabled(env)
+    ? new Set((await env.DB.prepare(`SELECT DISTINCT profile_id FROM subscriptions WHERE profile_id IN (${marks})
+          AND status = 'active' AND (expires_at IS NULL OR expires_at > ?)`).bind(...profileIds, Date.now())
+        .all<{ profile_id: string }>()).results.map((r) => r.profile_id))
+    : new Set(profileIds);
+  const owners = profileIds.filter((id) => pro.has(id));
+  if (!owners.length) return byOwner;
+  const rows = await env.DB.prepare(`SELECT * FROM (SELECT ${mediaColumns},
+        ROW_NUMBER() OVER (PARTITION BY m.owner_profile_id ORDER BY m.created_at DESC, m.id DESC) AS rn
+      FROM media m WHERE m.owner_profile_id IN (${owners.map(() => '?').join(',')}) AND m.kind = 'video'
+        AND m.purpose = 'portfolio' AND m.status = 'ready' AND m.is_public = 1 AND m.review_status = 'approved'
+        AND m.moderation_status IS NULL) WHERE rn <= ? ORDER BY owner_profile_id, rn`)
+    .bind(...owners, APPLY_VIDEO_LIMIT).all<MediaRow>();
+  for (const m of rows.results) byOwner.set(m.owner_profile_id, [...(byOwner.get(m.owner_profile_id) ?? []), mediaJSON(env, m)]);
+  return byOwner;
 }
 
-// POST /v1/jobs/:id/apply — creator only; one active application; media only with creator.pro. A PRO application also
-// gets the creator's latest portfolio videos (the server's choice — videos the client sends are ignored).
+// POST /v1/jobs/:id/apply — creator only; one active application. Its videos are the creator's own latest (FIX 128).
 jobs.post('/:id/apply', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c, 'creator');
   await rateLimit(c, 'RL_WRITE', `apply:${profile.ownerUserId}`);
@@ -336,26 +342,12 @@ jobs.post('/:id/apply', requireAuth, requireProfile, async (c) => {
   if (await blockedBetweenUsers(c.env, profile.ownerUserId, job!.owner_user_id)) fail(403, 'blocked');
   if (job!.status !== 'published') fail(409, 'job_closed');
   if (job!.deadline && job!.deadline < now()) fail(409, 'deadline_passed');
-  const pro = await isPro(c.env, profile.id);
-  let photoIds: string[] = [];
-  if (body.mediaIds.length) {
-    if (!pro) fail(403, 'pro_required');
-    const owned = await c.env.DB.prepare(`SELECT id, kind FROM media WHERE owner_profile_id = ? AND status = 'ready'
-        AND id IN (${body.mediaIds.map(() => '?').join(',')})`).bind(profile.id, ...body.mediaIds).all<{ id: string; kind: string }>();
-    if (owned.results.length !== new Set(body.mediaIds).size) fail(422, 'media_not_found');
-    const photos = new Set(owned.results.filter((m) => m.kind === 'photo').map((m) => m.id));
-    photoIds = [...new Set(body.mediaIds)].filter((mid) => photos.has(mid));
-  }
-  // The videos first (as the card shows them), then the photos picked for it; never a duplicate.
-  const attached = [...new Set([...(pro ? await latestPortfolioVideoIds(c.env, profile.id) : []), ...photoIds])];
+  // FIX 128: nothing is attached here — the application shows the creator's latest videos while they have PRO
+  // (`latestPortfolioVideos`); media ids a client still sends are ignored.
   const id = newId('app');
   try {
-    await c.env.DB.batch([
-      c.env.DB.prepare(`INSERT INTO applications (id, job_id, creator_profile_id, message, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
-        .bind(id, job!.id, profile.id, body.message, now(), now()),
-      ...attached.map((mid, i) =>
-        c.env.DB.prepare(`INSERT INTO application_media (application_id, media_id, position) VALUES (?, ?, ?)`).bind(id, mid, i)),
-    ]);
+    await c.env.DB.prepare(`INSERT INTO applications (id, job_id, creator_profile_id, message, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .bind(id, job!.id, profile.id, body.message, now(), now()).run();
   } catch (error) {
     if (String(error).includes('UNIQUE')) fail(409, 'already_applied');
     throw error;

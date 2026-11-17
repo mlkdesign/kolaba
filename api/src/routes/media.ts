@@ -21,7 +21,9 @@ const COUNT_LIMITS: Record<string, Record<string, number>> = {
 const PRO_PURPOSES = new Set(['intro', 'collection', 'application']);
 
 const UploadRequest = z.object({
-  purpose: z.enum(['avatar', 'portfolio', 'intro', 'collection', 'job', 'application', 'chat', 'poster']),
+  // FIX 128: 'review' — a business's attachment to a review of a creator; stored as a private file (purpose 'chat':
+  // never public, served only through short-lived signed URLs), linked to its review in review_media.
+  purpose: z.enum(['avatar', 'portfolio', 'intro', 'collection', 'job', 'application', 'chat', 'poster', 'review']),
   kind: z.enum(['photo', 'video']),
   mime: z.string().toLowerCase(),
   bytes: z.number().int().positive(),
@@ -49,7 +51,10 @@ media.post('/uploads', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c);
   await rateLimit(c, 'RL_WRITE', `upload:${profile.ownerUserId}`);
   if (!c.env.MEDIA) fail(503, 'storage_unavailable', 'File storage (R2) is not enabled yet.');
-  const body = UploadRequest.parse(await c.req.json());
+  const request = UploadRequest.parse(await c.req.json());
+  const keyPurpose = request.purpose;
+  if (request.purpose === 'review' && profile.type !== 'business') fail(403, 'business_profile_required');
+  const body = { ...request, purpose: request.purpose === 'review' ? 'chat' as const : request.purpose };
   const types = body.kind === 'photo' ? PHOTO_TYPES : VIDEO_TYPES;
   if (!types.includes(body.mime)) fail(415, 'invalid_mime_type');
   const maxBytes = Number(body.kind === 'photo' ? c.env.MAX_PHOTO_MB : c.env.MAX_VIDEO_MB) * 1024 * 1024;
@@ -76,7 +81,7 @@ media.post('/uploads', requireAuth, requireProfile, async (c) => {
     .bind(profile.id, now() - 3_600_000).run();
   const id = newId('med');
   const ext = body.mime.split('/')[1].replace('quicktime', 'mov').replace('jpeg', 'jpg');
-  const key = `u/${profile.id}/${body.purpose}/${id}.${ext}`;
+  const key = `u/${profile.id}/${keyPurpose}/${id}.${ext}`;
   await c.env.DB.prepare(`INSERT INTO media (id, owner_profile_id, kind, purpose, provider, storage_key, mime, bytes, width, height,
       duration, title, poster_media_id, status, is_public, review_status, created_at)
       VALUES (?, ?, ?, ?, 'r2', ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
