@@ -42,6 +42,7 @@ async function person(tag, type) {
 
 
 const a = await person('a', 'creator');
+const biz = await person('biz', 'business');
 const b = await person('b', 'creator');
 const conversation = (await call(a, 'POST', '/v1/conversations', { profileId: b.profileId })).json;
 await call(a, 'POST', `/v1/conversations/${conversation.id}/messages`, { body: 'hello', clientId: `f131-${stamp}` });
@@ -74,6 +75,18 @@ await test('unblocked: everything is back', async () => {
   eq((await call(a, 'GET', `/v1/profiles/${b.profileId}`)).json.blockedByMe ?? false, false, 'full card');
   eq((await chatsOf(a)).includes(conversation.id), true, 'chat back for a');
   eq((await chatsOf(b)).includes(conversation.id), true, 'chat back for b');
+});
+
+await test('FEATURE 132: a deleted review can be written again', async () => {
+  const body = { recipientProfileId: biz.profileId, quality: 5, speed: 4, contact: 5, comment: 'Great brief, paid on time.' };
+  const first = await call(a, 'POST', '/v1/reviews', body);
+  eq(first.status < 300, true, first.text);
+  const id = first.json.id;
+  eq((await call(a, 'DELETE', `/v1/reviews/${id}`)).status, 200, 'deleted');
+  const again = await call(a, 'POST', '/v1/reviews', { ...body, comment: 'Second take after the update.' });
+  eq(again.status < 300, true, again.text);
+  const list = (await call(null, 'GET', `/v1/reviews?profileId=${biz.profileId}`)).json.items;
+  eq(list.length, 1, 'one review'); eq(list[0].comment, 'Second take after the update.', 'the new one');
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
