@@ -6,7 +6,8 @@
 //   any business profile of the account with an active business_pro subscription gives every business profile of that
 //   account unlimited job posts. The free job-post allowance is the account's, shared by all its business profiles.
 // • Usage is counted here only: portfolio videos from `media` (ready + pending uploads), job posts from `usage_events`
-//   (first publications, per UTC calendar month — deletion / archiving never gives one back).
+//   over a rolling 30 days (FEATURE 129): each publication holds a slot for 30 × 24 h from the moment it was made, then
+//   frees it — deletion / archiving never gives one back earlier; re-opening a closed job is a new publication.
 // • Every check that guards a write is atomic: the count and the insert are one SQL statement (D1 runs writes one at
 //   a time), so parallel requests can't go past a limit.
 import type { ActingProfile, Env } from '../env';
@@ -67,11 +68,14 @@ export async function loadPlanConfig(env: Env): Promise<PlanConfig> {
   }
 }
 
-/** The calendar month (UTC) around `t`: [start, end). */
+/** The calendar month (UTC) around `t`: [start, end) — the period a usage row is filed under (reports only). */
 export function monthPeriod(t = now()): { start: number; end: number } {
   const d = new Date(t);
   return { start: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1), end: Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) };
 }
+
+/** FEATURE 129: how long one job publication holds its slot. */
+export const JOB_POST_WINDOW = 30 * 86_400_000;
 
 interface PlanState { active: boolean; scope: 'profile' | 'account'; expiresAt: number | null }
 
@@ -104,7 +108,7 @@ export interface Usage {
   allowed: boolean;
   /** Why not allowed: limit_reached | pro_required | wrong_profile_type. */
   reason: string | null;
-  period?: 'calendar_month';
+  period?: 'calendar_month' | 'rolling_30_days';
   periodStart?: number;
   periodEnd?: number;
   resetsAt?: number;
@@ -151,14 +155,19 @@ export async function portfolioVideosUsage(env: Env, profile: ActingProfile, con
 export async function jobPostsUsage(env: Env, profile: ActingProfile, config?: PlanConfig,
                                     proActive?: boolean): Promise<Usage> {
   const cfg = config ?? await loadPlanConfig(env);
-  const period = monthPeriod();
   const pro = !monetizationEnabled(env) || (proActive ?? (await businessPro(env, profile.ownerUserId)).active);
   const limit = (pro ? cfg.business.pro : cfg.business.free).job_posts_per_month;
-  const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM usage_events WHERE user_id = ? AND feature = 'job_posts'
-      AND period_start = ?`).bind(profile.ownerUserId, period.start).first<{ n: number }>();
-  const usage = counted('job_posts', 'account', limit, row?.n ?? 0, 0, pro);
+  const since = now() - JOB_POST_WINDOW;
+  // The publications still holding a slot, oldest first: the oldest one's slot is the next to come back.
+  const rows = await env.DB.prepare(`SELECT created_at FROM usage_events WHERE user_id = ? AND feature = 'job_posts'
+      AND created_at > ? ORDER BY created_at`).bind(profile.ownerUserId, since).all<{ created_at: number }>();
+  const used = rows.results.length;
+  const usage = counted('job_posts', 'account', limit, used, 0, pro);
   const base = profile.type === 'business' ? usage : { ...usage, allowed: false, reason: 'wrong_profile_type' };
-  return { ...base, period: 'calendar_month', periodStart: period.start, periodEnd: period.end, resetsAt: period.end };
+  // When a slot comes back: the oldest counted publication + 30 days (the next one, if the limit is reached).
+  const nextFree = limit != null && used >= limit && used > 0 ? rows.results[used - limit].created_at + JOB_POST_WINDOW : undefined;
+  return { ...base, period: 'rolling_30_days', periodStart: since, periodEnd: now(),
+           resetsAt: nextFree ?? (used ? rows.results[0].created_at + JOB_POST_WINDOW : undefined) };
 }
 
 /** Everything the app shows about the acting profile's plan and limits (GET /v1/me/entitlements). */
@@ -222,16 +231,19 @@ export function limitReached(usage: Usage): never {
  * none). Atomic: count and insert are one statement. Put it in the same D1 batch as the write it pays for, and make
  * that write conditional on `jobPostSpentSQL` so nothing is published without its row.
  */
-export async function spendJobPost(env: Env, profile: ActingProfile, jobId: string) {
+export async function spendJobPost(env: Env, profile: ActingProfile, jobId: string, subjectId = jobId) {
   const usage = await jobPostsUsage(env, profile);
   if (profile.type !== 'business') throw new ApiError(403, 'business_profile_required');
-  const period = monthPeriod();
+  const t = now();
+  // Atomic: the count over the last 30 days and the insert are one statement (parallel publications can't pass the
+  // limit). `subjectId`: the job for a first publication, the job + its close for a re-opening (UNIQUE — a retry of the
+  // same publication never spends twice).
   const statement = env.DB.prepare(`INSERT OR IGNORE INTO usage_events (id, user_id, profile_id, feature, subject_id, period_start, created_at)
       SELECT ?, ?, ?, 'job_posts', ?, ?, ?
-       WHERE ? IS NULL OR (SELECT COUNT(*) FROM usage_events WHERE user_id = ? AND feature = 'job_posts' AND period_start = ?) < ?`)
-    .bind(newId('use'), profile.ownerUserId, profile.id, jobId, period.start, now(),
-          usage.limit, profile.ownerUserId, period.start, usage.limit);
-  return { statement, usage };
+       WHERE ? IS NULL OR (SELECT COUNT(*) FROM usage_events WHERE user_id = ? AND feature = 'job_posts' AND created_at > ?) < ?`)
+    .bind(newId('use'), profile.ownerUserId, profile.id, subjectId, monthPeriod(t).start, t,
+          usage.limit, profile.ownerUserId, t - JOB_POST_WINDOW, usage.limit);
+  return { statement, usage, subjectId };
 }
 export const jobPostSpentSQL = `EXISTS (SELECT 1 FROM usage_events WHERE feature = 'job_posts' AND subject_id = ?)`;
 

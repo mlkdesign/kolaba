@@ -93,7 +93,7 @@ reviews.post('/', requireAuth, requireProfile, async (c) => {
   await rateLimit(c, 'RL_WRITE', `review:${profile.ownerUserId}`);
   const body = z.object({
     recipientProfileId: z.string(), quality: z.number().int().min(1).max(5), speed: z.number().int().min(1).max(5),
-    contact: z.number().int().min(1).max(5), comment: z.string().trim().min(1).max(2000),
+    contact: z.number().int().min(1).max(5), comment: z.string().trim().min(1).max(1000),
     requestId: z.string().optional(), inviteId: z.string().optional(),
     mediaIds: z.array(z.string()).max(REVIEW_MEDIA_LIMIT).default([]),
   }).parse(await c.req.json());
@@ -153,7 +153,7 @@ reviews.patch('/:id', requireAuth, requireProfile, async (c) => {
   const review = await ownReview(c.env, c.req.param('id'), profile.ownerUserId);
   const body = z.object({
     quality: z.number().int().min(1).max(5), speed: z.number().int().min(1).max(5),
-    contact: z.number().int().min(1).max(5), comment: z.string().trim().min(1).max(2000),
+    contact: z.number().int().min(1).max(5), comment: z.string().trim().min(1).max(1000),
   }).parse(await c.req.json());
   const verdict = checkText(body.comment);
   await c.env.DB.prepare(`UPDATE reviews SET quality = ?, speed = ?, contact = ?, comment = ?, review_status = ?, review_reason = ?
