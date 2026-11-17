@@ -399,6 +399,22 @@ export async function latestPortfolioVideos(env: Env, profileIds: string[]): Pro
   return byOwner;
 }
 
+/** FEATURE 129 / FIX 137: a PRO creator's choice of their own published portfolio videos (null: none given). */
+async function checkedVideoChoice(env: Env, profileId: string, videoIds: string[] | undefined): Promise<string[] | null> {
+  const chosen = videoIds ? [...new Set(videoIds)] : null;
+  if (chosen) {
+    if (!(await isPro(env, profileId))) fail(403, 'pro_required');
+    if (chosen.length) {
+      const owned = await env.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE owner_profile_id = ? AND kind = 'video'
+          AND purpose = 'portfolio' AND status = 'ready' AND is_public = 1 AND review_status = 'approved'
+          AND moderation_status IS NULL AND id IN (${chosen.map(() => '?').join(',')})`).bind(profileId, ...chosen)
+        .first<{ n: number }>();
+      if (owned?.n !== chosen.length) fail(422, 'media_not_found');
+    }
+  }
+  return chosen;
+}
+
 // POST /v1/jobs/:id/apply — creator only; one active application. Its videos are the creator's own latest (FIX 128).
 jobs.post('/:id/apply', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c, 'creator');
@@ -414,17 +430,7 @@ jobs.post('/:id/apply', requireAuth, requireProfile, async (c) => {
   if (job!.deadline && job!.deadline < now()) fail(409, 'deadline_passed');
   // FIX 128 / FEATURE 129: no copies — without a choice the application shows the creator's latest videos while they have
   // PRO; with one (`videoIds`, PRO only) it keeps references to those portfolio videos.
-  const chosen = body.videoIds ? [...new Set(body.videoIds)] : null;
-  if (chosen) {
-    if (!(await isPro(c.env, profile.id))) fail(403, 'pro_required');
-    if (chosen.length) {
-      const owned = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE owner_profile_id = ? AND kind = 'video'
-          AND purpose = 'portfolio' AND status = 'ready' AND is_public = 1 AND review_status = 'approved'
-          AND moderation_status IS NULL AND id IN (${chosen.map(() => '?').join(',')})`).bind(profile.id, ...chosen)
-        .first<{ n: number }>();
-      if (owned?.n !== chosen.length) fail(422, 'media_not_found');
-    }
-  }
+  const chosen = await checkedVideoChoice(c.env, profile.id, body.videoIds);
   const id = newId('app');
   try {
     await c.env.DB.batch([
@@ -447,11 +453,23 @@ jobs.post('/:id/apply', requireAuth, requireProfile, async (c) => {
 // PATCH /v1/jobs/applications/:id — the applicant edits the message.
 jobs.patch('/applications/:id', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c, 'creator');
-  const body = ApplyBody.pick({ message: true }).parse(await c.req.json());
+  // FIX 137: the message, and (optional) the PRO creator's new choice of portfolio videos — the same rules as at Apply.
+  const body = ApplyBody.pick({ message: true, videoIds: true }).parse(await c.req.json());
+  const id = c.req.param('id');
+  const chosen = await checkedVideoChoice(c.env, profile.id, body.videoIds);
   const res = await c.env.DB.prepare(`UPDATE applications SET message = ?, updated_at = ? WHERE id = ? AND creator_profile_id = ?
-      AND status = 'submitted'`).bind(body.message, now(), c.req.param('id'), profile.id).run();
+      AND status = 'submitted'`).bind(body.message, now(), id, profile.id).run();
   if (!res.meta.changes) fail(404, 'application_not_found');
-  return c.json({ status: 'updated' });
+  if (chosen) {
+    await c.env.DB.batch([
+      c.env.DB.prepare(`DELETE FROM application_media WHERE application_id = ?`).bind(id),
+      c.env.DB.prepare(`UPDATE applications SET media_mode = 'manual' WHERE id = ?`).bind(id),
+      ...chosen.map((mid, i) => c.env.DB.prepare(`INSERT INTO application_media (application_id, media_id, position)
+          VALUES (?, ?, ?)`).bind(id, mid, i)),
+    ]);
+  }
+  const row = await c.env.DB.prepare(`SELECT * FROM applications WHERE id = ?`).bind(id).first<Record<string, any>>();
+  return c.json({ status: 'updated', application: (await applicationsJSON(c.env, [row!]))[0] });
 });
 
 // POST /v1/jobs/applications/:id/withdraw — the applicant only; kept in history as withdrawn.

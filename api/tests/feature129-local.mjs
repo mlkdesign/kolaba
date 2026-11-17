@@ -169,6 +169,19 @@ await test('a second application to the same job is refused', async () => {
   eq((await call(pro, 'POST', `/v1/jobs/${job}/apply`, { message: 'Again' })).status, 409, 'duplicate');
 });
 
+await test('FIX 137: Edit — the message and a new choice of videos; FREE edits text only', async () => {
+  eq((await call(pro, 'PATCH', `/v1/jobs/applications/${manualApp}`, { message: 'Edited', videoIds: ['med_nope'] })).status, 422, 'foreign');
+  eq((await listed(manualApp)).message, 'Hi', 'unchanged after a refusal');
+  const r = await call(pro, 'PATCH', `/v1/jobs/applications/${manualApp}`, { message: 'Edited', videoIds: [vids[9], vids[3]] });
+  eq(r.status, 200, r.text);
+  eq(r.json.application.media.map((m) => m.id), [vids[9], vids[3]], 'new choice');
+  const row = await listed(manualApp);
+  eq(row.message, 'Edited', 'message'); eq(row.media.map((m) => m.id), [vids[9], vids[3]], 'listed');
+  const own = (await call(free, 'GET', '/v1/jobs/applications/mine')).json.items.find((a) => a.jobId === job);
+  eq((await call(free, 'PATCH', `/v1/jobs/applications/${own.id}`, { message: 'Text', videoIds: [] })).status, 403, 'free videos');
+  eq((await call(free, 'PATCH', `/v1/jobs/applications/${own.id}`, { message: 'Text' })).status, 200, 'free text');
+});
+
 console.log('Reviews');
 await test('review text: at most 1 000', async () => {
   const r = await call(business, 'POST', '/v1/reviews', { recipientProfileId: free.profileId, quality: 5, speed: 5, contact: 5, comment: 'x'.repeat(1001) });
