@@ -134,7 +134,8 @@ await test('several places: kept in order, no duplicates, the first is the job\'
   eq(r.status, 201, r.text);
   eq(r.json.places, [{ countryCode: 'ID', city: 'Bali' }, { countryCode: 'TR', city: null }], 'places');
   eq(r.json.countryCode, 'ID', 'primary');
-  eq((await call(business, 'POST', '/v1/jobs', jobBody({ places: Array.from({ length: 6 }, () => ({ countryCode: 'ID' })) }))).status, 400, 'six');
+  eq((await call(business, 'POST', '/v1/jobs', jobBody({ places: Array.from({ length: 6 }, (_, i) => ({ countryCode: ['ID', 'TR', 'US', 'FR', 'DE', 'ES'][i] })) }))).status, 201, 'six (FEATURE 131: no limit)');
+  eq((await call(business, 'POST', '/v1/jobs', jobBody({ places: Array.from({ length: 51 }, () => ({ countryCode: 'ID' })) }))).status, 400, 'over 50');
 });
 
 console.log('Apply');
