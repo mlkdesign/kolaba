@@ -363,3 +363,9 @@ h1, h2, p { margin: 0; }
 .storage__note { color: var(--text-3); font-size: 11px; }
 @media (max-width: 900px) { .storage__legend { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { .storage__legend { grid-template-columns: 1fr; } }
+
+/* FIX 131: Delete all data */
+.check-row { display: flex; gap: 10px; align-items: flex-start; margin: 14px 0 4px; cursor: pointer; }
+.check-row input { margin-top: 3px; accent-color: var(--red); width: 16px; height: 16px; flex: none; }
+.check-row span { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.check-row small { color: var(--text-3); font-size: 12px; line-height: 1.4; }

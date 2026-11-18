@@ -1,6 +1,7 @@
 // Admin panel API (/v1/admin/*). A separate auth system: admins + admin_sessions (never users / sessions), short
 // sessions (8 h absolute, 60 min idle), bearer token kept only in the admin tab's memory. Every change is written to
 // admin_logs. All SQL is parameterised; every body is validated with zod; request bodies are capped at 16 KB.
+import { eraseAccount, erasureOf } from '../lib/erase';
 import { DEFAULT_PLAN_CONFIG, jobPostsUsage, loadPlanConfig, validPlanConfig } from '../lib/entitlements';
 import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
@@ -325,16 +326,19 @@ admin.get('/users', async (c) => {
 
   const [total, rows] = await Promise.all([
     c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users u WHERE ${where.join(' AND ')}`).bind(...params).first<{ n: number }>(),
-    c.env.DB.prepare(`SELECT u.id, u.email, u.released_email, u.status, u.is_demo, u.created_at, u.blocked_reason FROM users u
+    c.env.DB.prepare(`SELECT u.id, u.email, u.released_email, u.status, u.is_demo, u.created_at, u.blocked_reason, u.erased_at FROM users u
         WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...params, limit, offset)
-      .all<{ id: string; email: string; released_email: string | null; status: string; is_demo: number; created_at: number; blocked_reason: string | null }>(),
+      .all<{ id: string; email: string; released_email: string | null; status: string; is_demo: number; created_at: number;
+             blocked_reason: string | null; erased_at: number | null }>(),
   ]);
   const profiles = await profilesFor(c.env, rows.results.map((r) => r.id));
   return c.json({
     total: total?.n ?? 0, page: pageNo, limit,
     items: rows.results.map((u) => {
       const ps = profiles.get(u.id) ?? [];
-      return { id: u.id, email: u.released_email ?? u.email, emailReused: Boolean(u.released_email), status: userStatus(u.status), isDemo: u.is_demo === 1, createdAt: u.created_at,
+      // FIX 131: an erased account has no e-mail any more — "Deleted account".
+      return { id: u.id, email: u.erased_at ? 'Deleted account' : u.released_email ?? u.email, erased: Boolean(u.erased_at),
+               emailReused: Boolean(u.released_email), status: userStatus(u.status), isDemo: u.is_demo === 1, createdAt: u.created_at,
                blockedReason: u.blocked_reason, accountType: accountType(ps), isPro: ps.some((p) => p.isPro), profiles: ps };
     }),
   });
@@ -343,7 +347,7 @@ admin.get('/users', async (c) => {
 admin.get('/users/:id', async (c) => {
   const id = c.req.param('id');
   const u = await c.env.DB.prepare(`SELECT id, email, released_email, status, is_demo, created_at, updated_at, email_verified_at, email_verification,
-      blocked_reason, blocked_at, deleted_at, deleted_reason, banned_at, restricted_until, restriction_reason FROM users WHERE id = ?`).bind(id).first<Record<string, any>>();
+      blocked_reason, blocked_at, deleted_at, deleted_reason, banned_at, restricted_until, restriction_reason, erased_at FROM users WHERE id = ?`).bind(id).first<Record<string, any>>();
   if (!u) fail(404, 'user_not_found');
   const ps = (await profilesFor(c.env, [id])).get(id) ?? [];
   const ids = ps.map((p) => p.id);
@@ -367,7 +371,10 @@ admin.get('/users/:id', async (c) => {
     jobPosts: slots && { limit: slots.limit, used: slots.used, remaining: slots.remaining, unlimited: slots.unlimited,
                          bonus: slots.bonus ?? 0, resetsAt: slots.resetsAt ?? null, countedSince: slots.periodStart ?? null },
     // FEATURE 135: a deleted account whose address a new account took: its own e-mail stays visible here.
-    id: u!.id, email: u!.released_email ?? u!.email, emailReused: Boolean(u!.released_email), status: userStatus(u!.status), isDemo: u!.is_demo === 1, createdAt: u!.created_at,
+    id: u!.id, email: u!.erased_at ? 'Deleted account' : u!.released_email ?? u!.email, emailReused: Boolean(u!.released_email),
+    status: userStatus(u!.status), isDemo: u!.is_demo === 1, createdAt: u!.created_at,
+    // FIX 131: Delete all data — the erasure's technical state (files removed / left, a retry when it stopped).
+    erased: Boolean(u!.erased_at), erasure: await erasureOf(c.env, id),
     emailVerifiedAt: u!.email_verified_at, emailVerification: u!.email_verification, blockedReason: u!.blocked_reason,
     blockedAt: u!.blocked_at, deletedAt: u!.deleted_at, deletedReason: u!.deleted_reason, accountType: accountType(ps),
     bannedAt: u!.banned_at ?? null,
@@ -428,11 +435,34 @@ admin.patch('/profiles/:id', async (c) => {
   return c.json({ status: 'saved', changed: Object.keys(changes) });
 });
 
+// POST /admin/users/:id/erasure/retry — carries on with an erasure that stopped (files R2 didn't remove).
+admin.post('/users/:id/erasure/retry', async (c) => {
+  const id = c.req.param('id');
+  const op = await erasureOf(c.env, id);
+  if (!op) fail(404, 'erasure_not_found');
+  const result = await eraseAccount(c.env, id, c.get('admin')!.id);
+  await audit(c, 'user.erase_retry', 'user', id, null, { erasure: result });
+  return c.json({ erasure: result });
+});
+
 admin.patch('/users/:id/status', async (c) => {
   const id = c.req.param('id');
-  const body = z.object({ action: z.enum(['block', 'unblock', 'delete', 'restore']), reason: Reason.optional() }).parse(await c.req.json());
-  const u = await c.env.DB.prepare(`SELECT status, email FROM users WHERE id = ?`).bind(id).first<{ status: string; email: string }>();
+  const body = z.object({ action: z.enum(['block', 'unblock', 'delete', 'restore']), reason: Reason.optional(),
+                          deleteAllData: z.boolean().optional() }).parse(await c.req.json());
+  const u = await c.env.DB.prepare(`SELECT status, email, is_demo, erased_at FROM users WHERE id = ?`).bind(id)
+    .first<{ status: string; email: string; is_demo: number; erased_at: number | null }>();
   if (!u) fail(404, 'user_not_found');
+  // FIX 131: an erased account is a tombstone — nothing to block, restore or delete again (a stopped erasure: Retry).
+  if (u!.erased_at && body.action !== 'delete') fail(409, 'account_erased', 'This account was erased; it cannot be changed.');
+  if (body.action === 'delete' && body.deleteAllData) {
+    if (!body.reason) fail(422, 'reason_required');
+    if (u!.is_demo) fail(403, 'demo_account');
+    const admin = c.get('admin');
+    const result = await eraseAccount(c.env, id, admin!.id);
+    await audit(c, 'user.erase', 'user', id, body.reason ?? null, { erasure: result });
+    return c.json({ status: 'deleted', erased: true, erasure: result });
+  }
+  if (u!.erased_at) fail(409, 'account_erased', 'This account was erased; it cannot be changed.');
   const t = now();
   const db = c.env.DB;
   if ((body.action === 'block' || body.action === 'delete') && !body.reason) fail(422, 'reason_required');

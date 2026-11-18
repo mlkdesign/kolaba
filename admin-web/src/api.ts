@@ -82,6 +82,8 @@ export function errorText(e: unknown): string {
 export interface Card {
   id: string; type: 'creator' | 'business'; displayName: string; username: string; avatarUrl: string | null; isPro: boolean;
   isDemo: boolean; location: string | null; category: string | null; userId?: string;
+  /** FIX 131: an erased account's profile — shown as "Deleted account", nothing personal. */
+  isDeleted?: boolean;
 }
 export interface AdminProfile extends Card {
   status: string; bio: string; website: string | null; visibility: string; createdAt: number; publicUrl: string | null;
@@ -92,6 +94,8 @@ export interface UserRow {
   id: string; email: string; status: 'active' | 'blocked' | 'deleted'; isDemo: boolean; createdAt: number; blockedReason: string | null;
   /** FEATURE 135: deleted, and a new account registered with its e-mail since. */
   emailReused?: boolean;
+  /** FIX 131: Delete all data — the account is an anonymous tombstone ("Deleted account"). */
+  erased?: boolean;
   accountType: 'creator' | 'business' | 'both' | 'none'; isPro: boolean; profiles: AdminProfile[];
 }
 export interface LogRow {
@@ -106,6 +110,12 @@ export interface UserDetail extends UserRow {
   jobPosts: { limit: number | null; used: number; remaining: number | null; unlimited: boolean; bonus: number;
               resetsAt: number | null; countedSince: number | null } | null;
   logs: { id: number; admin_email: string; action: string; result: string; reason: string | null; created_at: number }[];
+  /** FIX 131: the erasure's technical state (null: never erased). */
+  erasure: Erasure | null;
+}
+export interface Erasure {
+  id: string; status: 'requested' | 'processing' | 'completed' | 'failed'; profiles: number;
+  filesTotal: number; filesDeleted: number; filesFailed: number; error: string | null;
 }
 export interface JobRow {
   id: string; title: string; category: string | null; status: string; moderationReason: string | null; publishedAt: number | null;

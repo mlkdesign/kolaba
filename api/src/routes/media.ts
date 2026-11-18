@@ -222,7 +222,7 @@ media.get('/chat-file/:fileId', async (c) => {
   const exp = Number(c.req.query('exp'));
   if (!exp || exp < now() || c.req.query('sig') !== (await signature(c.env, `file:${id}`, exp))) fail(403, 'forbidden');
   const row = await c.env.DB.prepare(`SELECT f.storage_key, f.mime, f.name FROM message_files f JOIN messages m ON m.id = f.message_id
-      WHERE f.id = ? AND m.deleted_at IS NULL`).bind(id).first<{ storage_key: string; mime: string; name: string }>();
+      WHERE f.id = ? AND m.deleted_at IS NULL AND f.erased_at IS NULL`).bind(id).first<{ storage_key: string; mime: string; name: string }>();
   if (!row || !c.env.MEDIA) fail(404, 'media_not_found');
   const object = await c.env.MEDIA!.get(row!.storage_key);
   if (!object) fail(404, 'media_not_found');
@@ -238,7 +238,7 @@ media.get('/voice/:messageId', async (c) => {
   const exp = Number(c.req.query('exp'));
   if (!exp || exp < now() || c.req.query('sig') !== (await signature(c.env, `voice:${id}`, exp))) fail(403, 'forbidden');
   const row = await c.env.DB.prepare(`SELECT v.storage_key, v.mime FROM message_voice v JOIN messages m ON m.id = v.message_id
-      WHERE v.message_id = ? AND m.deleted_at IS NULL`).bind(id).first<{ storage_key: string; mime: string }>();
+      WHERE v.message_id = ? AND m.deleted_at IS NULL AND v.erased_at IS NULL`).bind(id).first<{ storage_key: string; mime: string }>();
   if (!row || !c.env.MEDIA) fail(404, 'media_not_found');
   const rangeHeader = c.req.header('Range');
   const m = rangeHeader ? /^bytes=(\d*)-(\d*)$/.exec(rangeHeader) : null;

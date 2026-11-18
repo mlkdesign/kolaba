@@ -52,15 +52,18 @@ async function messagesJSON(env: Env, rows: Record<string, any>[], viewer: strin
   const conversationIds = [...new Set(rows.map((r) => r.conversation_id as string))];
   const replyIds = [...new Set(rows.map((r) => r.reply_to_id as string | null).filter(Boolean))] as string[];
   const [attachments, reactions, voices, files, states, replies] = await Promise.all([
-    env.DB.prepare(`SELECT ma.message_id, ${mediaColumns} FROM message_attachments ma
-      JOIN media m ON m.id = ma.media_id AND m.status = 'ready' AND m.review_status NOT IN ('rejected', 'removed')
-      WHERE ma.message_id IN (${marks}) ORDER BY ma.position`).bind(...ids).all<MediaRow & { message_id: string }>(),
+    // FIX 131: a file deleted with its owner's account keeps its place in the bubble as "Media unavailable".
+    env.DB.prepare(`SELECT ma.message_id, ${mediaColumns}, m.status AS media_status FROM message_attachments ma
+      JOIN media m ON m.id = ma.media_id AND (m.status = 'ready' OR (m.status = 'deleted' AND EXISTS (
+        SELECT 1 FROM profiles op WHERE op.id = m.owner_profile_id AND op.erased_at IS NOT NULL)))
+        AND m.review_status NOT IN ('rejected', 'removed')
+      WHERE ma.message_id IN (${marks}) ORDER BY ma.position`).bind(...ids).all<MediaRow & { message_id: string; media_status: string }>(),
     env.DB.prepare(`SELECT message_id, COUNT(*) AS n, SUM(profile_id = ?) AS mine FROM message_reactions
       WHERE message_id IN (${marks}) AND kind = 'like' GROUP BY message_id`).bind(viewer, ...ids).all<{ message_id: string; n: number; mine: number }>(),
-    env.DB.prepare(`SELECT message_id, mime, bytes, duration, waveform FROM message_voice WHERE message_id IN (${marks})`)
-      .bind(...ids).all<{ message_id: string; mime: string; bytes: number; duration: number; waveform: string }>(),
-    env.DB.prepare(`SELECT id, message_id, name, mime, bytes FROM message_files WHERE message_id IN (${marks}) ORDER BY created_at, id`)
-      .bind(...ids).all<{ id: string; message_id: string; name: string; mime: string; bytes: number }>(),
+    env.DB.prepare(`SELECT message_id, mime, bytes, duration, waveform, erased_at FROM message_voice WHERE message_id IN (${marks})`)
+      .bind(...ids).all<{ message_id: string; mime: string; bytes: number; duration: number; waveform: string; erased_at: number | null }>(),
+    env.DB.prepare(`SELECT id, message_id, name, mime, bytes, erased_at FROM message_files WHERE message_id IN (${marks}) ORDER BY created_at, id`)
+      .bind(...ids).all<{ id: string; message_id: string; name: string; mime: string; bytes: number; erased_at: number | null }>(),
     env.DB.prepare(`SELECT conversation_id, MAX(last_read_at) AS r, MAX(last_delivered_at) AS d FROM conversation_read_state
       WHERE conversation_id IN (${conversationIds.map(() => '?').join(',')}) AND profile_id <> ? GROUP BY conversation_id`)
       .bind(...conversationIds, viewer).all<{ conversation_id: string; r: number; d: number }>(),
@@ -82,7 +85,8 @@ async function messagesJSON(env: Env, rows: Record<string, any>[], viewer: strin
   const filesBy = new Map<string, unknown[]>();
   for (const f of files.results) {
     filesBy.set(f.message_id, [...(filesBy.get(f.message_id) ?? []),
-      { id: f.id, name: f.name, mime: f.mime, bytes: f.bytes, url: await signedFileURL(env, f.id) }]);
+      f.erased_at ? { id: f.id, name: f.name, mime: f.mime, bytes: f.bytes, url: null, unavailable: true }
+        : { id: f.id, name: f.name, mime: f.mime, bytes: f.bytes, url: await signedFileURL(env, f.id) }]);
   }
   const statusOf = (m: Record<string, any>) => {
     const s = stateBy.get(m.conversation_id);
@@ -92,13 +96,17 @@ async function messagesJSON(env: Env, rows: Record<string, any>[], viewer: strin
   const likes = new Map(reactions.results.map((r) => [r.message_id, r]));
   const voiceBy = new Map<string, Record<string, unknown>>();
   for (const v of voices.results) {
-    voiceBy.set(v.message_id, { url: await signedVoiceURL(env, v.message_id), mime: v.mime, bytes: v.bytes, duration: v.duration,
-                                waveform: JSON.parse(v.waveform || '[]') });
+    voiceBy.set(v.message_id, { url: v.erased_at ? null : await signedVoiceURL(env, v.message_id), mime: v.mime, bytes: v.bytes,
+                                duration: v.duration, waveform: JSON.parse(v.waveform || '[]'), ...(v.erased_at ? { unavailable: true } : {}) });
   }
   const byMessage = new Map<string, unknown[]>();
   for (const m of attachments.results) {
-    const json = mediaJSON(env, m);
-    if (m.provider === 'r2') json.url = await signedMediaURL(env, m.id);
+    const json: Record<string, unknown> = mediaJSON(env, m);
+    if (m.media_status === 'deleted') {
+      Object.assign(json, { url: null, posterUrl: null, fallbackUrl: null, unavailable: true });
+    } else if (m.provider === 'r2') {
+      json.url = await signedMediaURL(env, m.id);
+    }
     byMessage.set(m.message_id, [...(byMessage.get(m.message_id) ?? []), json]);
   }
   return rows.map((m) => ({
@@ -325,6 +333,9 @@ async function checkCanSend(env: Env, conversationId: string, profile: { id: str
   const other = await env.DB.prepare(`SELECT profile_id FROM conversation_participants WHERE conversation_id = ? AND profile_id <> ? LIMIT 1`)
     .bind(conversationId, profile.id).first<{ profile_id: string }>();
   if (!other) fail(404, 'conversation_not_found');
+  // FIX 131: the other side's account was deleted — the chat stays as history, nothing new can be sent to it.
+  const erased = await env.DB.prepare(`SELECT erased_at FROM profiles WHERE id = ?`).bind(other!.profile_id).first<{ erased_at: number | null }>();
+  if (erased?.erased_at) fail(410, 'account_deleted', 'You can no longer message this account.');
   const block = await blockState(env, profile.ownerUserId, other!.profile_id);
   if (block.byMe) fail(403, 'blocked_by_you');
   if (block.byThem) fail(403, 'blocked');

@@ -221,6 +221,8 @@ export async function profilePage(env: Env, id: string, viewerUserId: string | n
       FROM profiles p LEFT JOIN profile_settings s ON s.profile_id = p.id
       WHERE p.id = ?1 OR (p.username = ?1 AND NOT EXISTS (SELECT 1 FROM profiles x WHERE x.id = ?1))`).bind(id)
     .first<Record<string, any>>();
+  // FIX 131: an erased account — "Deleted account" (the app shows its own screen, never the old profile).
+  if (p?.erased_at) fail(410, 'account_deleted', 'This profile has been deleted and is no longer available on Kolaba.');
   if (!p || p.status === 'deleted') fail(404, 'profile_not_found');
   id = p!.id; // an old /profile/<username> link: the profile's own id from here on
   const isOwner = p!.owner_user_id === viewerUserId;

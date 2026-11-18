@@ -91,7 +91,9 @@ export function JobsPage({ owner }: { owner: string | null }) {
                   </span>
                   <span className="cell-user">
                     {j.author && <Avatar url={j.author.avatarUrl} name={j.author.displayName} size={24} />}
-                    <span className="cell-user__text"><b className="regular">{j.author?.displayName ?? '—'}</b><span>@{j.author?.username}</span></span>
+                    {/* FIX 131: an erased owner — "Deleted account", never its old name, photo or username. */}
+                    <span className="cell-user__text"><b className="regular">{j.author?.isDeleted ? 'Deleted account' : j.author?.displayName ?? '—'}</b>
+                      {!j.author?.isDeleted && <span>@{j.author?.username}</span>}</span>
                   </span>
                   <span className="cell-muted ellipsis">{j.category ?? '—'}</span>
                   <span className="cell-muted">{fmtNum(j.applicationsCount)}</span>
@@ -188,7 +190,8 @@ export function JobPage({ id }: { id: string }) {
                 {j.owner && (
                   <div className="author">
                     <Avatar url={j.owner.avatarUrl} name={j.owner.displayName} size={44} />
-                    <div className="cell-user__text"><b>{j.owner.displayName}</b><span>@{j.owner.username} · {j.owner.type}</span></div>
+                    <div className="cell-user__text"><b>{j.owner.isDeleted ? 'Deleted account' : j.owner.displayName}</b>
+                      <span>{j.owner.isDeleted ? 'Account erased' : `@${j.owner.username}`} · {j.owner.type}</span></div>
                   </div>
                 )}
                 <div className="profile-card__actions">

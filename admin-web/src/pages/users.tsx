@@ -1,6 +1,6 @@
 // Users (Figma: Screen / Users) — accounts from D1 with their creator / business profiles.
 import { useState } from 'react';
-import { api, errorText, query, type AdminProfile, type Dashboard, type Paged, type UserDetail, type UserRow } from '../api';
+import { api, errorText, query, type AdminProfile, type Dashboard, type Erasure, type Paged, type UserDetail, type UserRow } from '../api';
 import { PageHeader } from '../app';
 import { href, navigate, useRemembered } from '../router';
 import {
@@ -23,7 +23,7 @@ function planLabel(u: { isPro: boolean; profiles: AdminProfile[] }) {
 /** Account-level actions shared by the table menu and the account page. */
 function useAccountActions(reload: () => void) {
   const { modal, open } = useModal();
-  const act = (u: { id: string; email: string }, action: 'block' | 'unblock' | 'delete' | 'restore') => open((close) => {
+  const act = (u: { id: string; email: string; status?: string }, action: 'block' | 'unblock' | 'delete' | 'restore') => open((close) => {
     const run = async (reason: string) => {
       await api('PATCH', `/users/${u.id}/status`, { action, reason: reason || undefined });
       toast.ok({ block: 'Account blocked', unblock: 'Account unblocked', delete: 'Account deleted', restore: 'Account restored' }[action],
@@ -36,15 +36,114 @@ function useAccountActions(reload: () => void) {
     if (action === 'unblock') return <ConfirmModal title="Unblock account" confirmLabel="Unblock" onClose={close} onConfirm={run}
       text={<>Unblock <b>{u.email}</b>? They can sign in and use the app again. A permanent ban is lifted too: profiles it hid
         come back and the e-mail may register again.</>} />;
-    if (action === 'delete') return <ConfirmModal title="Delete account" danger reason typeToConfirm="DELETE" confirmLabel="Delete account" onClose={close} onConfirm={run}
-      text={<>Soft-delete <b>{u.email}</b>: sign-in stops and the profiles disappear from KOLABA. <b>Nothing is erased</b> — jobs, media and
-        messages stay in the database, and the account can be restored. <b>The person may register again with this e-mail</b> (or
-        Google): a new account is made and this one keeps its data — to stop that, Block instead.</>} />;
+    if (action === 'delete') return <DeleteAccountModal user={u} onClose={close} onDone={reload} />;
     return <ConfirmModal title="Restore account" confirmLabel="Restore account" onClose={close} onConfirm={run}
       text={<>Restore <b>{u.email}</b>? The account becomes active and the profiles hidden by the deletion become public again.
         It can’t be restored if a new account has registered with this e-mail since.</>} />;
   });
   return { modal, act };
+}
+
+/** FIX 131: Delete account — the soft delete (restorable) or, with "Delete all data", the erasure (for good): a second,
+ *  separate confirmation, then Processing until the server has removed the data and the files. */
+function DeleteAccountModal({ user, onClose, onDone }: { user: { id: string; email: string; status?: string }; onClose: () => void; onDone: () => void }) {
+  const alreadyDeleted = user.status === 'deleted';
+  const [reason, setReason] = useState('');
+  const [typed, setTyped] = useState('');
+  const [all, setAll] = useState(alreadyDeleted);
+  const [step, setStep] = useState<'form' | 'confirm' | 'processing'>('form');
+  const [error, setError] = useState<string | null>(null);
+  const ready = reason.trim().length >= 3 && typed === 'DELETE' && (all || !alreadyDeleted);
+  const run = async () => {
+    setStep('processing'); setError(null);
+    try {
+      const r = await api<{ erasure?: Erasure }>('PATCH', `/users/${user.id}/status`, { action: 'delete', reason: reason.trim(), deleteAllData: all });
+      if (all && r.erasure && r.erasure.status !== 'completed') {
+        toast.error('Erasure not finished', `${r.erasure.filesFailed} file(s) still to remove — retry from the account page.`);
+      } else {
+        toast.ok(all ? 'Account and data deleted' : 'Account deleted', `${user.email} · recorded in Activity Logs.`);
+      }
+      onDone(); onClose();
+    } catch (e) {
+      setError(errorText(e)); setStep(all ? 'confirm' : 'form');
+    }
+  };
+  const busy = step === 'processing';
+  if (all && step !== 'form') {
+    return (
+      <Modal title="Delete account?" onClose={busy ? () => {} : () => setStep('form')}>
+        <div className="modal__text">Your profile and uploaded media will be permanently removed. Existing conversations will remain under
+          <b> Deleted account</b>. This can’t be undone.</div>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <div className="modal__actions">
+          <Button onClick={() => setStep('form')} disabled={busy}>Cancel</Button>
+          <Button variant="danger" loading={busy} disabled={busy} onClick={run}>{busy ? 'Processing…' : 'Delete account'}</Button>
+        </div>
+      </Modal>
+    );
+  }
+  return (
+    <Modal title="Delete account" onClose={busy ? () => {} : onClose}>
+      <form onSubmit={(e) => { e.preventDefault(); if (!ready) return; if (all) setStep('confirm'); else run(); }}>
+        <div className="modal__text">
+          {alreadyDeleted
+            ? <>The account <b>{user.email}</b> is soft-deleted. Delete all data to erase it for good.</>
+            : <>Soft-delete <b>{user.email}</b>: sign-in stops and the profiles disappear from KOLABA. <b>Nothing is erased</b> — jobs, media and
+                messages stay in the database, and the account can be restored. <b>The person may register again with this e-mail</b> (or
+                Google): a new account is made and this one keeps its data — to stop that, Block instead.</>}
+        </div>
+        <label className="check-row">
+          <input type="checkbox" checked={all} disabled={alreadyDeleted} onChange={(e) => setAll(e.target.checked)} />
+          <span><b>Delete all data</b>
+            <small>Your profile and uploaded media will be permanently deleted. Existing conversations will remain, but your account will appear
+              as Deleted account.</small></span>
+        </label>
+        <Field label="Reason">
+          <textarea className="input" rows={3} maxLength={500} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus
+                    placeholder="Visible in Activity Logs" />
+        </Field>
+        <Field label="Type DELETE to confirm">
+          <input className="input" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
+        </Field>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <div className="modal__actions">
+          <Button onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button type="submit" variant="danger" loading={busy} disabled={!ready || busy}>{busy ? 'Processing…' : 'Delete account'}</Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/** FIX 131: an erased account's technical state — files removed / left, and Retry when it stopped. */
+function ErasurePanel({ userId, erasure, onRetried }: { userId: string; erasure: Erasure; onRetried: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const retry = async () => {
+    setBusy(true);
+    try {
+      const r = await api<{ erasure: Erasure }>('POST', `/users/${userId}/erasure/retry`);
+      if (r.erasure.status === 'completed') toast.ok('Erasure completed', 'Every file is removed.');
+      else toast.error('Erasure not finished', `${r.erasure.filesFailed} file(s) still to remove.`);
+      onRetried();
+    } catch (e) { toast.error('Retry failed', errorText(e)); }
+    setBusy(false);
+  };
+  const label = { requested: 'Requested', processing: 'Processing', completed: 'Completed', failed: 'Retry required' }[erasure.status];
+  return (
+    <section className="panel">
+      <div className="panel__head">
+        <div><h2>Data erasure</h2><p>Delete all data — profiles, media and files removed; chats kept under “Deleted account”</p></div>
+        {erasure.status !== 'completed' && <Button onClick={retry} loading={busy}>Retry</Button>}
+      </div>
+      <dl className="facts">
+        <div><dt>Status</dt><dd>{label}</dd></div>
+        <div><dt>Profiles</dt><dd>{fmtNum(erasure.profiles)} (kept as anonymous ids)</dd></div>
+        <div><dt>Files removed</dt><dd>{fmtNum(erasure.filesDeleted)} of {fmtNum(erasure.filesTotal)}</dd></div>
+        {erasure.error && <div><dt>Last error</dt><dd>{erasure.error}</dd></div>}
+        <div><dt>Operation</dt><dd className="mono">{erasure.id}</dd></div>
+      </dl>
+    </section>
+  );
 }
 
 export function UsersPage() {
@@ -120,7 +219,7 @@ export function UsersPage() {
                         { label: 'Block account', onClick: () => act(u, 'block'), danger: true, hidden: u.status !== 'active' },
                         { label: 'Unblock account', onClick: () => act(u, 'unblock'), hidden: u.status !== 'blocked' },
                         { label: 'Restore account', onClick: () => act(u, 'restore'), hidden: u.status !== 'deleted' },
-                        { label: 'Delete account', onClick: () => act(u, 'delete'), danger: true, hidden: u.status === 'deleted' },
+                        { label: 'Delete account', onClick: () => act(u, 'delete'), danger: true, hidden: u.erased === true },
                       ]} />
                     </span>
                   </div>
@@ -216,14 +315,16 @@ export function UserPage({ id }: { id: string }) {
             {u.status === 'blocked' && <Button onClick={() => act(u, 'unblock')}>{u.bannedAt ? 'Unblock (lift ban)' : 'Unblock'}</Button>}
             {u.restrictedUntil && <Button onClick={liftRestriction}>Lift restriction</Button>}
             {u.status !== 'deleted' && <Button onClick={() => message({ scope: 'account', id: u.id, name: u.email })}>Send notification</Button>}
-            {u.status === 'deleted'
-              ? <Button onClick={() => act(u, 'restore')}>Restore account</Button>
+            {u.erased ? null : u.status === 'deleted'
+              ? <><Button onClick={() => act(u, 'restore')}>Restore account</Button>
+                  <Button variant="ghost" onClick={() => act(u, 'delete')}>Delete all data</Button></>
               : <Button variant="ghost" onClick={() => act(u, 'delete')}>Delete account</Button>}
           </>
         )} />
       <div className="content">
         {error ? <ErrorState error={error} retry={reload} /> : !u ? <Loading /> : (
           <>
+            {u.erasure && <ErasurePanel userId={u.id} erasure={u.erasure} onRetried={reload} />}
             <section className="panel">
               <div className="panel__head"><div><h2>Account</h2><p>One sign-in; profiles belong to it</p></div><Status value={u.status} /></div>
               <dl className="facts">

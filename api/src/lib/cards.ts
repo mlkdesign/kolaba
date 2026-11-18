@@ -62,6 +62,8 @@ export function card(env: Env, row: CardRow, prefix = '', asOwner = false) {
     // Paid plans are off for now (moderation.ts): only PRO an administrator gave shows its badge (FEATURE 115).
     isPro: monetizationEnabled(env) ? get('is_pro') === 1 : get('is_pro_grant') === 1,
     isDemo: get('is_demo') === 1,
+    // FIX 131: an erased account's tombstone ("Deleted account", no photo, no place).
+    isDeleted: get('status') === 'deleted',
   };
 }
 

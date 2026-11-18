@@ -85,12 +85,14 @@ await test('account deletion needs the password again', async () => {
   expect(wrong.status === 401, `wrong password: ${wrong.status}`);
 });
 
-await test('account deletion removes the account, profiles, files and sessions', async () => {
+// FIX 131: the account stays only as an anonymous tombstone (ids for other people's chats), nothing personal in it.
+await test('account deletion erases the account, profiles, files and sessions', async () => {
   const r = await call(token, 'DELETE', '/v1/me', { confirm: 'DELETE', password });
   expect(r.status === 200 && r.json.status === 'deleted' && r.json.profiles === 3, `delete: ${r.text}`);
   expect((await call(token, 'GET', '/v1/auth/session')).status === 401, 'session still valid');
   expect((await fetch(photoUrl)).status === 404, 'photo still served');
-  const left = JSON.parse(sql(`SELECT (SELECT COUNT(*) FROM users WHERE id = '${userId}') u, (SELECT COUNT(*) FROM profiles WHERE owner_user_id = '${userId}') p,
+  const left = JSON.parse(sql(`SELECT (SELECT COUNT(*) FROM users WHERE id = '${userId}' AND (erased_at IS NULL OR email = '${email}')) u,
+      (SELECT COUNT(*) FROM profiles WHERE owner_user_id = '${userId}' AND display_name <> 'Deleted account') p,
       (SELECT COUNT(*) FROM feedback WHERE user_id = '${userId}') f, (SELECT COUNT(*) FROM sessions WHERE user_id = '${userId}') s`))[0].results[0];
   expect(left.u === 0 && left.p === 0 && left.f === 0 && left.s === 0, `left behind: ${JSON.stringify(left)}`);
   const again = await call(null, 'POST', '/v1/auth/login', { email, password });

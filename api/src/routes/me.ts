@@ -9,6 +9,7 @@ import { canTestPro } from './auth';
 import { entitlementsSnapshot } from '../lib/entitlements';
 import { monetizationEnabled } from '../lib/moderation';
 import { verifyPassword } from '../lib/password';
+import { eraseAccount } from '../lib/erase';
 import { mediaColumns, mediaJSON, type MediaRow } from '../lib/cards';
 import { visibleMediaSQL } from '../lib/moderation';
 
@@ -104,73 +105,6 @@ me.get('/entitlements', requireProfile, async (c) => {
   return c.json(await entitlementsSnapshot(c.env, actingProfile(c)));
 });
 
-/** Everything an account owns, removed for real. Shared things: a conversation stays for the other side (this
- *  account's messages go with its profiles); reviews it wrote and received go; jobs go with their applications. R2
- *  files are deleted after the rows; a file that fails is reported, never blocks the deletion. */
-export async function deleteAccount(env: Env, userId: string): Promise<{ profiles: number; files: number; filesFailed: string[] }> {
-  const P = `(SELECT id FROM profiles WHERE owner_user_id = ?1)`;
-  const files = await env.DB.prepare(`SELECT storage_key FROM media WHERE owner_profile_id IN ${P} AND provider = 'r2' AND storage_key IS NOT NULL
-      UNION ALL SELECT storage_key FROM message_voice WHERE message_id IN (SELECT id FROM messages WHERE sender_profile_id IN ${P})
-      UNION ALL SELECT attachment_key FROM feedback WHERE user_id = ?1 AND attachment_key IS NOT NULL`)
-    .bind(userId).all<{ storage_key: string }>();
-  const count = await env.DB.prepare(`SELECT COUNT(*) AS n FROM profiles WHERE owner_user_id = ?`).bind(userId).first<{ n: number }>();
-  const statements = [
-    `UPDATE conversations SET last_message_id = NULL WHERE last_message_id IN (SELECT id FROM messages WHERE sender_profile_id IN ${P})`,
-    `DELETE FROM message_attachments WHERE message_id IN (SELECT id FROM messages WHERE sender_profile_id IN ${P}) OR media_id IN (SELECT id FROM media WHERE owner_profile_id IN ${P})`,
-    `DELETE FROM messages WHERE sender_profile_id IN ${P}`,
-    `DELETE FROM application_media WHERE application_id IN (SELECT id FROM applications WHERE creator_profile_id IN ${P} OR job_id IN (SELECT id FROM jobs WHERE owner_profile_id IN ${P}))`,
-    `DELETE FROM applications WHERE creator_profile_id IN ${P} OR job_id IN (SELECT id FROM jobs WHERE owner_profile_id IN ${P})`,
-    `DELETE FROM saved_jobs WHERE profile_id IN ${P} OR job_id IN (SELECT id FROM jobs WHERE owner_profile_id IN ${P})`,
-    `DELETE FROM job_media WHERE job_id IN (SELECT id FROM jobs WHERE owner_profile_id IN ${P})`,
-    `DELETE FROM jobs WHERE owner_profile_id IN ${P}`,
-    `DELETE FROM likes WHERE profile_id IN ${P} OR media_id IN (SELECT id FROM media WHERE owner_profile_id IN ${P})`,
-    `DELETE FROM media_views WHERE viewer_profile_id IN ${P} OR media_id IN (SELECT id FROM media WHERE owner_profile_id IN ${P})`,
-    `DELETE FROM collection_items WHERE media_id IN (SELECT id FROM media WHERE owner_profile_id IN ${P}) OR collection_id IN (SELECT id FROM collections WHERE owner_profile_id IN ${P})`,
-    `DELETE FROM collections WHERE owner_profile_id IN ${P}`,
-    `UPDATE profiles SET avatar_media_id = NULL, intro_video_media_id = NULL WHERE owner_user_id = ?1`,
-    `DELETE FROM media WHERE owner_profile_id IN ${P}`,
-    `DELETE FROM contact_requests WHERE sender_profile_id IN ${P} OR recipient_profile_id IN ${P}`,
-    `DELETE FROM follows WHERE follower_profile_id IN ${P} OR followee_profile_id IN ${P}`,
-    `DELETE FROM review_requests WHERE requester_profile_id IN ${P} OR contact_profile_id IN ${P}`,
-    `DELETE FROM reviews WHERE author_user_id = ?1 OR author_profile_id IN ${P} OR recipient_profile_id IN ${P}`,
-    `DELETE FROM review_invites WHERE owner_profile_id IN ${P} OR accepted_by_profile_id IN ${P}`,
-    `DELETE FROM notifications WHERE recipient_user_id = ?1 OR recipient_profile_id IN ${P} OR actor_profile_id IN ${P}`,
-    // Reports this account filed stay for the moderators, without the reporter (DATA_RETENTION.md).
-    `UPDATE reports SET reporter_user_id = NULL, reporter_profile_id = NULL WHERE reporter_user_id = ?1 OR reporter_profile_id IN ${P}`,
-    `DELETE FROM message_reactions WHERE profile_id IN ${P} OR message_id IN (SELECT id FROM messages WHERE sender_profile_id IN ${P})`,
-    `DELETE FROM message_voice WHERE message_id IN (SELECT id FROM messages WHERE sender_profile_id IN ${P})`,
-    `DELETE FROM blocks WHERE blocker_user_id = ?1 OR blocked_user_id = ?1`,
-    `DELETE FROM feedback WHERE user_id = ?1`,
-    `DELETE FROM conversation_read_state WHERE profile_id IN ${P}`,
-    `DELETE FROM conversation_participants WHERE profile_id IN ${P}`,
-    // A conversation nobody is left in goes too.
-    `DELETE FROM messages WHERE conversation_id NOT IN (SELECT conversation_id FROM conversation_participants)`,
-    `DELETE FROM conversations WHERE id NOT IN (SELECT conversation_id FROM conversation_participants)`,
-    `DELETE FROM profile_links WHERE profile_id IN ${P}`,
-    `DELETE FROM profile_social_accounts WHERE profile_id IN ${P}`,
-    `DELETE FROM profile_settings WHERE profile_id IN ${P}`,
-    `DELETE FROM subscriptions WHERE profile_id IN ${P}`,
-    `DELETE FROM usage_events WHERE user_id = ?1`,
-    `DELETE FROM profiles WHERE owner_user_id = ?1`,
-    `DELETE FROM sessions WHERE user_id = ?1`,
-    `DELETE FROM device_tokens WHERE user_id = ?1`,
-    `DELETE FROM auth_identities WHERE user_id = ?1`,
-    `DELETE FROM email_codes WHERE user_id = ?1`,
-    `DELETE FROM user_settings WHERE user_id = ?1`,
-    `DELETE FROM users WHERE id = ?1`,
-  ];
-  // D1 rejects a binding a statement doesn't use, so only the ones that name ?1 get the id.
-  await env.DB.batch(statements.map((sql) => (sql.includes('?1') ? env.DB.prepare(sql).bind(userId) : env.DB.prepare(sql))));
-  const failed: string[] = [];
-  if (env.MEDIA) {
-    for (const f of files.results) {
-      try { await env.MEDIA.delete(f.storage_key); } catch { failed.push(f.storage_key); }
-    }
-  }
-  if (failed.length) console.error('account deletion: files not removed', userId, failed);
-  return { profiles: count?.n ?? 0, files: files.results.length - failed.length, filesFailed: failed };
-}
-
 /** One profile of an account and everything it owns, removed for real (Account Center → delete a profile): its media
  *  and files, jobs with their applications, chats' messages it sent (a conversation nobody is left in goes too),
  *  contacts, reviews it wrote or received, notifications, settings. The account and its other profiles stay. */
@@ -236,10 +170,12 @@ me.delete('/', async (c) => {
     if (!body.password) fail(401, 'password_required');
     if (!(await verifyPassword(body.password!, creds.password_hash, creds.password_salt, creds.password_scheme))) fail(401, 'invalid_credentials');
   }
-  const result = await deleteAccount(c.env, user.id);
+  // FIX 131: the one erasure (src/lib/erase.ts) — the same as the admin panel's "Delete all data".
+  const result = await eraseAccount(c.env, user.id, 'self');
   await c.env.DB.prepare(`INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, detail, created_at)
-      VALUES (NULL, 'account.deleted', 'user', ?, ?, ?)`).bind(user.id, JSON.stringify(result), now()).run();
-  return c.json({ status: 'deleted', ...result });
+      VALUES (NULL, 'account.erased', 'user', ?, ?, ?)`).bind(user.id, JSON.stringify(result), now()).run();
+  return c.json({ status: 'deleted', profiles: result.profiles, files: result.filesDeleted, filesFailed: result.filesFailed,
+                  erasure: result.status });
 });
 
 export default me;
