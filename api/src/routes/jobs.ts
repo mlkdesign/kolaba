@@ -5,7 +5,7 @@ import type { AppEnv, Env } from '../env';
 import { actingProfile, rateLimit, requireAuth, requireProfile } from '../lib/auth';
 import { cardColumns, avatarJoin, card, type CardRow, isPro, loadCards, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/cards';
 import { blockedBetweenUsers, checkText, monetizationEnabled, notBlockedSQL } from '../lib/moderation';
-import { jobPostSpentSQL, jobPostsUsage, limitReached, spendJobPost } from '../lib/entitlements';
+import { applicationsUsage, jobPostSpentSQL, jobPostsUsage, limitReached, spendApplication, spendJobPost } from '../lib/entitlements';
 import { clampLimit, decodeCursor, encodeCursor, fail, newId, now, parseJSON } from '../lib/util';
 
 const jobs = new Hono<AppEnv>();
@@ -134,10 +134,30 @@ jobs.get('/:id', requireAuth, requireProfile, async (c) => {
     .bind(c.req.param('id')).first<Record<string, any>>();
   if (!row || ((row.status === 'draft' || row.status === 'removed' || !['approved', undefined].includes(row.review_status))
       && row.owner_user_id !== profile.ownerUserId)) fail(404, 'job_not_found');
-  if (row!.owner_user_id !== profile.ownerUserId && row!.status === 'published') {
-    c.executionCtx.waitUntil(c.env.DB.prepare(`UPDATE jobs SET views_count = views_count + 1 WHERE id = ?`).bind(row!.id).run());
-  }
   return c.json((await jobsJSON(c.env, [row!], profile.id))[0]);
+});
+
+// POST /v1/jobs/:id/view — FIX 139: someone opened the job's page (its views count entries, never the feed's scrolling
+// or the app's own refreshes); the owner's own visits don't count. Answers the live numbers for the page.
+jobs.post('/:id/view', requireAuth, requireProfile, async (c) => {
+  const profile = actingProfile(c);
+  const id = c.req.param('id');
+  await c.env.DB.prepare(`UPDATE jobs SET views_count = views_count + 1 WHERE id = ? AND status = 'published'
+      AND owner_profile_id NOT IN (SELECT id FROM profiles WHERE owner_user_id = ?)`).bind(id, profile.ownerUserId).run();
+  const row = await c.env.DB.prepare(`SELECT views_count, (SELECT COUNT(*) FROM applications a WHERE a.job_id = jobs.id AND a.status = 'submitted'
+        AND EXISTS (SELECT 1 FROM profiles cp WHERE cp.id = a.creator_profile_id AND cp.status = 'active')) AS applications
+      FROM jobs WHERE id = ?`).bind(id).first<{ views_count: number; applications: number }>();
+  if (!row) fail(404, 'job_not_found');
+  return c.json({ viewsCount: row!.views_count, applicationsCount: row!.applications });
+});
+
+// GET /v1/jobs/:id/stats — the page's live numbers (polled while it's open), nothing counted.
+jobs.get('/:id/stats', requireAuth, requireProfile, async (c) => {
+  const row = await c.env.DB.prepare(`SELECT views_count, (SELECT COUNT(*) FROM applications a WHERE a.job_id = jobs.id AND a.status = 'submitted'
+        AND EXISTS (SELECT 1 FROM profiles cp WHERE cp.id = a.creator_profile_id AND cp.status = 'active')) AS applications
+      FROM jobs WHERE id = ?`).bind(c.req.param('id')).first<{ views_count: number; applications: number }>();
+  if (!row) fail(404, 'job_not_found');
+  return c.json({ viewsCount: row!.views_count, applicationsCount: row!.applications });
 });
 
 /** FIX 128: a job's References — up to 10 photos / videos, in order; only the owner's own ready media. Left out: left
@@ -431,7 +451,12 @@ jobs.post('/:id/apply', requireAuth, requireProfile, async (c) => {
   // FIX 128 / FEATURE 129: no copies — without a choice the application shows the creator's latest videos while they have
   // PRO; with one (`videoIds`, PRO only) it keeps references to those portfolio videos.
   const chosen = await checkedVideoChoice(c.env, profile.id, body.videoIds);
+  // FIX 139: one application of the creator's plan (Free: 10 in any 30 days) — held even if it's withdrawn later.
+  const already = await c.env.DB.prepare(`SELECT 1 AS ok FROM applications WHERE job_id = ? AND creator_profile_id = ? AND status = 'submitted'`)
+    .bind(job!.id, profile.id).first();
+  if (already) fail(409, 'already_applied');
   const id = newId('app');
+  if (!(await spendApplication(c.env, profile, id))) limitReached(await applicationsUsage(c.env, profile));
   try {
     await c.env.DB.batch([
       c.env.DB.prepare(`INSERT INTO applications (id, job_id, creator_profile_id, message, media_mode, created_at, updated_at)
@@ -440,6 +465,8 @@ jobs.post('/:id/apply', requireAuth, requireProfile, async (c) => {
           VALUES (?, ?, ?)`).bind(id, mid, i)),
     ]);
   } catch (error) {
+    // Not sent: its place is given back.
+    await c.env.DB.prepare(`DELETE FROM usage_events WHERE feature = 'applications' AND subject_id = ?`).bind(id).run();
     if (String(error).includes('UNIQUE')) fail(409, 'already_applied');
     throw error;
   }

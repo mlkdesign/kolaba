@@ -90,7 +90,8 @@ media.post('/uploads', requireAuth, requireProfile, async (c) => {
   const limit = body.purpose === 'avatar' && profile.type === 'business' ? 0 : COUNT_LIMITS[body.purpose]?.[body.kind];
   if (limit) {
     const used = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE owner_profile_id = ? AND purpose = ? AND kind = ?
-        AND status IN ('pending', 'ready')`).bind(profile.id, body.purpose, body.kind).first<{ n: number }>();
+        AND (status = 'ready' OR (status = 'pending' AND created_at >= ?))`).bind(profile.id, body.purpose, body.kind, now() - PENDING_UPLOAD_TTL)
+      .first<{ n: number }>();
     if ((used?.n ?? 0) >= limit) fail(409, 'media_limit_reached');
   }
   const id = newId('med');

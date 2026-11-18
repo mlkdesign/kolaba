@@ -28,6 +28,8 @@ interface CreatorPlanLimits {
   portfolio_video_limit: number | null;
   max_video_duration_seconds: number | null;
   collections_enabled: boolean;
+  /** FIX 139: applications a creator may send in any 30 days (null: no limit). Withdrawing never gives one back. */
+  applications_per_month: number | null;
 }
 interface BusinessPlanLimits {
   job_posts_per_month: number | null;
@@ -35,8 +37,8 @@ interface BusinessPlanLimits {
 
 export const DEFAULT_PLAN_CONFIG: PlanConfig = {
   creator: {
-    free: { portfolio_video_limit: 9, max_video_duration_seconds: 30, collections_enabled: false },
-    pro: { portfolio_video_limit: null, max_video_duration_seconds: 30, collections_enabled: true },
+    free: { portfolio_video_limit: 9, max_video_duration_seconds: 30, collections_enabled: false, applications_per_month: 10 },
+    pro: { portfolio_video_limit: null, max_video_duration_seconds: 30, collections_enabled: true, applications_per_month: null },
   },
   business: {
     free: { job_posts_per_month: 2 },
@@ -44,7 +46,7 @@ export const DEFAULT_PLAN_CONFIG: PlanConfig = {
   },
 };
 
-export type Feature = 'portfolio_videos' | 'job_posts' | 'collections' | 'video_duration';
+export type Feature = 'portfolio_videos' | 'job_posts' | 'collections' | 'video_duration' | 'applications';
 
 /** The stored configuration over the defaults (a key missing from the stored JSON keeps its default). */
 export async function loadPlanConfig(env: Env): Promise<PlanConfig> {
@@ -137,7 +139,8 @@ export const PORTFOLIO_VIDEOS_COUNT_SQL = `(SELECT COUNT(*) FROM media WHERE own
    AND kind = 'video' AND (status = 'ready' OR (status = 'pending' AND created_at >= ?))
    AND review_status NOT IN ('rejected', 'removed'))`;
 /** A pending upload older than this no longer holds its place. */
-export const PENDING_UPLOAD_TTL = 3_600_000;
+// FIX 139: an upload that never arrived stops holding its place after 15 minutes (the app also cancels it at once).
+export const PENDING_UPLOAD_TTL = 900_000;
 
 /** `proActive`: the plan state when the caller already has it (the snapshot) — not asked again. */
 export async function portfolioVideosUsage(env: Env, profile: ActingProfile, config?: PlanConfig,
@@ -178,6 +181,43 @@ export async function jobPostsUsage(env: Env, profile: ActingProfile, config?: P
            resetsAt: nextFree ?? (used ? rows.results[0].created_at + JOB_POST_WINDOW : undefined) };
 }
 
+/** FIX 139: a creator profile's applications in the last 30 days (rolling, like job posts): each one sent holds its
+ *  place for 30 days — withdrawing it doesn't give it back. */
+export async function applicationsUsage(env: Env, profile: ActingProfile, config?: PlanConfig,
+                                        proActive?: boolean): Promise<Usage> {
+  const cfg = config ?? await loadPlanConfig(env);
+  const pro = !monetizationEnabled(env) || (proActive ?? (await creatorPro(env, profile.id)).active);
+  const limit = (pro ? cfg.creator.pro : cfg.creator.free).applications_per_month;
+  const since = now() - JOB_POST_WINDOW;
+  const rows = await env.DB.prepare(`SELECT created_at FROM usage_events WHERE profile_id = ? AND feature = 'applications'
+      AND created_at > ? ORDER BY created_at`).bind(profile.id, since).all<{ created_at: number }>();
+  const used = rows.results.length;
+  const usage = counted('applications', 'profile', limit, used, 0, pro);
+  const shown = profile.type === 'creator' ? usage : { ...usage, allowed: false, reason: 'wrong_profile_type' };
+  const nextFree = limit != null && used >= limit && used > 0 ? rows.results[used - limit].created_at + JOB_POST_WINDOW : undefined;
+  return { ...shown, period: 'rolling_30_days', periodStart: since, periodEnd: now(),
+           resetsAt: nextFree ?? (used ? rows.results[0].created_at + JOB_POST_WINDOW : undefined) };
+}
+
+/** FIX 139: spends one application for `applicationId` — atomic (the count and the insert are one statement); false when
+ *  the limit is reached. */
+export async function spendApplication(env: Env, profile: ActingProfile, applicationId: string): Promise<boolean> {
+  const usage = await applicationsUsage(env, profile);
+  if (usage.limit == null) {
+    await env.DB.prepare(`INSERT OR IGNORE INTO usage_events (id, user_id, profile_id, feature, subject_id, period_start, created_at)
+        VALUES (?, ?, ?, 'applications', ?, ?, ?)`).bind(newId('use'), profile.ownerUserId, profile.id, applicationId,
+        monthPeriod().start, now()).run();
+    return true;
+  }
+  const t = now();
+  const res = await env.DB.prepare(`INSERT OR IGNORE INTO usage_events (id, user_id, profile_id, feature, subject_id, period_start, created_at)
+      SELECT ?, ?, ?, 'applications', ?, ?, ?
+       WHERE (SELECT COUNT(*) FROM usage_events WHERE profile_id = ? AND feature = 'applications' AND created_at > ?) < ?`)
+    .bind(newId('use'), profile.ownerUserId, profile.id, applicationId, monthPeriod(t).start, t,
+          profile.id, t - JOB_POST_WINDOW, usage.limit).run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
 /** FEATURE 130: the account's extra job-post slots and the last reset (an administrator's). */
 export async function jobPostSlots(env: Env, userId: string): Promise<{ bonus: number; resetAt: number | null }> {
   const row = await env.DB.prepare(`SELECT job_posts_bonus, job_posts_reset_at FROM users WHERE id = ?`).bind(userId)
@@ -195,11 +235,13 @@ export async function entitlementsSnapshot(env: Env, profile: ActingProfile) {
   ]);
   const creatorPlan = !monetization || cPro.active ? config.creator.pro : config.creator.free;
   // The plan states above are reused (not asked again), the two counts run side by side.
-  const [jobPosts, portfolioVideos] = await Promise.all([
+  const [jobPosts, portfolioVideos, applications] = await Promise.all([
     jobPostsUsage(env, profile, config, bPro.active),
     profile.type === 'creator' ? portfolioVideosUsage(env, profile, config, cPro.active) : Promise.resolve(null),
+    profile.type === 'creator' ? applicationsUsage(env, profile, config, cPro.active) : Promise.resolve(null),
   ]);
   const features: Record<string, unknown> = { job_posts: jobPosts };
+  if (applications) features.applications = applications;
   if (portfolioVideos) {
     features.portfolio_videos = portfolioVideos;
     features.video_duration = { feature: 'video_duration', scope: 'profile', maxSeconds: creatorPlan.max_video_duration_seconds };
