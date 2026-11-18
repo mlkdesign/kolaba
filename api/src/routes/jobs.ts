@@ -137,13 +137,36 @@ jobs.get('/:id', requireAuth, requireProfile, async (c) => {
   return c.json((await jobsJSON(c.env, [row!], profile.id))[0]);
 });
 
-// POST /v1/jobs/:id/view — FIX 139: someone opened the job's page (its views count entries, never the feed's scrolling
-// or the app's own refreshes); the owner's own visits don't count. Answers the live numbers for the page.
+/** FIX 140: `userId` saw these jobs — each published job counts each account once (`job_views` and its trigger); the
+ *  owner's own account never counts. */
+function seenStatements(env: Env, ids: string[], userId: string) {
+  const now = Date.now();
+  return ids.map((id) => env.DB.prepare(`INSERT OR IGNORE INTO job_views (job_id, viewer_user_id, created_at)
+      SELECT j.id, ?, ? FROM jobs j WHERE j.id = ? AND j.status = 'published'
+        AND j.owner_profile_id NOT IN (SELECT id FROM profiles WHERE owner_user_id = ?)`).bind(userId, now, id, userId));
+}
+
+// POST /v1/jobs/views — FIX 140: the jobs the feed showed (a card on screen) — the people who saw a job, not only those
+// who opened it. Body: { ids: string[] } (at most 50 at a time). Answers each job's views now.
+jobs.post('/views', requireAuth, requireProfile, async (c) => {
+  const profile = actingProfile(c);
+  const body = await c.req.json<{ ids?: unknown }>().catch(() => ({} as { ids?: unknown }));
+  const ids = [...new Set(Array.isArray(body.ids) ? body.ids.filter((x): x is string => typeof x === 'string' && x.length <= 64) : [])]
+    .slice(0, 50);
+  if (ids.length === 0) return c.json({ views: {} });
+  await c.env.DB.batch(seenStatements(c.env, ids, profile.ownerUserId));
+  const marks = ids.map(() => '?').join(',');
+  const rows = await c.env.DB.prepare(`SELECT id, views_count FROM jobs WHERE id IN (${marks})`).bind(...ids)
+    .all<{ id: string; views_count: number }>();
+  return c.json({ views: Object.fromEntries(rows.results.map((r) => [r.id, r.views_count])) });
+});
+
+// POST /v1/jobs/:id/view — the job's page opened (it counts as seen, once per account, like the feed); the owner's own
+// visits don't count. Answers the live numbers for the page.
 jobs.post('/:id/view', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c);
   const id = c.req.param('id');
-  await c.env.DB.prepare(`UPDATE jobs SET views_count = views_count + 1 WHERE id = ? AND status = 'published'
-      AND owner_profile_id NOT IN (SELECT id FROM profiles WHERE owner_user_id = ?)`).bind(id, profile.ownerUserId).run();
+  await c.env.DB.batch(seenStatements(c.env, [id], profile.ownerUserId));
   const row = await c.env.DB.prepare(`SELECT views_count, (SELECT COUNT(*) FROM applications a WHERE a.job_id = jobs.id AND a.status = 'submitted'
         AND EXISTS (SELECT 1 FROM profiles cp WHERE cp.id = a.creator_profile_id AND cp.status = 'active')) AS applications
       FROM jobs WHERE id = ?`).bind(id).first<{ views_count: number; applications: number }>();

@@ -93,6 +93,13 @@ await test('views count opening the page (not the owner, not GET /jobs/:id); sta
   eq(v.json.viewsCount, before + 1, 'counted'); eq(v.json.applicationsCount >= 0, true, 'applicants');
   eq((await call(biz, 'POST', `/v1/jobs/${jobs[0]}/view`)).json.viewsCount, before + 1, 'owner not counted');
   eq((await call(biz, 'GET', `/v1/jobs/${jobs[0]}/stats`)).json.viewsCount, before + 1, 'stats');
+  // FIX 140: seen in the feed counts too — each account once (the page opened above already counted this one).
+  const before1 = sql(`SELECT views_count FROM jobs WHERE id = '${jobs[1]}'`)[0].views_count;
+  const seen = await call(creator, 'POST', '/v1/jobs/views', { ids: [jobs[0], jobs[1], jobs[1]] });
+  eq(seen.json.views[jobs[0]], before + 1, 'same account not counted twice');
+  eq(seen.json.views[jobs[1]], before1 + 1, 'feed impression counted once');
+  eq((await call(creator, 'POST', `/v1/jobs/${jobs[1]}/view`)).json.viewsCount, before1 + 1, 'page after feed: same person');
+  eq((await call(biz, 'POST', '/v1/jobs/views', { ids: [jobs[1]] })).json.views[jobs[1]], before1 + 1, 'owner not counted in feed');
 });
 console.log('Uploads');
 await test('an upload that never arrived stops holding a portfolio place after 15 minutes; a cancelled one at once', async () => {

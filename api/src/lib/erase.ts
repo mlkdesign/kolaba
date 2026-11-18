@@ -137,6 +137,7 @@ async function anonymize(env: Env, userId: string) {
        WHERE owner_profile_id IN ${P}`,
     `DELETE FROM job_media WHERE job_id IN ${J}`,
     `DELETE FROM saved_jobs WHERE profile_id IN ${P} OR job_id IN ${J}`,
+    `DELETE FROM job_views WHERE viewer_user_id = ?1 OR job_id IN ${J}`,
     // Its applications: withdrawn, their text and chosen videos gone (the businesses' lists drop them).
     `DELETE FROM application_media WHERE application_id IN (SELECT id FROM applications WHERE creator_profile_id IN ${P})`,
     `UPDATE applications SET status = 'withdrawn', message = '', shortlisted_at = NULL,
