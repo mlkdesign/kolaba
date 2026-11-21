@@ -47,7 +47,7 @@
     "APPSTORE_BUNDLE_ID": "com.kolaba.app",
     // Moderation / anti-spam limits (see docs/MODERATION.md).
     "NEW_CONVERSATIONS_PER_DAY": "25",
-    "MESSAGES_BEFORE_REPLY": "5",
+    "MESSAGES_BEFORE_REPLY": "0",
     "MAX_VOICE_KB": "3072",
     "MAX_VOICE_SECONDS": "300",
     "MAX_FILE_MB": "20",
@@ -74,7 +74,7 @@
         "GOOGLE_CLIENT_ID": "888396863806-et1d0p9h08gaptueupl1c9lhg9dlivqa.apps.googleusercontent.com",
         "MONETIZATION_ENABLED": "false",
         "NEW_CONVERSATIONS_PER_DAY": "25",
-        "MESSAGES_BEFORE_REPLY": "5",
+        "MESSAGES_BEFORE_REPLY": "0",
         "MAX_VOICE_KB": "3072",
         "MAX_VOICE_SECONDS": "300",
         "MAX_FEEDBACK_ATTACHMENT_MB": "5",

@@ -342,8 +342,10 @@ async function checkCanSend(env: Env, conversationId: string, profile: { id: str
   if (await areContacts(env, profile.id, other!.profile_id)) return;
   const counts = await env.DB.prepare(`SELECT SUM(sender_profile_id = ?1) AS mine, SUM(sender_profile_id <> ?1) AS theirs
       FROM messages WHERE conversation_id = ?2 AND deleted_at IS NULL`).bind(profile.id, conversationId).first<{ mine: number; theirs: number }>();
-  const limit = Number(env.MESSAGES_BEFORE_REPLY ?? 5);
-  if ((counts?.theirs ?? 0) === 0 && (counts?.mine ?? 0) >= limit) fail(429, 'awaiting_reply');
+  // FIX 146: no cap on the first messages to someone new (0: off) — new chats per day stay limited
+  // (NEW_CONVERSATIONS_PER_DAY); a number in MESSAGES_BEFORE_REPLY turns the cap back on.
+  const limit = Number(env.MESSAGES_BEFORE_REPLY ?? 0);
+  if (limit > 0 && (counts?.theirs ?? 0) === 0 && (counts?.mine ?? 0) >= limit) fail(429, 'awaiting_reply');
 }
 
 /** After a message (FEATURE 115): messages are not Notifications-feed rows — the partner's Chat list and badge show
