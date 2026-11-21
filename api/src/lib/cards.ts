@@ -28,7 +28,7 @@ export const avatarJoinOwner = `LEFT JOIN media am ON am.id = p.avatar_media_id 
   AND am.review_status IN ('approved', 'pending', 'flagged')`;
 
 export const cardColumns = `p.id, p.type, p.display_name, p.username, p.city, p.country, p.country_code, p.flag,
-  p.category, p.is_demo, p.status, ${avatarColumns}, ${ratingColumns},
+  p.category, p.is_demo, p.status, p.languages, p.created_at, ${avatarColumns}, ${ratingColumns},
   (SELECT ps.show_location FROM profile_settings ps WHERE ps.profile_id = p.id) AS show_location`;
 
 export interface CardRow {
@@ -36,6 +36,8 @@ export interface CardRow {
   country_code: string | null; flag: string | null; category: string | null; is_demo: number; status: string;
   avatar_id: string | null; avatar_provider: string | null; avatar_url: string | null;
   rating: number | null; reviews_count: number; is_pro: number; is_pro_grant?: number;
+  /** FIX 145: the languages they speak (JSON array of codes) and when the profile was made — the filters' data. */
+  languages?: string | null; created_at?: number | null;
   /** Privacy → Show location (0: hidden from everyone but the owner). Absent in prefixed selects: shown. */
   show_location?: number | null;
 }
@@ -64,6 +66,9 @@ export function card(env: Env, row: CardRow, prefix = '', asOwner = false) {
     isDemo: get('is_demo') === 1,
     // FIX 131: an erased account's tombstone ("Deleted account", no photo, no place).
     isDeleted: get('status') === 'deleted',
+    // FIX 145: Reels' and Creators' filters (language) and sort (new profiles first).
+    languages: parseLanguages(get('languages')),
+    createdAt: get('created_at') ?? null,
   };
 }
 
@@ -249,4 +254,15 @@ export async function areContacts(env: Env, a: string, b: string): Promise<boole
   const key = a < b ? `${a}|${b}` : `${b}|${a}`;
   const row = await env.DB.prepare(`SELECT 1 AS ok FROM contact_requests WHERE pair_key = ? AND status = 'accepted'`).bind(key).first();
   return Boolean(row);
+}
+
+/** A profile's languages column (JSON array of codes) as an array; anything else — none. */
+function parseLanguages(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string').slice(0, 20) : [];
+  } catch {
+    return [];
+  }
 }
