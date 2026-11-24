@@ -1338,7 +1338,9 @@ admin.post('/content-review/:type{media|posts|reviews}/:id', async (c) => {
   }
   // The owner learns the outcome in the app (Notifications) — with the reason when it was rejected: a job's business
   // ("Your job has been removed"), a review's author ("Your review could not be published"), a photo's / video's profile.
-  if (ownerProfile) {
+  // FIX 171: a photo / video that passed moderation isn't announced ("Your media was approved" is noise); a job or a
+  // review still is, and every rejection is.
+  if (ownerProfile && !(value === 'approved' && type !== 'posts' && type !== 'reviews')) {
     const notice = value === 'approved' ? 'content_approved' : type === 'posts' ? 'job_removed' : type === 'reviews' ? 'review_rejected' : 'content_removed';
     await notify(c.env, ownerProfile, notice, null, { targetType: type, targetId: id, reason: body.reason ?? null },
                  { dedupKey: `${notice}:${type}:${id}:${t}`, targetType: type === 'posts' ? 'job' : type === 'reviews' ? 'review' : 'media',

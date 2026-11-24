@@ -37,7 +37,7 @@ interface BusinessPlanLimits {
 
 export const DEFAULT_PLAN_CONFIG: PlanConfig = {
   creator: {
-    free: { portfolio_video_limit: 9, max_video_duration_seconds: 30, collections_enabled: false, applications_per_month: 10 },
+    free: { portfolio_video_limit: null, max_video_duration_seconds: 30, collections_enabled: false, applications_per_month: 10 },
     pro: { portfolio_video_limit: null, max_video_duration_seconds: 30, collections_enabled: true, applications_per_month: null },
   },
   business: {
@@ -57,8 +57,9 @@ export async function loadPlanConfig(env: Env): Promise<PlanConfig> {
     const stored = JSON.parse(row.config) as Partial<PlanConfig>;
     return {
       creator: {
-        free: { ...DEFAULT_PLAN_CONFIG.creator.free, ...stored.creator?.free },
-        pro: { ...DEFAULT_PLAN_CONFIG.creator.pro, ...stored.creator?.pro },
+        // FIX 171: no plan limits the portfolio (a stored number from before is ignored — PORTFOLIO_VIDEO_CAP applies).
+        free: { ...DEFAULT_PLAN_CONFIG.creator.free, ...stored.creator?.free, portfolio_video_limit: null },
+        pro: { ...DEFAULT_PLAN_CONFIG.creator.pro, ...stored.creator?.pro, portfolio_video_limit: null },
       },
       business: {
         free: { ...DEFAULT_PLAN_CONFIG.business.free, ...stored.business?.free },
@@ -142,6 +143,9 @@ export const PORTFOLIO_VIDEOS_COUNT_SQL = `(SELECT COUNT(*) FROM media WHERE own
 // FIX 139: an upload that never arrived stops holding its place after 15 minutes (the app also cancels it at once).
 export const PENDING_UPLOAD_TTL = 900_000;
 
+/** FIX 171: a portfolio has no plan limit any more (free or PRO): only this system ceiling, never shown in the apps. */
+export const PORTFOLIO_VIDEO_CAP = 90;
+
 /** `proActive`: the plan state when the caller already has it (the snapshot) — not asked again. */
 export async function portfolioVideosUsage(env: Env, profile: ActingProfile, config?: PlanConfig,
                                            proActive?: boolean): Promise<Usage> {
@@ -153,7 +157,7 @@ export async function portfolioVideosUsage(env: Env, profile: ActingProfile, con
   const plan = pro ? cfg.creator.pro : cfg.creator.free;
   const row = await env.DB.prepare(PORTFOLIO_VIDEOS_HELD).bind(profile.id, now() - PENDING_UPLOAD_TTL)
     .first<{ ready: number; pending: number }>();
-  const usage = counted('portfolio_videos', 'profile', plan.portfolio_video_limit, row?.ready ?? 0, row?.pending ?? 0, pro);
+  const usage = counted('portfolio_videos', 'profile', PORTFOLIO_VIDEO_CAP, row?.ready ?? 0, row?.pending ?? 0, pro);
   return { ...usage, pending: row?.pending ?? 0, maxDurationSeconds: plan.max_video_duration_seconds };
 }
 

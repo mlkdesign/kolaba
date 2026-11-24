@@ -77,6 +77,19 @@ await test('up to five named links, kept in order, a sixth refused, owner only',
   eq((await call(s, 'GET', `/v1/profiles/${creator}`)).json.externalLinks.length, 0, 'cleared');
 });
 
+console.log('Portfolio without plan limits (FIX 171)');
+await test('a free creator goes past the old 9; the 91st video is refused at the system ceiling', async () => {
+  const cs = { ...s, profileId: creator };
+  const rows = Array.from({ length: 89 }, (_, i) => `('med_t171_${stamp}_${i}', '${creator}', 'video', 'portfolio', 'r2', 'video/mp4', 'ready', 'approved', ${stamp + i})`);
+  sql(`INSERT INTO media (id, owner_profile_id, kind, purpose, provider, mime, status, review_status, created_at) VALUES ${rows.join(', ')}`);
+  const body = { purpose: 'portfolio', kind: 'video', mime: 'video/mp4', bytes: 1000, duration: 10 };
+  const ent = await call(cs, 'GET', '/v1/me/entitlements');
+  eq(ent.json?.planLimits?.creator?.free?.portfolio_video_limit ?? null, null, 'no plan limit shown');
+  eq((await call(cs, 'POST', '/v1/media/uploads', body)).status, 201, 'the 90th');
+  const r = await call(cs, 'POST', '/v1/media/uploads', body);
+  eq(r.json?.error?.code, 'FEATURE_LIMIT_REACHED', r.text);
+});
+
 console.log('Login e-mail change');
 const newEmail = `t169.new.${stamp}@example.com`;
 const setCode = (code) => { const [r] = sql(`SELECT id FROM email_change_requests WHERE user_id = '${uid}' AND consumed_at IS NULL`);
