@@ -427,4 +427,174 @@ auth.post('/password/reset', async (c) => {
   return c.json({ status: 'password_changed' });
 });
 
+// ─── FIX 169: Settings → Login & Password (signed in) ───
+
+const EMAIL_CHANGE_TTL = 10 * 60_000;
+
+function mask(email: string): string {
+  const [name, domain] = email.split('@');
+  return `${name.slice(0, 2)}${'•'.repeat(Math.max(1, Math.min(6, name.length - 2)))}@${domain}`;
+}
+
+async function liveEmailChange(env: Env, userId: string) {
+  return env.DB.prepare(`SELECT id, new_email, step, code_hash, attempts, sent_at, expires_at FROM email_change_requests
+      WHERE user_id = ? AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1`).bind(userId)
+    .first<{ id: string; new_email: string; step: 'current' | 'new'; code_hash: string; attempts: number; sent_at: number; expires_at: number }>();
+}
+
+async function sendEmailChangeCode(env: Env, requestId: string, userId: string, to: string, step: 'current' | 'new', newEmail: string) {
+  const code = newCode();
+  const t = now();
+  await env.DB.prepare(`UPDATE email_change_requests SET step = ?, code_hash = ?, attempts = 0, sent_at = ?, expires_at = ? WHERE id = ?`)
+    .bind(step, await sha256Hex(`${userId}:${requestId}:${code}`), t, t + EMAIL_CHANGE_TTL, requestId).run();
+  const inbox = env.TEST_CODE_INBOX?.trim().toLowerCase();
+  const subject = (step === 'current' ? 'Confirm your kolaba. e-mail change' : 'Confirm your new kolaba. e-mail')
+    + (inbox && inbox !== to ? ` — for ${to} (closed test)` : '');
+  await sendEmail(env, inbox || to, subject, step === 'current'
+    ? `Someone asked to change the sign-in e-mail of your kolaba. account to ${mask(newEmail)}.\n\nCode: ${code}\n\n` +
+      `It expires in 10 minutes. If it wasn't you, ignore this e-mail and change your password.`
+    : `Code to confirm this address as your kolaba. sign-in e-mail: ${code}\n\nIt expires in 10 minutes.`);
+}
+
+async function emailInUse(env: Env, email: string, userId: string): Promise<boolean> {
+  const other = await env.DB.prepare(`SELECT id FROM users WHERE email = ? AND id <> ?`).bind(email, userId).first<{ id: string }>();
+  return Boolean(other);
+}
+
+// POST /v1/auth/email/change {email} — step 1: a code to the CURRENT address. Nothing changes yet.
+auth.post('/email/change', requireAuth, async (c) => {
+  const user = currentUser(c);
+  if (user.isDemo) fail(403, 'demo_account');
+  await rateLimit(c, 'RL_AUTH', `email-change:${user.id}`);
+  const { email } = z.object({ email: z.string().trim().toLowerCase().email().max(254) }).parse(await c.req.json());
+  if (email === user.email.toLowerCase()) fail(422, 'email_same');
+  if (await emailInUse(c.env, email, user.id)) fail(409, 'email_taken');
+  const live = await liveEmailChange(c.env, user.id);
+  if (live && live.sent_at + RESEND_AFTER_MS > now()) {
+    fail(429, 'resend_too_soon', undefined, { resendAfter: Math.ceil((live.sent_at + RESEND_AFTER_MS - now()) / 1000) });
+  }
+  const id = newId('emc');
+  await c.env.DB.batch([
+    c.env.DB.prepare(`UPDATE email_change_requests SET consumed_at = ? WHERE user_id = ? AND consumed_at IS NULL`).bind(now(), user.id),
+    c.env.DB.prepare(`INSERT INTO email_change_requests (id, user_id, new_email, step, code_hash, sent_at, expires_at, created_at)
+        VALUES (?, ?, ?, 'current', '', 0, 0, ?)`).bind(id, user.id, email, now()),
+  ]);
+  await sendEmailChangeCode(c.env, id, user.id, user.email, 'current', email);
+  return c.json({ step: 'current', sentTo: user.email, resendAfter: RESEND_AFTER_MS / 1000, expiresIn: EMAIL_CHANGE_TTL / 1000 });
+});
+
+// POST /v1/auth/email/change/resend — the live step's code again (after 30 s).
+auth.post('/email/change/resend', requireAuth, async (c) => {
+  const user = currentUser(c);
+  await rateLimit(c, 'RL_AUTH', `email-change:${user.id}`);
+  const live = await liveEmailChange(c.env, user.id);
+  if (!live) fail(400, 'code_expired');
+  const wait = Math.ceil((live!.sent_at + RESEND_AFTER_MS - now()) / 1000);
+  if (wait > 0) fail(429, 'resend_too_soon', undefined, { resendAfter: wait });
+  const to = live!.step === 'current' ? user.email : live!.new_email;
+  await sendEmailChangeCode(c.env, live!.id, user.id, to, live!.step, live!.new_email);
+  return c.json({ step: live!.step, sentTo: to, resendAfter: RESEND_AFTER_MS / 1000 });
+});
+
+// POST /v1/auth/email/change/verify {code} — the current address's code sends one to the new address; the new
+// address's code changes the account's e-mail (this session stays; profiles' public e-mails are not touched).
+auth.post('/email/change/verify', requireAuth, async (c) => {
+  const user = currentUser(c);
+  await rateLimit(c, 'RL_AUTH', `email-change-verify:${user.id}`);
+  const { code } = z.object({ code: z.string().regex(/^\d{6}$/) }).parse(await c.req.json());
+  const live = await liveEmailChange(c.env, user.id);
+  if (!live || live.expires_at < now() || live.attempts >= MAX_CODE_ATTEMPTS) fail(400, 'code_expired');
+  if (!timingSafeEqual(live!.code_hash, await sha256Hex(`${user.id}:${live!.id}:${code}`))) {
+    await c.env.DB.prepare(`UPDATE email_change_requests SET attempts = attempts + 1 WHERE id = ?`).bind(live!.id).run();
+    fail(400, 'code_invalid');
+  }
+  if (live!.step === 'current') {
+    if (await emailInUse(c.env, live!.new_email, user.id)) fail(409, 'email_taken');
+    await sendEmailChangeCode(c.env, live!.id, user.id, live!.new_email, 'new', live!.new_email);
+    return c.json({ step: 'new', sentTo: live!.new_email, resendAfter: RESEND_AFTER_MS / 1000 });
+  }
+  // Two taps at once: only the first one consumes the request.
+  const consumed = await c.env.DB.prepare(`UPDATE email_change_requests SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`)
+    .bind(now(), live!.id).run();
+  if (!consumed.meta.changes) fail(400, 'code_expired');
+  if (await emailInUse(c.env, live!.new_email, user.id)) fail(409, 'email_taken');
+  const old = user.email;
+  try {
+    await c.env.DB.prepare(`UPDATE users SET email = ?, email_verified_at = ?, updated_at = ? WHERE id = ?`)
+      .bind(live!.new_email, now(), now(), user.id).run();
+  } catch {
+    fail(409, 'email_taken');
+  }
+  const inbox = c.env.TEST_CODE_INBOX?.trim().toLowerCase();
+  try {
+    await sendEmail(c.env, inbox || old, 'Your kolaba. sign-in e-mail was changed',
+      `The sign-in e-mail of your kolaba. account${inbox && inbox !== old ? ` (${old})` : ''} was changed to ${mask(live!.new_email)}.\n\n` +
+      `If it wasn't you, contact support right away.`);
+  } catch { /* changed either way */ }
+  await notifyAccount(c.env, user.id, 'email_changed', {}, { dedupKey: `email_changed:${user.id}:${now()}` });
+  return c.json({ status: 'email_changed', email: live!.new_email });
+});
+
+// POST /v1/auth/password/code — Change password: a code to the account's e-mail (Google / Apple only: no password).
+auth.post('/password/code', requireAuth, async (c) => {
+  const user = currentUser(c);
+  if (user.isDemo) fail(403, 'demo_account');
+  await rateLimit(c, 'RL_AUTH', `forgot:${user.email.toLowerCase()}`);
+  const row = await c.env.DB.prepare(`SELECT password_hash FROM users WHERE id = ?`).bind(user.id).first<{ password_hash: string | null }>();
+  if (!row?.password_hash) {
+    const methods = await c.env.DB.prepare(`SELECT provider FROM auth_identities WHERE user_id = ?`).bind(user.id).all<{ provider: string }>();
+    fail(409, 'no_password', undefined, { providers: methods.results.map((m) => m.provider) });
+  }
+  const wait = await resetCooldown(c.env, user.id);
+  if (wait > 0) return c.json({ status: 'sent', sentTo: user.email, resendAfter: wait });
+  await issueCode(c.env, user.id, user.email, 'reset');
+  return c.json({ status: 'sent', sentTo: user.email, resendAfter: RESEND_AFTER_MS / 1000 });
+});
+
+// POST /v1/auth/password/code/verify {code} → {resetToken} for /password/change.
+auth.post('/password/code/verify', requireAuth, async (c) => {
+  const user = currentUser(c);
+  await rateLimit(c, 'RL_AUTH', `reset-verify:${user.email.toLowerCase()}`);
+  const { code } = z.object({ code: z.string().regex(/^\d{6}$/) }).parse(await c.req.json());
+  await checkCode(c.env, user.id, 'reset', code);
+  const token = newToken();
+  await c.env.DB.batch([
+    c.env.DB.prepare(`UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL`).bind(now(), user.id),
+    c.env.DB.prepare(`INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .bind(newId('rst'), user.id, await sha256Hex(token), now() + RESET_TOKEN_TTL, now()),
+  ]);
+  return c.json({ resetToken: token, expiresAt: now() + RESET_TOKEN_TTL });
+});
+
+// POST /v1/auth/password/change {resetToken, password} — the new password; every OTHER device is signed out, this one
+// stays signed in.
+auth.post('/password/change', requireAuth, async (c) => {
+  const user = currentUser(c);
+  await rateLimit(c, 'RL_AUTH', `reset:${user.id}`);
+  const body = z.object({ resetToken: z.string().min(10).max(200), password: z.string().min(1).max(200) }).parse(await c.req.json());
+  const problem = passwordProblem(body.password);
+  if (problem) fail(422, problem);
+  const row = await c.env.DB.prepare(`SELECT id, user_id, expires_at, used_at FROM password_reset_tokens WHERE token_hash = ?`)
+    .bind(await sha256Hex(body.resetToken)).first<{ id: string; user_id: string; expires_at: number; used_at: number | null }>();
+  if (!row || row.user_id !== user.id || row.used_at || row.expires_at < now()) fail(400, 'reset_token_expired');
+  const { hash, salt, scheme } = await hashPassword(body.password);
+  const t = now();
+  const done = await c.env.DB.batch([
+    c.env.DB.prepare(`UPDATE password_reset_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL`).bind(t, row!.id),
+    c.env.DB.prepare(`UPDATE users SET password_hash = ?, password_salt = ?, password_scheme = ?, failed_logins = 0, locked_until = NULL,
+                      updated_at = ? WHERE id = ?`).bind(hash, salt, scheme, t, user.id),
+    c.env.DB.prepare(`UPDATE email_codes SET consumed_at = ? WHERE user_id = ? AND purpose = 'reset' AND consumed_at IS NULL`).bind(t, user.id),
+    c.env.DB.prepare(`DELETE FROM sessions WHERE user_id = ? AND id <> ?`).bind(user.id, user.sessionId),
+  ]);
+  if (!done[0].meta.changes) fail(400, 'reset_token_expired');
+  const inbox = c.env.TEST_CODE_INBOX?.trim().toLowerCase();
+  try {
+    await sendEmail(c.env, inbox || user.email, 'Your kolaba. password was changed',
+      `The password of your kolaba. account${inbox && inbox !== user.email ? ` (${user.email})` : ''} was just changed; other devices ` +
+      `were signed out.\n\nIf it wasn't you, reset your password right away from the Log in screen.`);
+  } catch { /* changed either way */ }
+  await notifyAccount(c.env, user.id, 'password_changed', {}, { dedupKey: `password_changed:${user.id}:${t}` });
+  return c.json({ status: 'password_changed' });
+});
+
 export default auth;

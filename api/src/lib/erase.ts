@@ -96,6 +96,7 @@ async function endAccess(env: Env, userId: string) {
     env.DB.prepare(`DELETE FROM auth_identities WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM email_codes WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM password_reset_tokens WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM email_change_requests WHERE user_id = ?`).bind(userId),
   ]);
 }
 

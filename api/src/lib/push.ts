@@ -71,15 +71,20 @@ export async function pushToUser(env: Env, userId: string, content: PushContent,
     // An optional push follows the receiving profile's switches; a mandatory one (no setting) always goes.
     if (content.setting && profileId && !(await profileWantsPush(env, profileId, content.setting))) return;
     const owner = { user_id: userId };
-    const devices = await env.DB.prepare(`SELECT token, environment, previews FROM device_tokens WHERE user_id = ?`)
-      .bind(owner.user_id).all<{ token: string; environment: string; previews: number }>();
+    const all = await env.DB.prepare(`SELECT token, environment, previews, sounds, other_profiles, active_profile_id
+        FROM device_tokens WHERE user_id = ?`).bind(owner.user_id)
+      .all<{ token: string; environment: string; previews: number; sounds: number; other_profiles: number; active_profile_id: string | null }>();
+    // FIX 169 — Push & Alerts: a device that turned off Other profiles only gets its open profile's optional pushes
+    // (a mandatory one — no setting — always goes). The red dots in the app don't depend on this.
+    const devices = { results: all.results.filter((d) => !(content.setting && profileId && d.other_profiles === 0
+                                                          && d.active_profile_id && d.active_profile_id !== profileId)) };
     if (!devices.results.length) return;
     const jwt = await providerToken(env);
     await Promise.all(devices.results.map(async (d) => {
       const host = d.environment === 'sandbox' ? 'https://api.sandbox.push.apple.com' : 'https://api.push.apple.com';
       const body = d.previews === 0 && content.privateBody ? content.privateBody : content.body;
       const payload = {
-        aps: { alert: { title: content.title, body }, sound: 'default', 'thread-id': content.threadId, 'mutable-content': 1 },
+        aps: { alert: { title: content.title, body }, ...(d.sounds === 0 ? {} : { sound: 'default' }), 'thread-id': content.threadId, 'mutable-content': 1 },
         ...content.data, ...(profileId ? { profileId } : {}),
       };
       const res = await fetch(`${host}/3/device/${d.token}`, {

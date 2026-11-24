@@ -79,7 +79,11 @@ async function saveLinks(env: Env, profileId: string, links: Record<string, stri
   const statements = [env.DB.prepare(`DELETE FROM profile_links WHERE profile_id = ?`).bind(profileId)];
   Object.entries(links).forEach(([kind, raw], i) => {
     if (!raw) return;
-    const url = safeURL(raw) ?? fail(422, 'invalid_link');
+    // A public e-mail (FIX 169): kept as mailto:, never verified, never the account's sign-in address by itself.
+    const url = kind === 'email'
+      ? (z.string().email().max(254).safeParse(raw.replace(/^mailto:/i, '').trim()).success
+          ? `mailto:${raw.replace(/^mailto:/i, '').trim().toLowerCase()}` : fail(422, 'invalid_email'))
+      : safeURL(raw) ?? fail(422, 'invalid_link');
     statements.push(env.DB.prepare(`INSERT INTO profile_links (id, profile_id, kind, url, position) VALUES (?, ?, ?, ?, ?)`)
       .bind(newId('lnk'), profileId, kind, url, i));
   });
@@ -107,7 +111,10 @@ profiles.post('/', requireAuth, async (c) => {
     c.env.DB.prepare(`INSERT INTO profile_settings (profile_id) SELECT ?1 WHERE EXISTS (SELECT 1 FROM profiles WHERE id = ?1)`).bind(id),
   ]);
   if (!inserted.meta.changes) fail(409, body.type === 'creator' ? 'creator_profile_exists' : 'business_profile_limit');
-  await saveLinks(c.env, id, body.links);
+  // FIX 169: a new profile's public e-mail starts as the account's sign-in e-mail; from then on it's the profile's own.
+  const links = { ...(body.links ?? {}) };
+  if (links.email === undefined && !user.isDemo) links.email = `mailto:${user.email}`;
+  await saveLinks(c.env, id, links);
   const verdict = checkText(body.displayName, body.bio);
   if (verdict.flagged) await autoReport(c.env, { type: 'user', id, profileId: id }, verdict, `${body.displayName}\n${body.bio ?? ''}`);
   return c.json(await loadCard(c.env, id, true), 201);

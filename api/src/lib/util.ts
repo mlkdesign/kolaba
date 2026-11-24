@@ -8,8 +8,9 @@ export class ApiError extends HTTPException {
   }
 }
 
-export const fail = (status: ConstructorParameters<typeof ApiError>[0], code: string, message?: string): never => {
-  throw new ApiError(status, code, message);
+export const fail = (status: ConstructorParameters<typeof ApiError>[0], code: string, message?: string,
+                     details?: Record<string, unknown>): never => {
+  throw new ApiError(status, code, message, details);
 };
 
 const alphabet = '0123456789abcdefghijklmnopqrstuvwxyz';

@@ -156,6 +156,7 @@ export const NOTIFICATION_TYPES: Record<string, { body: string; setting: PushSet
   pro_restored: { body: 'Your PRO benefits have been restored.', setting: null, push: true, scope: 'profile' },
   // Account & security (one row for the whole account, never switched off)
   password_changed: { body: 'Your password was changed.', setting: null, push: true, scope: 'account' },
+  email_changed: { body: 'Your sign-in e-mail was changed.', setting: null, push: true, scope: 'account' },
   moderation_warning: { body: 'You received a warning from kolaba.', setting: null, push: true, scope: 'account' },
   moderation_restriction: { body: 'Your account was restricted.', setting: null, push: true, scope: 'account' },
   account_message: { body: 'A message from kolaba.', setting: null, push: true, scope: 'account' },

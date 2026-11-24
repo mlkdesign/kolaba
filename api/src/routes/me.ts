@@ -64,11 +64,24 @@ me.put('/devices', async (c) => {
     token: z.string().trim().regex(/^[0-9a-fA-F]{32,200}$/),
     environment: z.enum(['production', 'sandbox']).default('production'),
     previews: z.boolean().default(true),
+    // FIX 169 — Settings → Push & Alerts on this device (kept as they were when not sent).
+    sounds: z.boolean().optional(),
+    otherProfiles: z.boolean().optional(),
+    activeProfileId: z.string().max(64).nullable().optional(),
   }).parse(await c.req.json());
-  await c.env.DB.prepare(`INSERT INTO device_tokens (token, user_id, environment, previews, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+  let active: string | null | undefined = body.activeProfileId;
+  if (active) {
+    const owned = await c.env.DB.prepare(`SELECT 1 FROM profiles WHERE id = ? AND owner_user_id = ?`).bind(active, user.id).first();
+    if (!owned) active = null;
+  }
+  await c.env.DB.prepare(`INSERT INTO device_tokens (token, user_id, environment, previews, sounds, other_profiles, active_profile_id,
+        created_at, updated_at) VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 1), COALESCE(?6, 1), ?7, ?8, ?8)
       ON CONFLICT (token) DO UPDATE SET user_id = excluded.user_id, environment = excluded.environment, previews = excluded.previews,
-      updated_at = excluded.updated_at`)
-    .bind(body.token.toLowerCase(), user.id, body.environment, body.previews ? 1 : 0, now(), now()).run();
+        sounds = COALESCE(?5, device_tokens.sounds), other_profiles = COALESCE(?6, device_tokens.other_profiles),
+        active_profile_id = CASE WHEN ?9 THEN ?7 ELSE device_tokens.active_profile_id END, updated_at = excluded.updated_at`)
+    .bind(body.token.toLowerCase(), user.id, body.environment, body.previews ? 1 : 0,
+          body.sounds === undefined ? null : Number(body.sounds), body.otherProfiles === undefined ? null : Number(body.otherProfiles),
+          active ?? null, now(), active !== undefined ? 1 : 0).run();
   return c.json({ status: 'registered' });
 });
 
