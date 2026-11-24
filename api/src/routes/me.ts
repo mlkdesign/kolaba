@@ -155,6 +155,7 @@ export async function deleteProfileData(env: Env, profileId: string): Promise<{ 
     `DELETE FROM messages WHERE conversation_id NOT IN (SELECT conversation_id FROM conversation_participants)`,
     `DELETE FROM conversations WHERE id NOT IN (SELECT conversation_id FROM conversation_participants)`,
     `DELETE FROM profile_links WHERE profile_id = ?1`,
+    `DELETE FROM profile_external_links WHERE profile_id = ?1`,
     `DELETE FROM profile_social_accounts WHERE profile_id = ?1`,
     `DELETE FROM profile_settings WHERE profile_id = ?1`,
     `DELETE FROM subscriptions WHERE profile_id = ?1`,

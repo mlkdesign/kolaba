@@ -59,6 +59,24 @@ await test("another account can't edit this profile's links", async () => {
   const r = await call({ token: t }, 'PATCH', `/v1/profiles/${business}`, { links: { email: 'evil@x.com' } }); eq(r.status, 403, r.text);
 });
 
+console.log('External links (FIX 170)');
+await test('up to five named links, kept in order, a sixth refused, owner only', async () => {
+  const five = [1, 2, 3, 4, 5].map((i) => ({ title: `Site ${i}`, url: `example${i}.com` }));
+  eq((await call(s, 'PATCH', `/v1/profiles/${creator}`, { externalLinks: five })).status, 200, 'five');
+  const page = await call(s, 'GET', `/v1/profiles/${creator}`);
+  eq(page.json.externalLinks.length, 5, 'count'); eq(page.json.externalLinks[0].url, 'https://example1.com/', 'url');
+  eq(page.json.externalLinks[4].title, 'Site 5', 'order');
+  const six = await call(s, 'PATCH', `/v1/profiles/${creator}`, { externalLinks: [...five, { title: 'Six', url: 'six.com' }] });
+  eq(six.status, 400, six.text);
+  const bad = await call(s, 'PATCH', `/v1/profiles/${creator}`, { externalLinks: [{ title: 'Mail', url: 'mailto:a@b.com' }] });
+  eq(bad.json?.error?.code, 'invalid_link', bad.text);
+  eq((await call(s, 'GET', `/v1/profiles/${business}`)).json.externalLinks.length, 0, 'business untouched');
+  eq((await call(s, 'PATCH', `/v1/profiles/${creator}`, { links: { email: 'x@y.com' } })).status, 200, 'links only');
+  eq((await call(s, 'GET', `/v1/profiles/${creator}`)).json.externalLinks.length, 5, 'kept when not sent');
+  eq((await call(s, 'PATCH', `/v1/profiles/${creator}`, { externalLinks: [] })).status, 200, 'clear');
+  eq((await call(s, 'GET', `/v1/profiles/${creator}`)).json.externalLinks.length, 0, 'cleared');
+});
+
 console.log('Login e-mail change');
 const newEmail = `t169.new.${stamp}@example.com`;
 const setCode = (code) => { const [r] = sql(`SELECT id FROM email_change_requests WHERE user_id = '${uid}' AND consumed_at IS NULL`);
@@ -93,7 +111,7 @@ await test('current code → code to the new address; new code → e-mail change
   if (!(b.json?.status === 'email_changed' || b.status === 200)) throw new Error(b.text);
   const [u] = sql(`SELECT email FROM users WHERE id = '${uid}'`); eq(u.email, newEmail, 'email');
   eq((await call(s, 'GET', '/v1/auth/session')).status, 200, 'session kept');
-  const [c] = sql(`SELECT url FROM profile_links WHERE kind = 'email' AND profile_id = '${creator}'`); eq(c.url, `mailto:${email}`, 'public kept');
+  const [c] = sql(`SELECT url FROM profile_links WHERE kind = 'email' AND profile_id = '${creator}'`); eq(c.url, 'mailto:x@y.com', 'public kept');
   eq((await login(newEmail)).status, 200, 'login with new e-mail');
 });
 

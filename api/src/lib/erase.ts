@@ -160,6 +160,7 @@ async function anonymize(env: Env, userId: string) {
     `DELETE FROM subscriptions WHERE profile_id IN ${P}`,
     `DELETE FROM usage_events WHERE user_id = ?1`,
     `DELETE FROM profile_links WHERE profile_id IN ${P}`,
+    `DELETE FROM profile_external_links WHERE profile_id IN ${P}`,
     `DELETE FROM profile_social_accounts WHERE profile_id IN ${P}`,
     `DELETE FROM profile_settings WHERE profile_id IN ${P}`,
     `DELETE FROM user_settings WHERE user_id = ?1`,

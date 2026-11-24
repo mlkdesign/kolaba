@@ -40,6 +40,10 @@ export function entitlements(type: 'creator' | 'business', subscribed: boolean, 
 const Username = z.string().trim().toLowerCase().regex(/^[a-z0-9._]{3,30}$/, 'invalid_username');
 const Links = z.record(z.enum(['instagram', 'tiktok', 'youtube', 'telegram', 'whatsapp', 'website', 'email']),
   z.string().trim().max(300)).optional();
+/** FIX 170: a profile's External links — a name and an https/http address each, at most five. */
+export const MAX_EXTERNAL_LINKS = 5;
+const ExternalLinks = z.array(z.object({ title: z.string().trim().min(1).max(60), url: z.string().trim().min(1).max(300) }))
+  .max(MAX_EXTERNAL_LINKS).optional();
 const ProfileFields = z.object({
   displayName: z.string().trim().min(1).max(80),
   // FIX 114: no usernames in KOLABA — still accepted from an old client, never required (internal key = profile id).
@@ -52,6 +56,7 @@ const ProfileFields = z.object({
   languages: z.array(z.string().regex(/^[a-z]{2,3}$/)).max(10).optional(),
   website: z.string().trim().max(300).nullable().optional(),
   links: Links,
+  externalLinks: ExternalLinks,
   visibility: z.enum(['public', 'private']).optional(),
   settings: z.object({
     showLocation: z.boolean().optional(),
@@ -86,6 +91,18 @@ async function saveLinks(env: Env, profileId: string, links: Record<string, stri
       : safeURL(raw) ?? fail(422, 'invalid_link');
     statements.push(env.DB.prepare(`INSERT INTO profile_links (id, profile_id, kind, url, position) VALUES (?, ?, ?, ?, ?)`)
       .bind(newId('lnk'), profileId, kind, url, i));
+  });
+  await env.DB.batch(statements);
+}
+
+async function saveExternalLinks(env: Env, profileId: string, links: { title: string; url: string }[] | undefined) {
+  if (!links) return;
+  const statements = [env.DB.prepare(`DELETE FROM profile_external_links WHERE profile_id = ?`).bind(profileId)];
+  links.forEach((link, i) => {
+    const url = safeURL(link.url);
+    if (!url || url.startsWith('mailto:')) fail(422, 'invalid_link');
+    statements.push(env.DB.prepare(`INSERT INTO profile_external_links (id, profile_id, title, url, position) VALUES (?, ?, ?, ?, ?)`)
+      .bind(newId('xln'), profileId, link.title, url, i));
   });
   await env.DB.batch(statements);
 }
@@ -183,6 +200,7 @@ profiles.patch('/:id', requireAuth, async (c) => {
             s.showLinks === undefined ? null : Number(s.showLinks), s.hideJobPosts === undefined ? null : Number(s.hideJobPosts), id).run();
   }
   await saveLinks(c.env, id, body.links);
+  await saveExternalLinks(c.env, id, body.externalLinks);
   return c.json(await profilePage(c.env, id, user.id));
 });
 
@@ -245,13 +263,15 @@ export async function profilePage(env: Env, id: string, viewerUserId: string | n
       ...base, avatarUrl: null, avatarPosterUrl: null, isPro: false,
       city: showLocation ? base.city : null, country: showLocation ? base.country : null,
       location: showLocation ? base.location : null,
-      bio: p!.bio, website: null, languages: [], links: [], socialAccounts: [], ratings: null,
+      bio: p!.bio, website: null, languages: [], links: [], externalLinks: [], socialAccounts: [], ratings: null,
       counts: { portfolio: 0, jobs: 0, contacts: 0, likes: 0 }, introVideo: null, hideJobPosts: true,
       messaging: 'nobody', visibility: p!.visibility, isOwner: false, blockedByMe: true,
     };
   }
-  const [links, social, ratings, intro, counts] = await Promise.all([
+  const [links, external, social, ratings, intro, counts] = await Promise.all([
     env.DB.prepare(`SELECT kind, url FROM profile_links WHERE profile_id = ? ORDER BY position`).bind(id).all<{ kind: string; url: string }>(),
+    env.DB.prepare(`SELECT title, url FROM profile_external_links WHERE profile_id = ? ORDER BY position`).bind(id)
+      .all<{ title: string; url: string }>(),
     env.DB.prepare(`SELECT platform, handle, followers FROM profile_social_accounts WHERE profile_id = ?`).bind(id).all(),
     env.DB.prepare(`SELECT AVG((quality + speed + contact) / 3.0) AS rating, AVG(quality) AS quality, AVG(speed) AS speed,
                     AVG(contact) AS contact, COUNT(*) AS count FROM reviews WHERE recipient_profile_id = ? AND status = 'published' AND review_status = 'approved'`)
@@ -279,6 +299,7 @@ export async function profilePage(env: Env, id: string, viewerUserId: string | n
     website: p!.website,
     languages: parseJSON<string[]>(p!.languages, []),
     links: showLinks ? links.results : [],
+    externalLinks: showLinks ? external.results : [],
     socialAccounts: social.results,
     ratings,
     counts,
