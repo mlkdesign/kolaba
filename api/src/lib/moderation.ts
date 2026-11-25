@@ -89,7 +89,7 @@ export async function checkImage(env: Env, bytes: ArrayBuffer): Promise<ImageVer
 // ─── Automatic reports ───
 
 /** Puts flagged text (a bio, a display name) in the moderators' queue without hiding anything. */
-export async function autoReport(env: Env, target: { type: 'user' | 'post' | 'review' | 'media'; id: string; profileId: string | null },
+export async function autoReport(env: Env, target: { type: 'user' | 'post' | 'review' | 'media' | 'comment'; id: string; profileId: string | null },
                                  verdict: TextVerdict, excerpt: string) {
   const ownerRow = target.profileId
     ? await env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(target.profileId).first<{ owner_user_id: string }>()

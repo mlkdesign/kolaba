@@ -85,6 +85,26 @@ for (const key of [...creators.map((c) => c[0]), ...businesses.map((b) => b[0])]
     status: 'active', role: 'user', is_demo: 1, created_at: NOW - 60 * DAY, updated_at: NOW - 60 * DAY });
 }
 
+/** FEATURE 134: three collections per niche — the first two always, the third when there are enough videos. Ids keep the
+ *  earlier "best" / "brands" so a database that has them is updated, not duplicated. */
+function collectionThemes(niche) {
+  const n = niche.toLowerCase();
+  if (n.includes('beauty')) return [['best', 'Beauty Campaigns', 'Skincare and make-up content made for brand launches and seasonal drops.'],
+    ['brands', 'Product Reviews', 'Honest close-ups and routines with products I actually use.'], ['life', 'Lifestyle UGC', 'Everyday moments in soft natural light.']];
+  if (n.includes('travel')) return [['best', 'Travel & Hotels', 'Stays, resorts and boutique hotels filmed for their guests-to-be.'],
+    ['brands', 'Destination Stories', 'Short stories from places worth the trip.'], ['life', 'Lifestyle UGC', 'Slow mornings, local food and views.']];
+  if (n.includes('food')) return [['best', 'Restaurant Content', 'Dishes, kitchens and dining rooms — content that makes people book a table.'],
+    ['brands', 'Street Food Stories', 'Markets, stalls and the people behind them.'], ['life', 'Product Reviews', 'Food and drink products, tried on camera.']];
+  if (n.includes('fashion')) return [['best', 'Fashion Collaborations', 'Lookbooks and styling for independent labels.'],
+    ['brands', 'Editorial Shoots', 'Campaign and editorial work.'], ['life', 'Lifestyle UGC', 'Outfits in real life, on real streets.']];
+  if (n.includes('tech')) return [['best', 'Product Reviews', 'Unboxings, close-ups and clean product demos.'],
+    ['brands', 'Brand Campaigns', 'Launch content made with brands.'], ['life', 'Lifestyle UGC', 'Tech in everyday use.']];
+  if (n.includes('fitness')) return [['best', 'Sport Campaigns', 'Training content for sportswear and fitness brands.'],
+    ['brands', 'Product Reviews', 'Gear and nutrition, tested in real workouts.'], ['life', 'Lifestyle UGC', 'Routines and healthy habits.']];
+  return [['best', 'Lifestyle UGC', 'Everyday content for lifestyle brands.'], ['brands', 'Brand Campaigns', 'Selected brand work.'],
+    ['life', 'Product Reviews', 'Products in real life.']];
+}
+
 const flag = (code) => String.fromCodePoint(...[...code].map((ch) => 127397 + ch.charCodeAt(0)));
 const mediaIdsOf = {};
 let order = 0;
@@ -118,17 +138,21 @@ for (const [key, name, username, niche, city, country, cc, langs, pro, bio, vids
       created_at: created });
     emit(`UPDATE profiles SET avatar_media_id = 'med_${key}_avatar' WHERE id = '${id}' AND avatar_media_id IS NULL;`);
   }
-  // Collections for PRO creators with enough videos; c12 also has an empty one (empty state).
+  // FEATURE 134: themed collections for PRO creators with enough videos — 2–3 each, by their niche, different sizes, a
+  // cover (one of the creator's own videos — its poster). Stable ids; titles and descriptions are refreshed on every run.
   if (pro && vids.length >= 6) {
-    insert('collections', { id: `col_${key}_best`, owner_profile_id: id, title: 'Best works', description: 'Selected brand work',
-      cover_media_id: null, visibility: 'public', sort_order: 0, created_at: created });
-    mediaIdsOf[key].slice(0, 4).forEach((m, i) => insert('collection_items', { collection_id: `col_${key}_best`, media_id: m, position: i }));
-    insert('collections', { id: `col_${key}_brands`, owner_profile_id: id, title: 'Brand campaigns', description: '',
-      cover_media_id: null, visibility: 'public', sort_order: 1, created_at: created });
-    mediaIdsOf[key].slice(3, 8).forEach((m, i) => insert('collection_items', { collection_id: `col_${key}_brands`, media_id: m, position: i }));
+    const themes = collectionThemes(niche);
+    const slices = [[0, 4], [3, 8], [5, 10]];
+    themes.forEach(([suffix, title, description], i) => {
+      const cid = `col_${key}_${suffix}`;
+      const items = mediaIdsOf[key].slice(slices[i][0], slices[i][1]);
+      if (!items.length) return;
+      insert('collections', { id: cid, owner_profile_id: id, title, description, cover_media_id: items[0], visibility: 'public',
+        sort_order: i, created_at: created + i * DAY, updated_at: created + i * DAY });
+      emit(`UPDATE collections SET title = ${q(title)}, description = ${q(description)}, cover_media_id = COALESCE(cover_media_id, ${q(items[0])}) WHERE id = ${q(cid)};`);
+      items.forEach((m, j) => insert('collection_items', { collection_id: cid, media_id: m, position: j }));
+    });
   }
-  if (key === 'c12') insert('collections', { id: 'col_c12_soon', owner_profile_id: id, title: 'Coming soon', description: 'New season',
-    cover_media_id: null, visibility: 'public', sort_order: 2, created_at: created });
 }
 
 // Businesses and their one published job each.

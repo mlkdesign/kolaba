@@ -24,7 +24,7 @@ const CONVERSATION_EXCERPT = 20;   // messages copied for a reported conversatio
 
 const ReportBody = z.object({
   targetType: z.string().transform((t) => LEGACY_TYPES[t] ?? t)
-    .pipe(z.enum(['user', 'post', 'media', 'message', 'conversation', 'review'])),
+    .pipe(z.enum(['user', 'post', 'media', 'message', 'conversation', 'review', 'comment'])),
   targetId: z.string().min(1).max(80),
   category: z.string().optional(),
   reason: z.string().optional(),        // legacy name of `category`
@@ -67,6 +67,14 @@ async function resolveTarget(env: Env, type: string, id: string, reporterProfile
         .first<Record<string, string>>();
       if (!r) fail(404, 'target_not_found');
       return { profileId: r!.author_profile_id, userId: r!.author_user_id, context: { excerpt: (r!.comment ?? '').slice(0, 300) } };
+    }
+    case 'comment': {
+      // FEATURE 134: a video comment — the moderator sees its text, its video and its thread.
+      const cm = await env.DB.prepare(`SELECT author_profile_id, media_id, parent_id, body, status FROM media_comments WHERE id = ?`).bind(id)
+        .first<{ author_profile_id: string; media_id: string; parent_id: string | null; body: string; status: string }>();
+      if (!cm || cm.status !== 'visible') fail(404, 'target_not_found');
+      return { profileId: cm!.author_profile_id, userId: await owner(cm!.author_profile_id),
+               context: { excerpt: cm!.body.slice(0, 1000), mediaId: cm!.media_id, parentId: cm!.parent_id } };
     }
     case 'message': {
       const m = await env.DB.prepare(`SELECT m.conversation_id, m.sender_profile_id FROM messages m

@@ -14,6 +14,7 @@ import { fail, newId, newToken, now, sha256Hex, timingSafeEqual } from '../lib/u
 import { jobsJSON } from './jobs';
 import { signedMediaURL, signedVoiceURL } from './media';
 import { emailHash } from '../lib/moderation';
+import { deleteComment } from './comments';
 
 const SESSION_MS = 8 * 3_600_000;
 const IDLE_MS = 60 * 60_000;
@@ -895,7 +896,7 @@ admin.get('/logs', async (c) => {
 // share (report_evidence) — never a conversation itself. Opening shared messages is written to admin_logs.
 
 const TAB_TYPES: Record<string, string[]> = {
-  profiles: ['user'], posts: ['post'], media: ['media'], messages: ['message', 'conversation'], reviews: ['review'],
+  profiles: ['user'], posts: ['post'], media: ['media'], messages: ['message', 'conversation'], reviews: ['review'], comments: ['comment'],
 };
 const REPORT_CATEGORIES = ['spam', 'sexual', 'violence', 'harassment', 'hate', 'scam', 'impersonation', 'copyright', 'illegal', 'other'];
 
@@ -1003,6 +1004,25 @@ async function targetDetail(env: Env, type: string, id: string) {
                    authorProfileId: r.author_profile_id, recipientProfileId: r.recipient_profile_id, reviewStatus: r.review_status,
                    createdAt: r.created_at }, publicUrl: appLink(env, 'profile', r.recipient_profile_id) } : null;
     }
+    case 'comment': {
+      // FEATURE 134: the comment, its author, its video and the thread around it.
+      const cm = await env.DB.prepare(`SELECT * FROM media_comments WHERE id = ?`).bind(id).first<Record<string, any>>();
+      if (!cm) return null;
+      const author = await env.DB.prepare(`SELECT ${cardColumns} FROM profiles p ${avatarJoin} WHERE p.id = ?`).bind(cm.author_profile_id)
+        .first<CardRow>();
+      const m = await env.DB.prepare(`SELECT ${mediaColumns}, m.status FROM media m WHERE m.id = ?`).bind(cm.media_id).first<MediaRow & Record<string, any>>();
+      const video = m ? mediaJSON(env, m) : null;
+      if (m && video && m.provider === 'r2') video.url = await signedMediaURL(env, m.id);
+      const thread = await env.DB.prepare(`SELECT id, author_profile_id, body, status, created_at FROM media_comments
+          WHERE id = ?1 OR parent_id = ?1 OR id = ?2 OR parent_id = ?2 ORDER BY created_at LIMIT 30`)
+        .bind(cm.parent_id ?? cm.id, cm.id).all<Record<string, any>>();
+      return { kind: 'comment',
+               comment: { id: cm.id, text: cm.body, status: cm.status, mediaId: cm.media_id, parentId: cm.parent_id, createdAt: cm.created_at,
+                          author: author ? card(env, author) : null },
+               media: video, thread: thread.results.map((r) => ({ id: r.id, authorProfileId: r.author_profile_id, text: r.body,
+                                                                 status: r.status, createdAt: r.created_at })),
+               publicUrl: m ? appLink(env, 'profile', m.owner_profile_id) : null };
+    }
     default:
       return { kind: type };  // message / conversation: only the shared copy (evidence) is shown
   }
@@ -1097,6 +1117,14 @@ async function setContentRemoved(env: Env, type: string, id: string, removed: bo
       return;
     case 'message':
       await env.DB.prepare(`UPDATE messages SET deleted_at = ? WHERE id = ?`).bind(removed ? t : null, id).run(); return;
+    case 'comment': {
+      // FEATURE 134: a removed comment leaves the thread (or stays as "Comment deleted" while it has replies). Removal is final.
+      if (!removed) fail(422, 'not_restorable');
+      const row = await env.DB.prepare(`SELECT id, media_id, parent_id, replies_count, status FROM media_comments WHERE id = ?`).bind(id)
+        .first<{ id: string; media_id: string; parent_id: string | null; replies_count: number; status: string }>();
+      if (row && row.status === 'visible') await deleteComment(env, row, 'removed');
+      return;
+    }
     case 'user':
       if (removed) await env.DB.prepare(`UPDATE profiles SET status = 'hidden', admin_hidden_at = ?, updated_at = ? WHERE id = ? AND status = 'active'`).bind(t, t, id).run();
       else await env.DB.prepare(`UPDATE profiles SET status = 'active', admin_hidden_at = NULL, updated_at = ? WHERE id = ? AND admin_hidden_at IS NOT NULL`).bind(t, id).run();

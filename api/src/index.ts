@@ -7,6 +7,7 @@ import { ApiError } from './lib/util';
 import { optionalAuth } from './lib/auth';
 import auth from './routes/auth';
 import profiles from './routes/profiles';
+import comments from './routes/comments';
 import media from './routes/media';
 import jobs from './routes/jobs';
 import contacts from './routes/contacts';
@@ -93,6 +94,7 @@ app.get('/v1/health', async (c) => {
 
 app.route('/v1/auth', auth);
 app.route('/v1/profiles', profiles);
+app.route('/v1/comments', comments);
 app.route('/v1/media', media);
 app.route('/v1/jobs', jobs);
 app.route('/v1/contacts', contacts);

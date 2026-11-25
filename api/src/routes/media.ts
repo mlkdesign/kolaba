@@ -8,7 +8,7 @@ import { isPro, mediaColumns, mediaJSON, type MediaRow, notify } from '../lib/ca
 import { fail, newId, now, sha256Hex } from '../lib/util';
 import { limitReached, PENDING_UPLOAD_TTL, PORTFOLIO_VIDEOS_COUNT_SQL, portfolioVideosUsage } from '../lib/entitlements';
 import { mp4DurationSeconds } from '../lib/mp4';
-import { checkImage, PUBLIC_REVIEW_PURPOSES } from '../lib/moderation';
+import { blockState, checkImage, PUBLIC_REVIEW_PURPOSES } from '../lib/moderation';
 
 const media = new Hono<AppEnv>();
 
@@ -375,81 +375,161 @@ media.post('/:id/view', requireAuth, requireProfile, async (c) => {
   return c.json({ ok: true });
 });
 
-// ─── Collections (creator.pro) ───
+// ─── Collections (FEATURE 134) ───
+// A creator's own themed sets of photos and videos. PRO creates them and adds media; without PRO the owner keeps, edits
+// (title, description, cover from what's inside), reorders, removes media and deletes — and nobody else sees them
+// (they come back for visitors as soon as PRO is active again: nothing is republished).
 
 const CollectionBody = z.object({
-  title: z.string().trim().min(1).max(40),
-  description: z.string().max(300).optional(),
+  title: z.string().trim().min(1).max(100),
+  description: z.string().max(1000).optional(),
   visibility: z.enum(['public', 'private']).optional(),
+  coverMediaId: z.string().nullable().optional(),
 });
+
+/** A collection's owner profile, its account and whether its creator has PRO now. */
+async function collectionOwner(env: Env, id: string) {
+  const row = await env.DB.prepare(`SELECT col.owner_profile_id, col.visibility, p.owner_user_id FROM collections col
+      JOIN profiles p ON p.id = col.owner_profile_id WHERE col.id = ?`).bind(id)
+    .first<{ owner_profile_id: string; visibility: string; owner_user_id: string }>();
+  return row;
+}
+
+async function ownedCollection(env: Env, id: string, profileId: string) {
+  const row = await collectionOwner(env, id);
+  if (!row || row.owner_profile_id !== profileId) fail(404, 'collection_not_found');
+}
+
+/** The cover must be the owner's own ready photo (or a video's poster frame). */
+async function checkCover(env: Env, mediaId: string, profileId: string) {
+  const m = await env.DB.prepare(`SELECT id FROM media WHERE id = ? AND owner_profile_id = ? AND status = 'ready'`)
+    .bind(mediaId, profileId).first();
+  if (!m) fail(422, 'media_not_found');
+}
+
+/** Media uploaded only for collections and no longer used by any collection (as an item or a cover) are deleted with
+ *  their files. Anything else (portfolio, reviews, chats…) is never touched. Safe to run twice. */
+async function deleteOrphanCollectionMedia(env: Env, profileId: string, mediaIds: string[], ctx: { waitUntil(promise: Promise<unknown>): void }) {
+  if (!mediaIds.length) return;
+  const marks = mediaIds.map(() => '?').join(',');
+  const orphans = await env.DB.prepare(`SELECT id, storage_key, provider, poster_media_id FROM media WHERE owner_profile_id = ?
+      AND purpose = 'collection' AND status <> 'deleted' AND id IN (${marks})
+      AND NOT EXISTS (SELECT 1 FROM collection_items ci WHERE ci.media_id = media.id)
+      AND NOT EXISTS (SELECT 1 FROM collections c WHERE c.cover_media_id = media.id)`)
+    .bind(profileId, ...mediaIds).all<{ id: string; storage_key: string | null; provider: string; poster_media_id: string | null }>();
+  if (!orphans.results.length) return;
+  const ids = orphans.results.flatMap((m) => [m.id, ...(m.poster_media_id ? [m.poster_media_id] : [])]);
+  const files = await env.DB.prepare(`SELECT storage_key FROM media WHERE id IN (${ids.map(() => '?').join(',')}) AND provider = 'r2'
+      AND storage_key IS NOT NULL`).bind(...ids).all<{ storage_key: string }>();
+  await env.DB.prepare(`UPDATE media SET status = 'deleted', deleted_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`)
+    .bind(now(), ...ids).run();
+  if (env.MEDIA) for (const f of files.results) ctx.waitUntil(env.MEDIA.delete(f.storage_key));
+}
 
 media.post('/collections', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c, 'creator');
   if (!(await isPro(c.env, profile.id))) fail(403, 'pro_required');
+  await rateLimit(c, 'RL_WRITE', `collection:${profile.id}`);
   const body = CollectionBody.parse(await c.req.json());
+  if (body.coverMediaId) await checkCover(c.env, body.coverMediaId, profile.id);
   const id = newId('col');
-  await c.env.DB.prepare(`INSERT INTO collections (id, owner_profile_id, title, description, visibility, sort_order, created_at)
-      VALUES (?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order) + 1, 0) FROM collections WHERE owner_profile_id = ?), ?)`)
-    .bind(id, profile.id, body.title, body.description ?? '', body.visibility ?? 'public', profile.id, now()).run();
-  return c.json({ id, ...body }, 201);
+  await c.env.DB.prepare(`INSERT INTO collections (id, owner_profile_id, title, description, cover_media_id, visibility, sort_order,
+      created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order) + 1, 0) FROM collections WHERE owner_profile_id = ?), ?, ?)`)
+    .bind(id, profile.id, body.title, body.description ?? '', body.coverMediaId ?? null, body.visibility ?? 'public', profile.id,
+          now(), now()).run();
+  return c.json({ id, title: body.title, description: body.description ?? '', visibility: body.visibility ?? 'public' }, 201);
 });
 
-async function ownedCollection(env: Env, id: string, profileId: string) {
-  const row = await env.DB.prepare(`SELECT owner_profile_id FROM collections WHERE id = ?`).bind(id).first<{ owner_profile_id: string }>();
-  if (!row || row.owner_profile_id !== profileId) fail(404, 'collection_not_found');
-}
-
+// PATCH — title, description, visibility, cover: the owner, with or without PRO (a new cover must already be theirs).
 media.patch('/collections/:id', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c, 'creator');
-  await ownedCollection(c.env, c.req.param('id'), profile.id);
-  if (!(await isPro(c.env, profile.id))) fail(403, 'pro_required');
+  const id = c.req.param('id');
+  await ownedCollection(c.env, id, profile.id);
   const body = CollectionBody.partial().parse(await c.req.json());
+  if (body.coverMediaId) await checkCover(c.env, body.coverMediaId, profile.id);
+  const old = await c.env.DB.prepare(`SELECT cover_media_id FROM collections WHERE id = ?`).bind(id).first<{ cover_media_id: string | null }>();
   await c.env.DB.prepare(`UPDATE collections SET title = COALESCE(?, title), description = COALESCE(?, description),
-      visibility = COALESCE(?, visibility) WHERE id = ?`).bind(body.title ?? null, body.description ?? null, body.visibility ?? null,
-      c.req.param('id')).run();
+      visibility = COALESCE(?, visibility), cover_media_id = CASE WHEN ? THEN ? ELSE cover_media_id END, updated_at = ? WHERE id = ?`)
+    .bind(body.title ?? null, body.description ?? null, body.visibility ?? null, body.coverMediaId !== undefined ? 1 : 0,
+          body.coverMediaId ?? null, now(), id).run();
+  // A replaced cover that was uploaded only for it goes.
+  if (body.coverMediaId !== undefined && old?.cover_media_id && old.cover_media_id !== body.coverMediaId) {
+    await deleteOrphanCollectionMedia(c.env, profile.id, [old.cover_media_id], c.executionCtx);
+  }
   return c.json({ status: 'updated' });
 });
 
-// Deleting a collection never deletes its media.
+// DELETE — the collection, its links, and the files that were only its own. Idempotent: an unknown id is already gone.
 media.delete('/collections/:id', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c, 'creator');
-  await ownedCollection(c.env, c.req.param('id'), profile.id);
-  await c.env.DB.prepare(`DELETE FROM collections WHERE id = ?`).bind(c.req.param('id')).run();
+  const id = c.req.param('id');
+  const row = await collectionOwner(c.env, id);
+  if (!row) return c.json({ status: 'deleted' });
+  if (row.owner_profile_id !== profile.id) fail(404, 'collection_not_found');
+  const linked = await c.env.DB.prepare(`SELECT media_id FROM collection_items WHERE collection_id = ?
+      UNION SELECT cover_media_id FROM collections WHERE id = ? AND cover_media_id IS NOT NULL`).bind(id, id).all<{ media_id: string }>();
+  await c.env.DB.prepare(`DELETE FROM collections WHERE id = ?`).bind(id).run();
+  await deleteOrphanCollectionMedia(c.env, profile.id, linked.results.map((r) => r.media_id), c.executionCtx);
   return c.json({ status: 'deleted' });
 });
 
-// PUT /v1/media/collections/:id/items {mediaIds} — the collection's media, in order (own ready media only).
+// PUT /v1/media/collections/:id/items {mediaIds} — the collection's media, in order (own ready media only). Without PRO
+// only removing and reordering: nothing new comes in.
 media.put('/collections/:id/items', requireAuth, requireProfile, async (c) => {
   const profile = actingProfile(c, 'creator');
   const id = c.req.param('id');
   await ownedCollection(c.env, id, profile.id);
-  if (!(await isPro(c.env, profile.id))) fail(403, 'pro_required');
-  const { mediaIds } = z.object({ mediaIds: z.array(z.string()).max(100) }).parse(await c.req.json());
-  if (mediaIds.length) {
-    const owned = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE owner_profile_id = ? AND status = 'ready'
-        AND id IN (${mediaIds.map(() => '?').join(',')})`).bind(profile.id, ...mediaIds).first<{ n: number }>();
-    if (owned?.n !== new Set(mediaIds).size) fail(422, 'media_not_found');
+  const { mediaIds: raw } = z.object({ mediaIds: z.array(z.string()).max(2000) }).parse(await c.req.json());
+  const mediaIds = [...new Set(raw)];
+  const current = (await c.env.DB.prepare(`SELECT media_id FROM collection_items WHERE collection_id = ?`).bind(id)
+    .all<{ media_id: string }>()).results.map((r) => r.media_id);
+  const added = mediaIds.filter((m) => !current.includes(m));
+  if (added.length && !(await isPro(c.env, profile.id))) fail(403, 'pro_required');
+  if (added.length) {
+    for (let i = 0; i < added.length; i += 90) {
+      const chunk = added.slice(i, i + 90);
+      const owned = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE owner_profile_id = ? AND status = 'ready'
+          AND purpose IN ('portfolio', 'collection') AND id IN (${chunk.map(() => '?').join(',')})`).bind(profile.id, ...chunk).first<{ n: number }>();
+      if (owned?.n !== chunk.length) fail(422, 'media_not_found');
+    }
   }
-  await c.env.DB.batch([
-    c.env.DB.prepare(`DELETE FROM collection_items WHERE collection_id = ?`).bind(id),
-    ...[...new Set(mediaIds)].map((mid, i) =>
-      c.env.DB.prepare(`INSERT INTO collection_items (collection_id, media_id, position) VALUES (?, ?, ?)`).bind(id, mid, i)),
-  ]);
-  return c.json({ status: 'updated', count: new Set(mediaIds).size });
+  const statements = [c.env.DB.prepare(`DELETE FROM collection_items WHERE collection_id = ?`).bind(id),
+    ...mediaIds.map((mid, i) => c.env.DB.prepare(`INSERT INTO collection_items (collection_id, media_id, position) VALUES (?, ?, ?)`).bind(id, mid, i)),
+    c.env.DB.prepare(`UPDATE collections SET updated_at = ? WHERE id = ?`).bind(now(), id)];
+  for (let i = 0; i < statements.length; i += 100) await c.env.DB.batch(statements.slice(i, i + 100));
+  await deleteOrphanCollectionMedia(c.env, profile.id, current.filter((m) => !mediaIds.includes(m)), c.executionCtx);
+  return c.json({ status: 'updated', count: mediaIds.length });
 });
 
-// GET /v1/media/collections/:id/items
+/** Whether the viewer may see this collection: its owner always; anyone else only while it's public, its creator has
+ *  PRO and neither has blocked the other. */
+async function canSeeCollection(env: Env, col: { owner_profile_id: string; visibility: string; owner_user_id: string },
+                                viewerUserId: string | undefined): Promise<boolean> {
+  if (viewerUserId && col.owner_user_id === viewerUserId) return true;
+  if (col.visibility !== 'public') return false;
+  if (!(await isPro(env, col.owner_profile_id))) return false;
+  return (await blockState(env, viewerUserId ?? null, col.owner_user_id)) === 'none';
+}
+
+// GET /v1/media/collections/:id/items?offset=&limit= — a page of the collection's media, in order.
 media.get('/collections/:id/items', async (c) => {
   const id = c.req.param('id');
   const col = await c.env.DB.prepare(`SELECT col.*, p.owner_user_id FROM collections col JOIN profiles p ON p.id = col.owner_profile_id
       WHERE col.id = ?`).bind(id).first<Record<string, any>>();
-  if (!col || (col.visibility !== 'public' && col.owner_user_id !== c.get('user')?.id)) fail(404, 'collection_not_found');
+  const viewer = c.get('user')?.id;
+  if (!col || !(await canSeeCollection(c.env, col as any, viewer))) fail(404, 'collection_not_found');
+  const isOwner = col!.owner_user_id === viewer;
+  const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 60) || 60, 1), 200);
+  const offset = Math.max(Number(c.req.query('offset') ?? 0) || 0, 0);
   const rows = await c.env.DB.prepare(`SELECT ${mediaColumns} FROM collection_items ci JOIN media m ON m.id = ci.media_id
       WHERE ci.collection_id = ? AND m.status = 'ready'
-        AND ${col!.owner_user_id === c.get('user')?.id ? "m.review_status IN ('approved', 'pending', 'flagged')" : "m.review_status = 'approved'"}
-      ORDER BY ci.position`).bind(id).all<MediaRow>();
-  return c.json({ collection: { id: col!.id, title: col!.title, description: col!.description, visibility: col!.visibility },
-                  items: rows.results.map((m) => mediaJSON(c.env, m)) });
+        AND ${isOwner ? "m.review_status IN ('approved', 'pending', 'flagged')" : "m.review_status = 'approved'"}
+      ORDER BY ci.position LIMIT ? OFFSET ?`).bind(id, limit + 1, offset).all<MediaRow>();
+  const page = rows.results.slice(0, limit);
+  return c.json({ collection: { id: col!.id, title: col!.title, description: col!.description, visibility: col!.visibility,
+                                ownerProfileId: col!.owner_profile_id, coverMediaId: col!.cover_media_id },
+                  items: page.map((m) => mediaJSON(c.env, m)),
+                  nextOffset: rows.results.length > limit ? offset + limit : null });
 });
 
 export { media, currentUser };

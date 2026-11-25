@@ -17,9 +17,9 @@ export const CATEGORY_LABELS: Record<string, string> = {
   spam: 'Spam', sexual: 'Nudity / Sexual', violence: 'Violence / Dangerous', harassment: 'Harassment / Bullying', hate: 'Hate Speech',
   scam: 'Scam / Fraud', impersonation: 'Fake Account / Impersonation', copyright: 'Copyright Violation', illegal: 'Illegal Content', other: 'Other',
 };
-const TYPE_LABELS: Record<string, string> = { user: 'Profile', post: 'Post', media: 'Media', message: 'Message', conversation: 'Conversation', review: 'Review' };
+const TYPE_LABELS: Record<string, string> = { user: 'Profile', post: 'Post', media: 'Media', message: 'Message', conversation: 'Conversation', review: 'Review', comment: 'Comment' };
 const STATUS_LABELS: Record<string, string> = { pending: 'Pending', under_review: 'Under review', resolved: 'Resolved', dismissed: 'Dismissed' };
-const TABS: [string, string][] = [['', 'All'], ['profiles', 'Profiles'], ['posts', 'Posts'], ['media', 'Media'], ['messages', 'Messages'], ['reviews', 'Reviews']];
+const TABS: [string, string][] = [['', 'All'], ['profiles', 'Profiles'], ['posts', 'Posts'], ['media', 'Media'], ['messages', 'Messages'], ['reviews', 'Reviews'], ['comments', 'Comments']];
 
 interface ReportRow {
   id: string; source: 'user' | 'auto'; targetType: string; targetId: string; category: string; details: string | null; priority: 'normal' | 'high' | 'urgent';
@@ -133,7 +133,9 @@ interface ReportDetail {
   target: { kind: string; publicUrl?: string | null; profile?: Card & { bio: string; status: string };
             post?: { id: string; title: string; description: string; reviewStatus: string; status: string; media: { url: string | null; kind: string }[] };
             media?: { id: string; kind: string; url: string | null; posterUrl: string | null; purpose: string; reviewStatus: string };
-            review?: { comment: string; quality: number; speed: number; contact: number; reviewStatus: string } } | null;
+            review?: { comment: string; quality: number; speed: number; contact: number; reviewStatus: string };
+            comment?: { id: string; text: string; status: string; mediaId: string; parentId: string | null; createdAt: number; author: Card | null };
+            thread?: { id: string; authorProfileId: string; text: string; status: string; createdAt: number }[] } | null;
   history: { id: string; category: string; status: string; source: string; createdAt: number }[];
   actions: { id: string; reportId: string | null; action: string; reason: string | null; adminEmail: string; detail: { days?: number } | null; createdAt: number }[];
 }
@@ -176,7 +178,7 @@ export function ReportPage({ id }: { id: string }) {
   if (!detail.data) return <><PageHeader title="Report" back={{ to: '/moderation', label: 'Moderation' }} /><div className="content"><Loading /></div></>;
   const { report: r, target, evidence, history, actions } = detail.data;
   const open_ = ['pending', 'under_review'].includes(r.status);
-  const removable = ['user', 'post', 'media', 'review', 'message'].includes(r.targetType);
+  const removable = ['user', 'post', 'media', 'review', 'message', 'comment'].includes(r.targetType);
   return (
     <>
       <PageHeader title={`${CATEGORY_LABELS[r.category] ?? r.category} · ${TYPE_LABELS[r.targetType] ?? r.targetType}`}
@@ -292,6 +294,16 @@ function TargetView({ detail }: { detail: ReportDetail }) {
       <div className="author"><Avatar url={t.profile.avatarUrl} name={t.profile.displayName} size={44} />
         <span className="cell-user__text"><b>{t.profile.displayName}</b><span>@{t.profile.username} · {t.profile.type} · <Status value={t.profile.status} /></span></span></div>
       <p className="prose">{t.profile.bio || 'No bio.'}</p>
+    </div>
+  );
+  if (t.comment) return (
+    <div className="stack">
+      {t.comment.author && <div className="author"><Avatar url={t.comment.author.avatarUrl} name={t.comment.author.displayName} size={44} />
+        <span className="cell-user__text"><b>{t.comment.author.displayName}</b><span>Comment · {t.comment.status}</span></span></div>}
+      <p className="prose">{t.comment.text || '(deleted)'}</p>
+      {t.media && t.media.kind === 'video' && <video className="evidence__img" src={t.media.url ?? undefined} poster={t.media.posterUrl ?? undefined} controls preload="metadata" />}
+      {(t.thread?.length ?? 0) > 1 && <div className="stack"><span className="cell-muted">Thread</span>
+        {t.thread!.map((m) => <p key={m.id} className={m.id === t.comment!.id ? 'prose' : 'prose cell-muted'}>{m.text || '(deleted)'}</p>)}</div>}
     </div>
   );
   if (t.post) return (

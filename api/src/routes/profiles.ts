@@ -346,6 +346,9 @@ profiles.get('/:id/collections', async (c) => {
   const isOwner = c.get('user') ? (await c.env.DB.prepare(`SELECT owner_user_id FROM profiles WHERE id = ?`).bind(id)
     .first<{ owner_user_id: string }>())?.owner_user_id === c.get('user')!.id : false;
   if (!isOwner && await blockedForViewer(c.env, id, c.get('user')?.id)) return c.json({ items: [] });
+  // FEATURE 134: a creator's collections are public only while the creator has PRO — kept (and shown to the owner)
+  // without it, back for everyone once PRO is active again.
+  if (!isOwner && !(await isPro(c.env, id))) return c.json({ items: [], hidden: true });
   const rows = await c.env.DB.prepare(`SELECT col.*, (SELECT COUNT(*) FROM collection_items ci JOIN media m ON m.id = ci.media_id
         AND m.status = 'ready' AND ${visibleMediaSQL('m', isOwner ? 'col.owner_profile_id' : undefined)} WHERE ci.collection_id = col.id) AS items_count,
       COALESCE(col.cover_media_id, (SELECT ci.media_id FROM collection_items ci WHERE ci.collection_id = col.id ORDER BY ci.position LIMIT 1)) AS cover_id
@@ -358,8 +361,11 @@ profiles.get('/:id/collections', async (c) => {
         .bind(...coverIds).all<MediaRow>()
     : { results: [] as MediaRow[] };
   const coverMap = new Map(covers.results.map((m) => [m.id, mediaJSON(c.env, m)]));
-  return c.json({ items: rows.results.map((r) => ({ id: r.id, title: r.title, description: r.description, visibility: r.visibility,
-                                                   itemsCount: r.items_count, cover: r.cover_id ? coverMap.get(r.cover_id) ?? null : null })) });
+  const pro = isOwner ? await isPro(c.env, id) : true;
+  return c.json({ canEdit: isOwner && pro,
+                  items: rows.results.map((r) => ({ id: r.id, title: r.title, description: r.description, visibility: r.visibility,
+                                                   itemsCount: r.items_count, coverMediaId: r.cover_media_id ?? null,
+                                                   cover: r.cover_id ? coverMap.get(r.cover_id) ?? null : null })) });
 });
 
 // POST /v1/profiles/:id/view — kept for older apps; a view is no longer a notification (nor recorded).

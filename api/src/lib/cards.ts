@@ -92,13 +92,13 @@ export async function loadCards(env: Env, ids: string[]) {
 export interface MediaRow {
   id: string; owner_profile_id: string; kind: string; purpose: string; provider: string; url: string | null;
   fallback_url: string | null; poster_url: string | null; poster_media_id: string | null; mime: string | null;
-  width: number | null; height: number | null; duration: number | null; title: string | null; likes_count: number;
+  width: number | null; height: number | null; duration: number | null; title: string | null; likes_count: number; comments_count?: number;
   views_count: number; source_provider: string | null; source_url: string | null; license: string | null;
   attribution: string | null; created_at: number; position: number; review_status?: string;
 }
 
 export const mediaColumns = `m.id, m.owner_profile_id, m.kind, m.purpose, m.provider, m.url, m.fallback_url, m.poster_url,
-  m.poster_media_id, m.mime, m.width, m.height, m.duration, m.title, m.likes_count, m.views_count, m.source_provider,
+  m.poster_media_id, m.mime, m.width, m.height, m.duration, m.title, m.likes_count, m.comments_count, m.views_count, m.source_provider,
   m.source_url, m.license, m.attribution, m.created_at, m.position, m.review_status`;
 
 export function mediaJSON(env: Env, m: MediaRow, extra: Record<string, unknown> = {}) {
@@ -117,6 +117,7 @@ export function mediaJSON(env: Env, m: MediaRow, extra: Record<string, unknown> 
     duration: m.duration,
     title: m.title,
     likesCount: m.likes_count,
+    commentsCount: m.comments_count ?? 0,
     viewsCount: m.views_count,
     source: m.source_provider ? { provider: m.source_provider, url: m.source_url, license: m.license, attribution: m.attribution } : null,
     createdAt: m.created_at,
@@ -143,6 +144,9 @@ export const NOTIFICATION_TYPES: Record<string, { body: string; setting: PushSet
   review_rejected: { body: 'Your review could not be published.', setting: null, push: true, scope: 'profile' },
   // Media & content
   liked_video: { body: 'liked your video.', setting: 'activity', push: true, scope: 'profile' },
+  // FEATURE 134: video comments (Activity).
+  new_comment: { body: 'commented on your video.', setting: 'activity', push: true, scope: 'profile' },
+  comment_reply: { body: 'replied to your comment.', setting: 'activity', push: true, scope: 'profile' },
   video_failed: { body: "Your video couldn't be processed.", setting: 'activity', push: true, scope: 'profile' },
   content_removed: { body: 'Your content was removed.', setting: null, push: true, scope: 'profile' },
   content_restored: { body: 'Your content has been restored.', setting: 'activity', push: false, scope: 'profile' },
