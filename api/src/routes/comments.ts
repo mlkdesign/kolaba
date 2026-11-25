@@ -19,6 +19,8 @@ interface CommentRow {
   id: string; media_id: string; author_profile_id: string; parent_id: string | null; reply_to_profile_id: string | null;
   body: string; status: string; likes_count: number; replies_count: number; created_at: number;
   liked?: number;
+  /** Replies this viewer sees (top-level rows of a list). */
+  seen_replies?: number;
 }
 
 /** The video, if this viewer may see (and so comment on) it: published, public, not blocked either way. */
@@ -39,6 +41,11 @@ async function visibleVideo(env: Env, mediaId: string, viewerUserId: string) {
 const notBlockedAuthor = `NOT EXISTS (SELECT 1 FROM profiles ap JOIN blocks b ON (b.blocker_user_id = ap.owner_user_id AND b.blocked_user_id = ?1)
     OR (b.blocker_user_id = ?1 AND b.blocked_user_id = ap.owner_user_id) WHERE ap.id = c.author_profile_id)`;
 
+/** The replies this viewer sees (visible, no block either way) — `replies_count` counts everyone's. */
+const visibleReplies = `(SELECT count(*) FROM media_comments rc WHERE rc.parent_id = c.id AND rc.status = 'visible'
+    AND NOT EXISTS (SELECT 1 FROM profiles ap JOIN blocks b ON (b.blocker_user_id = ap.owner_user_id AND b.blocked_user_id = ?1)
+      OR (b.blocker_user_id = ?1 AND b.blocked_user_id = ap.owner_user_id) WHERE ap.id = rc.author_profile_id))`;
+
 async function render(env: Env, rows: CommentRow[], viewerProfileId: string) {
   const cards = await loadCards(env, rows.flatMap((r) => [r.author_profile_id, r.reply_to_profile_id ?? '']));
   return rows.map((r) => {
@@ -51,7 +58,7 @@ async function render(env: Env, rows: CommentRow[], viewerProfileId: string) {
       status: r.status,
       likesCount: removed ? 0 : r.likes_count,
       isLiked: !removed && r.liked === 1,
-      repliesCount: r.replies_count,
+      repliesCount: r.seen_replies ?? r.replies_count,
       isOwn: r.author_profile_id === viewerProfileId,
       createdAt: r.created_at,
     };
@@ -65,9 +72,10 @@ comments.get('/media/:mediaId', async (c) => {
   const video = await visibleVideo(c.env, c.req.param('mediaId'), user.id);
   if (!video) fail(404, 'media_not_found');
   const before = Number(c.req.query('before') ?? 0) || Number.MAX_SAFE_INTEGER;
-  const rows = await c.env.DB.prepare(`SELECT c.*, EXISTS (SELECT 1 FROM media_comment_likes l WHERE l.comment_id = c.id AND l.profile_id = ?2) AS liked
+  const rows = await c.env.DB.prepare(`SELECT c.*, EXISTS (SELECT 1 FROM media_comment_likes l WHERE l.comment_id = c.id AND l.profile_id = ?2) AS liked,
+        ${visibleReplies} AS seen_replies
       FROM media_comments c WHERE c.media_id = ?3 AND c.parent_id IS NULL AND c.created_at < ?4
-        AND (c.status = 'visible' OR c.replies_count > 0) AND ${notBlockedAuthor}
+        AND (c.status = 'visible' OR ${visibleReplies} > 0) AND ${notBlockedAuthor}
       ORDER BY c.created_at DESC LIMIT ?5`)
     .bind(user.id, profile.id, video!.id, before, PAGE + 1).all<CommentRow>();
   const page = rows.results.slice(0, PAGE);
@@ -79,9 +87,11 @@ comments.get('/media/:mediaId', async (c) => {
     : { results: [] as CommentRow[] };
   const rendered = await render(c.env, [...page, ...replies.results], profile.id);
   const byId = new Map(rendered.map((r) => [r.id, r]));
-  const fresh = await c.env.DB.prepare(`SELECT comments_count FROM media WHERE id = ?`).bind(video!.id).first<{ comments_count: number }>();
+  // The count this viewer sees: comments of people blocked either way don't count.
+  const fresh = await c.env.DB.prepare(`SELECT count(*) AS n FROM media_comments c WHERE c.media_id = ?2 AND c.status = 'visible' AND ${notBlockedAuthor}`)
+    .bind(user.id, video!.id).first<{ n: number }>();
   return c.json({
-    count: fresh?.comments_count ?? 0,
+    count: fresh?.n ?? 0,
     items: page.map((r) => ({ ...byId.get(r.id)!, replies: rendered.filter((x) => x.parentId === r.id) })),
     nextBefore: rows.results.length > PAGE ? page[page.length - 1].created_at : null,
   });
