@@ -1,0 +1,14 @@
+// kolaba-web — the web app (web/) at the root and the admin panel (admin-web/) under /admin/, as static files on
+// web.kolaba.app. Built by scripts/build-cloudflare-web.sh into ./public (not in git); deploy: npx wrangler deploy.
+{
+  "$schema": "../../api/node_modules/wrangler/config-schema.json",
+  "name": "kolaba-web",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": false,
+  "routes": [{ "pattern": "web.kolaba.app", "custom_domain": true }],
+  "assets": {
+    "directory": "./public",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  }
+}

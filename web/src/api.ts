@@ -1,7 +1,7 @@
 // The one client for kolaba-api. Every request carries the session token and the active profile (X-Profile-Id);
 // the server checks both — the UI never decides permissions on its own.
 
-export const API_URL: string = (import.meta as any).env?.VITE_API_URL ?? 'https://kolaba-api.mlkdesignweb.workers.dev';
+export const API_URL: string = (import.meta as any).env?.VITE_API_URL ?? 'https://api.kolaba.app';
 
 export type ProfileType = 'creator' | 'business';
 

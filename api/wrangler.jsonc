@@ -5,6 +5,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
   "workers_dev": true,
+  // kolaba.app (Cloudflare zone): the API's own domain. workers.dev stays on for app builds that still call it.
+  "routes": [{ "pattern": "api.kolaba.app", "custom_domain": true }],
   "observability": { "enabled": true },
   "d1_databases": [
     { "binding": "DB", "database_name": "kolaba-db", "database_id": "880ac093-6e95-43b9-8c39-d42a8f539316", "migrations_dir": "migrations" }
@@ -17,9 +19,9 @@
     { "name": "RL_WRITE", "namespace_id": "4102", "simple": { "limit": 60, "period": 60 } }
   ],
   "vars": {
-    "ALLOWED_ORIGINS": "https://mlkdesign.github.io",
-    "APP_URL": "https://mlkdesign.github.io/kolaba/",
-    "API_URL": "https://kolaba-api.mlkdesignweb.workers.dev",
+    "ALLOWED_ORIGINS": "https://web.kolaba.app,https://mlkdesign.github.io",
+    "APP_URL": "https://web.kolaba.app/",
+    "API_URL": "https://api.kolaba.app",
     "EMAIL_FROM": "kolaba. <onboarding@resend.dev>",
     "SIGNUPS_PER_DAY": "50",
     "MAX_PHOTO_MB": "10",
@@ -39,7 +41,7 @@
     // Admin panel (/v1/admin): the only administrator, and the only origin that may call the admin API. The first
     // password comes from the secret ADMIN_INITIAL_PASSWORD (wrangler secret put) and must be changed at first sign-in.
     "ADMIN_EMAILS": "milka19051995@gmail.com",
-    "ADMIN_ORIGINS": "https://mlkdesign.github.io",
+    "ADMIN_ORIGINS": "https://web.kolaba.app,https://mlkdesign.github.io",
     // Paid plans on: everyone is Free; PRO comes from an App Store purchase (StoreKit 2, src/routes/billing.ts) or an
     // administrator's grant (admin panel). Secrets for purchases: APPSTORE_ISSUER_ID, APPSTORE_KEY_ID,
     // APPSTORE_PRIVATE_KEY (wrangler secret put) — without them purchases answer billing_not_configured.
