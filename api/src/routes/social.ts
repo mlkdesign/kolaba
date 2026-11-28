@@ -14,8 +14,12 @@ notifications.use('*', requireAuth, requireProfile);
 
 /** SQL: the notifications the acting profile sees — its own, and its account's (security, the team's notices). Never
  *  another profile's of the same account, never a message. */
+// Kinds the feed never shows — never counted anywhere either (the bell, the other profiles' dot).
+// "Your media was approved" (iOS FIX 171) isn't shown either; an approved job or review still is.
+const HIDDEN_TYPES = `('followed', 'new_message', 'viewed_profile', 'review_request')
+  AND NOT (n.type = 'content_approved' AND COALESCE(json_extract(n.payload, '$.targetType'), 'media') IN ('media', 'photo', 'video'))`;
 const VISIBLE = `((n.scope = 'profile' AND n.recipient_profile_id = ?1) OR (n.scope = 'account' AND n.recipient_user_id = ?2))
-  AND n.type NOT IN ('followed', 'new_message', 'viewed_profile', 'review_request')`;
+  AND n.type NOT IN ${HIDDEN_TYPES}`;
 
 // GET /v1/notifications?cursor=&filter=unread
 notifications.get('/', async (c) => {
@@ -109,7 +113,7 @@ notifications.get('/unread-by-profile', async (c) => {
     c.env.DB.prepare(`SELECT n.recipient_profile_id AS id, COUNT(*) AS n FROM notifications n
       JOIN profiles p ON p.id = n.recipient_profile_id AND p.owner_user_id = ?1
       WHERE n.scope = 'profile' AND n.recipient_user_id = ?1 AND n.read_at IS NULL
-        AND n.type NOT IN ('followed', 'new_message', 'viewed_profile') GROUP BY n.recipient_profile_id`)
+        AND n.type NOT IN ${HIDDEN_TYPES} GROUP BY n.recipient_profile_id`)
       .bind(profile.ownerUserId).all<{ id: string; n: number }>(),
     c.env.DB.prepare(`SELECT cp.profile_id AS id, COUNT(*) AS n FROM conversation_participants cp
       JOIN profiles p ON p.id = cp.profile_id AND p.owner_user_id = ?1 AND p.status = 'active'
