@@ -117,7 +117,13 @@ notifications.get('/unread-by-profile', async (c) => {
       LEFT JOIN conversation_read_state rs ON rs.conversation_id = c.id AND rs.profile_id = cp.profile_id
       WHERE cp.hidden_at IS NULL AND COALESCE(cp.muted, 0) = 0
         AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.sender_profile_id <> cp.profile_id
-          AND m.deleted_at IS NULL AND m.created_at > MAX(COALESCE(rs.last_read_at, 0), COALESCE(cp.cleared_at, 0)))
+          AND m.deleted_at IS NULL AND m.created_at > MAX(COALESCE(rs.last_read_at, 0), COALESCE(cp.cleared_at, 0))
+          AND NOT EXISTS (SELECT 1 FROM message_hidden h WHERE h.message_id = m.id AND h.profile_id = cp.profile_id))
+        -- As the chat list: a chat with someone blocked (either way) is hidden, so it doesn't count either.
+        AND NOT EXISTS (SELECT 1 FROM conversation_participants o JOIN profiles op ON op.id = o.profile_id
+              JOIN blocks b ON (b.blocker_user_id = ?1 AND b.blocked_user_id = op.owner_user_id)
+                            OR (b.blocker_user_id = op.owner_user_id AND b.blocked_user_id = ?1)
+             WHERE o.conversation_id = c.id AND o.profile_id <> cp.profile_id)
       GROUP BY cp.profile_id`).bind(profile.ownerUserId).all<{ id: string; n: number }>(),
   ]);
   const totals = new Map<string, number>();
