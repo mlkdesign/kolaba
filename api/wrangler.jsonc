@@ -1,4 +1,4 @@
-// kolaba-api — Cloudflare Worker. Secrets (never in git): wrangler secret put RESEND_API_KEY | MEDIA_URL_SECRET | ADMIN_INITIAL_PASSWORD
+// kolaba-api — Cloudflare Worker. Secrets are set with `wrangler secret put`; never put their values in this file.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "kolaba-api",
@@ -12,6 +12,9 @@
     { "binding": "DB", "database_name": "kolaba-db", "database_id": "880ac093-6e95-43b9-8c39-d42a8f539316", "migrations_dir": "migrations" }
   ],
   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "kolaba-media" }],
+  // Codes go out through Resend (kolaba.app verified there). Cloudflare Email Sending is enabled for kolaba.app too, but
+  // on the Free plan it reaches only verified addresses; with Workers Paid, add this to send through it instead:
+  //   "send_email": [{ "name": "SEND_EMAIL", "allowed_sender_addresses": ["verify@kolaba.app"] }],
   "durable_objects": { "bindings": [{ "name": "CHAT_HUB", "class_name": "ChatHub" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ChatHub"] }],
   "ratelimits": [
@@ -22,16 +25,11 @@
     "ALLOWED_ORIGINS": "https://web.kolaba.app,https://mlkdesign.github.io",
     "APP_URL": "https://web.kolaba.app/",
     "API_URL": "https://api.kolaba.app",
-    "EMAIL_FROM": "kolaba. <onboarding@resend.dev>",
+    "EMAIL_FROM": "KOLABA <verify@kolaba.app>",
     "SIGNUPS_PER_DAY": "50",
     "MAX_PHOTO_MB": "10",
     "MAX_VIDEO_MB": "50",
     "MAX_VIDEO_SECONDS": "60",
-    // Resend has no verified domain yet (github.io can't be verified): codes reach only this address.
-    "SIGNUP_ALLOWED_EMAILS": "mlkdesignweb@gmail.com",
-    // CLOSED TEST ONLY: every sign-up / sign-in code goes to this inbox (accounts get email_verification = 'test_inbox',
-    // never 'owner'). Remove before a public launch so codes reach their owners again.
-    "TEST_CODE_INBOX": "mlkdesignweb@gmail.com",
     // Accounts allowed to switch their own PRO on and off for testing (Settings). Nobody else can.
     "PRO_TEST_EMAILS": "mlkdesignweb@gmail.com",
     // Sign in with Google: the Web client id (public — the audience of the ID tokens; no client secret is used).
@@ -66,7 +64,7 @@
         "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173",
         "APP_URL": "http://localhost:5173/",
         "API_URL": "http://127.0.0.1:8787",
-        "EMAIL_FROM": "kolaba. <onboarding@resend.dev>",
+        "EMAIL_FROM": "KOLABA <verify@kolaba.app>",
         "SIGNUPS_PER_DAY": "1000",
         "MAX_PHOTO_MB": "10",
         "MAX_VIDEO_MB": "50",

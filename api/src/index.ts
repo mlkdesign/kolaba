@@ -4,6 +4,7 @@ import { cors } from 'hono/cors';
 import { ZodError } from 'zod';
 import type { AppEnv } from './env';
 import { ApiError } from './lib/util';
+import { canSendEmail } from './lib/email';
 import { optionalAuth } from './lib/auth';
 import auth from './routes/auth';
 import profiles from './routes/profiles';
@@ -89,7 +90,7 @@ app.get('/v1/health', async (c) => {
   const seed = await c.env.DB.prepare(`SELECT version FROM demo_seed_versions ORDER BY applied_at DESC LIMIT 1`).first<{ version: string }>()
     .catch(() => null);
   return c.json({ status: db ? 'ok' : 'degraded', version: 'v1', database: Boolean(db), storage: Boolean(c.env.MEDIA),
-                  email: Boolean(c.env.RESEND_API_KEY), profiles: db?.profiles ?? null, seed: seed?.version ?? null, time: Date.now() });
+                  email: canSendEmail(c.env), profiles: db?.profiles ?? null, seed: seed?.version ?? null, time: Date.now() });
 });
 
 app.route('/v1/auth', auth);

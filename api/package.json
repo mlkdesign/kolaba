@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && node tests/production-email-verification-local.mjs",
+    "test:otp": "node tests/production-email-verification-local.mjs"
   },
   "keywords": [],
   "author": "",

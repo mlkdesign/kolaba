@@ -25,12 +25,6 @@ export interface Env {
   STORAGE_LIMIT_GB?: string;
   MAX_VIDEO_MB: string;
   MAX_VIDEO_SECONDS: string;
-  /** Comma-separated e-mails allowed to sign up (empty: anyone). Until a sending domain is verified, Resend only
-   *  delivers to its own account's address, so sign-up is limited to it. */
-  SIGNUP_ALLOWED_EMAILS?: string;
-  /** Closed test: every verification / reset code goes to this inbox instead of the address typed in (the address is
-   *  then NOT proven — users.email_verification = 'test_inbox'). Unset: codes go to their owners (the default). */
-  TEST_CODE_INBOX?: string;
   /** Google Identity Services Web client id (public): the audience every Google ID token must carry. */
   GOOGLE_CLIENT_ID?: string;
   /** Comma-separated iOS OAuth client ids whose ID tokens are accepted too (GoogleSignIn-iOS: aud = the iOS client). */
@@ -73,8 +67,15 @@ export interface Env {
   /** Days a closed report's shared messages are kept before they are purged (scheduled job). */
   EVIDENCE_RETENTION_DAYS?: string;
 
+  /** Cloudflare Email Sending (kolaba.app): the codes' main way out. Absent locally, where Resend's test capture runs. */
+  SEND_EMAIL?: SendEmail;
+
   /** Secrets. */
   RESEND_API_KEY?: string;
+  /** HMAC key for OTP hashes. At least 32 random characters; never stored in vars or source control. */
+  OTP_HASH_SECRET?: string;
+  /** Tests only: local Resend-compatible endpoint. Never set in production. */
+  RESEND_API_URL?: string;
   /** HMAC key for signed media URLs of private files. */
   MEDIA_URL_SECRET?: string;
   /** FEATURE 115 — APNs (secrets): the .p8 key's id and PEM text, the team id; the app's bundle id is the topic. */

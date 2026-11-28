@@ -4,10 +4,12 @@ import { z } from 'zod';
 import type { AppEnv, Env } from '../env';
 import { clientIP, createSession, currentUser, rateLimit, requireAuth } from '../lib/auth';
 import { hashPassword, passwordProblem, verifyPassword } from '../lib/password';
-import { fail, newId, newToken, now, sha256Hex, timingSafeEqual } from '../lib/util';
+import { fail, newId, newToken, now, sha256Hex } from '../lib/util';
 import { profilesOf } from './profiles';
 import { notifyAccount } from '../lib/cards';
 import { isBannedEmail, monetizationEnabled } from '../lib/moderation';
+import { canSendEmail, sendEmail } from '../lib/email';
+import { hashOTP, newOTPCode, verifyOTP } from '../lib/otp';
 
 /** The Terms of Service / Privacy Policy version a new account accepts (bump when the documents change). */
 export const TERMS_VERSION = '2026-11-09';
@@ -28,36 +30,35 @@ const MAX_CODE_ATTEMPTS = 5;
 const MAX_FAILED_LOGINS = 8;
 const LOCK_MS = 15 * 60_000;
 
-function newCode(): string {
-  const n = crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000;
-  return n.toString().padStart(6, '0');
-}
-
-async function sendEmail(env: Env, to: string, subject: string, text: string): Promise<void> {
-  if (!env.RESEND_API_KEY) fail(503, 'email_unavailable', 'E-mail delivery is not configured yet.');
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from: env.EMAIL_FROM, to: [to], subject, text }),
-  });
-  if (!res.ok) {
-    console.error('resend failed', res.status, await res.text());
-    fail(503, 'email_failed');
-  }
-}
-
 async function issueCode(env: Env, userId: string, email: string, purpose: 'verify' | 'reset') {
-  const code = newCode();
+  const code = newOTPCode();
+  const id = newId('code');
+  const expiresAt = now() + (purpose === 'reset' ? RESET_CODE_TTL : CODE_TTL);
   await env.DB.prepare(`UPDATE email_codes SET consumed_at = ? WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL`)
     .bind(now(), userId, purpose).run();
   await env.DB.prepare(`INSERT INTO email_codes (id, user_id, purpose, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-    .bind(newId('code'), userId, purpose, await sha256Hex(`${userId}:${code}`), now() + (purpose === 'reset' ? RESET_CODE_TTL : CODE_TTL), now()).run();
-  const inbox = env.TEST_CODE_INBOX?.trim().toLowerCase();
-  const subject = (purpose === 'verify' ? 'Your kolaba. verification code' : 'Reset your kolaba. password')
-    + (inbox && inbox !== email ? ` — for ${email} (closed test)` : '');
-  await sendEmail(env, inbox || email, subject,
-    `${purpose === 'verify' ? 'Verification' : 'Password reset'} code: ${code}\n\nIt expires in ${purpose === 'reset' ? 10 : 15} minutes. ` +
-    `If you didn't ask for it, ignore this e-mail.\n\nkolaba. — test environment`);
+    .bind(id, userId, purpose, await hashOTP(env, { userId, purpose, recordId: id, expiresAt, code }), expiresAt, now()).run();
+  const message = purpose === 'verify' ? {
+    subject: 'Verify your KOLABA email',
+    title: 'Verify your email',
+    intro: 'Use this six-digit code to finish setting up your KOLABA account.',
+    code,
+    detail: 'This code expires in 15 minutes and can be used only once.',
+    warning: 'If you did not request this code, you can safely ignore this email.',
+  } : {
+    subject: 'Reset your KOLABA password',
+    title: 'Reset your password',
+    intro: 'Use this six-digit code to continue resetting your KOLABA password.',
+    code,
+    detail: 'This code expires in 10 minutes and can be used only once.',
+    warning: 'If you did not request a password reset, secure your account and contact support.',
+  };
+  try {
+    await sendEmail(env, email, message);
+  } catch (error) {
+    await env.DB.prepare(`UPDATE email_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`).bind(now(), id).run();
+    throw error;
+  }
 }
 
 /** Checks a code; consumes it on success. Wrong codes count; after 5 the code is dead. */
@@ -66,18 +67,19 @@ async function checkCode(env: Env, userId: string, purpose: 'verify' | 'reset', 
       WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1`)
     .bind(userId, purpose).first<{ id: string; code_hash: string; attempts: number; expires_at: number }>();
   if (!row || row.expires_at < now() || row.attempts >= MAX_CODE_ATTEMPTS) fail(400, 'code_expired');
-  if (!timingSafeEqual(row!.code_hash, await sha256Hex(`${userId}:${code}`))) {
+  if (!await verifyOTP(env, row!.code_hash, {
+    userId, purpose, recordId: row!.id, expiresAt: row!.expires_at, code, legacyValue: `${userId}:${code}`,
+  })) {
     await env.DB.prepare(`UPDATE email_codes SET attempts = attempts + 1 WHERE id = ?`).bind(row!.id).run();
     fail(400, 'code_invalid');
   }
   await env.DB.prepare(`UPDATE email_codes SET consumed_at = ? WHERE id = ?`).bind(now(), row!.id).run();
 }
 
-/** Who may switch their own PRO for testing: an admin, an address in PRO_TEST_EMAILS, or — while the closed test
- *  runs (TEST_CODE_INBOX) — an account verified through the test inbox (only the team can complete those sign-ups). */
+/** Who may switch their own PRO for testing: an admin or an address in PRO_TEST_EMAILS. */
 export function canTestPro(env: Env, u: { role: string; email: string; email_verification: string | null }) {
   const testers = (env.PRO_TEST_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
-  return u.role === 'admin' || testers.includes(u.email.toLowerCase()) || (!!env.TEST_CODE_INBOX && u.email_verification === 'test_inbox');
+  return u.role === 'admin' || testers.includes(u.email.toLowerCase());
 }
 
 async function sessionPayload(env: Env, userId: string, token: string) {
@@ -110,6 +112,7 @@ auth.post('/signup', async (c) => {
   await rateLimit(c, 'RL_AUTH', `signup:${clientIP(c)}`);
   const raw = await c.req.json();
   const { email, password } = Credentials.parse(raw);
+  await rateLimit(c, 'RL_AUTH', `signup-email:${email}`);
   // Creating an account means accepting the Terms of Service and acknowledging the Privacy Policy (both linked on the form).
   if (raw?.acceptTerms !== true) fail(422, 'terms_not_accepted');
   const problem = passwordProblem(password);
@@ -119,10 +122,7 @@ auth.post('/signup', async (c) => {
   // A blocked account's address can't start a new account.
   const holder = await c.env.DB.prepare(`SELECT status FROM users WHERE email = ?`).bind(email).first<{ status: string }>();
   if (holder?.status === 'suspended') fail(403, 'account_suspended');
-  if (!c.env.RESEND_API_KEY) fail(503, 'registration_closed', 'Registration opens once e-mail delivery is configured.');
-  // Closed test: any address may sign up — its code goes to the test inbox, so only the team can complete it.
-  const allowed = (c.env.SIGNUP_ALLOWED_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
-  if (!c.env.TEST_CODE_INBOX && allowed.length && !allowed.includes(email)) fail(403, 'registration_invite_only');
+  if (!canSendEmail(c.env)) fail(503, 'registration_closed', 'Registration opens once e-mail delivery is configured.');
   // Public demo protection: a daily cap on new real accounts.
   const dayStart = Math.floor(now() / 86_400_000) * 86_400_000;
   const today = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE is_demo = 0 AND created_at >= ?`).bind(dayStart)
@@ -131,7 +131,18 @@ auth.post('/signup', async (c) => {
 
   const existing = await c.env.DB.prepare(`SELECT id, email_verified_at, status FROM users WHERE email = ?`).bind(email)
     .first<{ id: string; email_verified_at: number | null; status: string }>();
-  if (existing?.email_verified_at) fail(409, 'email_taken');
+  // Same public answer for a new or existing active address. The existing account is not modified; proving ownership
+  // of the delivered OTP signs its owner in, avoiding account enumeration without pretending an email was sent.
+  if (existing?.email_verified_at) {
+    await rateLimit(c, 'RL_AUTH', `signup-account:${existing.id}`);
+    const wait = await verifyCooldown(c.env, existing.id);
+    if (wait === 0) await issueCode(c.env, existing.id, email, 'verify');
+    return c.json({ status: 'verification_sent', email }, 201);
+  }
+  if (existing?.id) {
+    const wait = await verifyCooldown(c.env, existing.id);
+    if (wait > 0) fail(429, 'resend_too_soon', undefined, { resendAfter: wait });
+  }
   const { hash, salt, scheme } = await hashPassword(password);
   let userId = existing?.id;
   if (userId) {
@@ -144,6 +155,7 @@ auth.post('/signup', async (c) => {
                             created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(userId, email, hash, salt, scheme, now(), TERMS_VERSION, now(), now()).run();
   }
+  await rateLimit(c, 'RL_AUTH', `signup-account:${userId}`);
   await issueCode(c.env, userId, email, 'verify');
   return c.json({ status: 'verification_sent', email }, 201);
 });
@@ -151,24 +163,28 @@ auth.post('/signup', async (c) => {
 auth.post('/verify', async (c) => {
   await rateLimit(c, 'RL_AUTH', `verify:${clientIP(c)}`);
   const { email, code } = CodeBody.parse(await c.req.json());
+  await rateLimit(c, 'RL_AUTH', `verify-email:${email}`);
   const user = await c.env.DB.prepare(`SELECT id FROM users WHERE email = ? AND status = 'active'`).bind(email).first<{ id: string }>();
   if (!user) fail(400, 'code_invalid');
+  await rateLimit(c, 'RL_AUTH', `verify-account:${user!.id}`);
   await checkCode(c.env, user!.id, 'verify', code);
-  // The code went to the address's owner — or, in the closed test, to the shared inbox (the address is not proven).
-  const viaInbox = Boolean(c.env.TEST_CODE_INBOX) && c.env.TEST_CODE_INBOX!.trim().toLowerCase() !== email;
   await c.env.DB.prepare(`UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?), updated_at = ?,
       email_verification = COALESCE(email_verification, ?) WHERE id = ?`)
-    .bind(now(), now(), viaInbox ? 'test_inbox' : 'owner', user!.id).run();
+    .bind(now(), now(), 'owner', user!.id).run();
   const token = await createSession(c.env.DB, user!.id, c.req.header('User-Agent'));
   return c.json(await sessionPayload(c.env, user!.id, token));
 });
 
 auth.post('/resend-code', async (c) => {
   const { email } = z.object({ email: z.string().trim().toLowerCase().email() }).parse(await c.req.json());
-  await rateLimit(c, 'RL_AUTH', `resend:${email}`);
+  await rateLimit(c, 'RL_AUTH', `resend-ip:${clientIP(c)}`);
+  await rateLimit(c, 'RL_AUTH', `resend-email:${email}`);
   const user = await c.env.DB.prepare(`SELECT id, email_verified_at FROM users WHERE email = ?`).bind(email)
     .first<{ id: string; email_verified_at: number | null }>();
-  if (user && !user.email_verified_at) await issueCode(c.env, user.id, email, 'verify');
+  if (user && !user.email_verified_at) {
+    await rateLimit(c, 'RL_AUTH', `resend-account:${user.id}`);
+    if (await verifyCooldown(c.env, user.id) === 0) await issueCode(c.env, user.id, email, 'verify');
+  }
   return c.json({ status: 'sent' }); // same answer either way (no account enumeration)
 });
 
@@ -198,9 +214,12 @@ auth.post('/login', async (c) => {
   // Not verified yet: the right password sends a fresh code at once (the verify screen that follows expects one —
   // before, it came only after Resend). The resend limit applies, so this can't be used to flood an inbox.
   if (!user!.email_verified_at) {
-    await rateLimit(c, 'RL_AUTH', `resend:${email}`);
-    await issueCode(c.env, user!.id, email, 'verify');
-    return c.json({ status: 'verification_required', email, codeSent: true }, 403);
+    await rateLimit(c, 'RL_AUTH', `resend-ip:${clientIP(c)}`);
+    await rateLimit(c, 'RL_AUTH', `resend-email:${email}`);
+    await rateLimit(c, 'RL_AUTH', `resend-account:${user!.id}`);
+    const wait = await verifyCooldown(c.env, user!.id);
+    if (wait === 0) await issueCode(c.env, user!.id, email, 'verify');
+    return c.json({ status: 'verification_required', email, codeSent: wait === 0 }, 403);
   }
   await c.env.DB.prepare(`UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(user!.id).run();
   const token = await createSession(c.env.DB, user!.id, c.req.header('User-Agent'));
@@ -294,8 +313,6 @@ auth.post('/google', async (c) => {
   // 3) A new person: only with the Terms accepted on the sign-up screen, never a banned address.
   if (await isBannedEmail(c.env, email)) fail(403, 'registration_blocked');
   if (body.acceptTerms !== true) fail(422, 'terms_not_accepted');
-  const allowed = (c.env.SIGNUP_ALLOWED_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
-  if (!c.env.TEST_CODE_INBOX && allowed.length && !allowed.includes(email)) fail(403, 'registration_invite_only');
   const dayStart = Math.floor(now() / 86_400_000) * 86_400_000;
   const today = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE is_demo = 0 AND created_at >= ?`).bind(dayStart).first<{ n: number }>();
   if ((today?.n ?? 0) >= Number(c.env.SIGNUPS_PER_DAY || 50)) fail(429, 'signups_paused');
@@ -328,6 +345,12 @@ async function resetCooldown(env: Env, userId: string): Promise<number> {
   return last ? Math.max(0, Math.ceil((last.created_at + RESEND_AFTER_MS - now()) / 1000)) : 0;
 }
 
+async function verifyCooldown(env: Env, userId: string): Promise<number> {
+  const last = await env.DB.prepare(`SELECT created_at FROM email_codes WHERE user_id = ? AND purpose = 'verify'
+      ORDER BY created_at DESC LIMIT 1`).bind(userId).first<{ created_at: number }>();
+  return last ? Math.max(0, Math.ceil((last.created_at + RESEND_AFTER_MS - now()) / 1000)) : 0;
+}
+
 // POST /v1/auth/password/forgot {email} — the same answer whether or not the address has an account. A new code
 // replaces the previous one (only one is ever valid); within 30 s of the last one nothing new is sent.
 auth.post('/password/forgot', async (c) => {
@@ -338,6 +361,7 @@ auth.post('/password/forgot', async (c) => {
       AND email_verified_at IS NOT NULL`).bind(email).first<{ id: string; password_hash: string | null }>();
   let resendAfter = RESEND_AFTER_MS / 1000;
   if (user) {
+    await rateLimit(c, 'RL_AUTH', `forgot-account:${user.id}`);
     const wait = await resetCooldown(c.env, user.id);
     if (wait > 0) {
       resendAfter = wait;
@@ -347,12 +371,15 @@ auth.post('/password/forgot', async (c) => {
       // Google / Apple only: no password to reset — and none is invented. The e-mail says how this account signs in.
       const methods = await c.env.DB.prepare(`SELECT provider FROM auth_identities WHERE user_id = ?`).bind(user.id).all<{ provider: string }>();
       const names = methods.results.map((m) => (m.provider === 'google' ? 'Google' : m.provider === 'apple' ? 'Apple' : m.provider));
-      const inbox = c.env.TEST_CODE_INBOX?.trim().toLowerCase();
       await c.env.DB.prepare(`INSERT INTO email_codes (id, user_id, purpose, code_hash, expires_at, consumed_at, created_at)
           VALUES (?, ?, 'reset', '', ?, ?, ?)`).bind(newId('code'), user.id, now(), now(), now()).run(); // cooldown marker
-      await sendEmail(c.env, inbox || email, 'Signing in to kolaba.',
-        `Your kolaba. account has no password: it signs in with ${names.join(' or ') || 'a linked account'}.\n` +
-        `Use that button on the Log in screen.\n\nIf you didn't ask for this, ignore this e-mail.`);
+      await sendEmail(c.env, email, {
+        subject: 'How to sign in to KOLABA',
+        title: 'Use your linked account',
+        intro: `Your KOLABA account has no password. Sign in with ${names.join(' or ') || 'your linked account'}.`,
+        detail: 'Use the corresponding button on the Log in screen.',
+        warning: 'If you did not request this email, you can safely ignore it.',
+      });
     }
   }
   return c.json({ status: 'sent', resendAfter });
@@ -366,6 +393,7 @@ auth.post('/password/verify', async (c) => {
   const user = await c.env.DB.prepare(`SELECT id FROM users WHERE email = ? AND status = 'active' AND is_demo = 0`).bind(email)
     .first<{ id: string }>();
   if (!user) fail(400, 'code_invalid');
+  await rateLimit(c, 'RL_AUTH', `reset-verify-account:${user!.id}`);
   await checkCode(c.env, user!.id, 'reset', code);
   const token = newToken();
   await c.env.DB.batch([
@@ -415,11 +443,13 @@ auth.post('/password/reset', async (c) => {
   if (tokenId && !consumed[0].meta.changes) fail(400, 'reset_token_expired');
   const email = await c.env.DB.prepare(`SELECT email FROM users WHERE id = ?`).bind(userId).first<{ email: string }>();
   if (email) {
-    const inbox = c.env.TEST_CODE_INBOX?.trim().toLowerCase();
     try {
-      await sendEmail(c.env, inbox || email.email, 'Your kolaba. password was changed',
-        `The password of your kolaba. account${inbox && inbox !== email.email ? ` (${email.email})` : ''} was just changed, and every ` +
-        `device was signed out.\n\nIf it wasn't you, reset your password again right away from the Log in screen.`);
+      await sendEmail(c.env, email.email, {
+        subject: 'Your KOLABA password was changed',
+        title: 'Password changed',
+        intro: 'The password for your KOLABA account was changed and every device was signed out.',
+        warning: 'If this was not you, reset your password immediately from the Log in screen.',
+      });
     } catch { /* the password is changed either way */ }
   }
   // In the app too, on every profile of the account (never switched off; no password or code in it).
@@ -443,17 +473,27 @@ async function liveEmailChange(env: Env, userId: string) {
 }
 
 async function sendEmailChangeCode(env: Env, requestId: string, userId: string, to: string, step: 'current' | 'new', newEmail: string) {
-  const code = newCode();
+  const code = newOTPCode();
   const t = now();
+  const expiresAt = t + EMAIL_CHANGE_TTL;
   await env.DB.prepare(`UPDATE email_change_requests SET step = ?, code_hash = ?, attempts = 0, sent_at = ?, expires_at = ? WHERE id = ?`)
-    .bind(step, await sha256Hex(`${userId}:${requestId}:${code}`), t, t + EMAIL_CHANGE_TTL, requestId).run();
-  const inbox = env.TEST_CODE_INBOX?.trim().toLowerCase();
-  const subject = (step === 'current' ? 'Confirm your kolaba. e-mail change' : 'Confirm your new kolaba. e-mail')
-    + (inbox && inbox !== to ? ` — for ${to} (closed test)` : '');
-  await sendEmail(env, inbox || to, subject, step === 'current'
-    ? `Someone asked to change the sign-in e-mail of your kolaba. account to ${mask(newEmail)}.\n\nCode: ${code}\n\n` +
-      `It expires in 10 minutes. If it wasn't you, ignore this e-mail and change your password.`
-    : `Code to confirm this address as your kolaba. sign-in e-mail: ${code}\n\nIt expires in 10 minutes.`);
+    .bind(step, await hashOTP(env, { userId, purpose: `email-change:${step}`, recordId: requestId, expiresAt, code }),
+      t, expiresAt, requestId).run();
+  await sendEmail(env, to, step === 'current' ? {
+    subject: 'Confirm your KOLABA email change',
+    title: 'Confirm your email change',
+    intro: `Someone requested changing your KOLABA sign-in email to ${mask(newEmail)}.`,
+    code,
+    detail: 'This code expires in 10 minutes and can be used only once.',
+    warning: 'If this was not you, ignore this email and change your password.',
+  } : {
+    subject: 'Confirm your new KOLABA email',
+    title: 'Confirm your new email',
+    intro: 'Use this code to confirm this address as your new KOLABA sign-in email.',
+    code,
+    detail: 'This code expires in 10 minutes and can be used only once.',
+    warning: 'If you did not request this change, you can safely ignore this email.',
+  });
 }
 
 async function emailInUse(env: Env, email: string, userId: string): Promise<boolean> {
@@ -465,8 +505,11 @@ async function emailInUse(env: Env, email: string, userId: string): Promise<bool
 auth.post('/email/change', requireAuth, async (c) => {
   const user = currentUser(c);
   if (user.isDemo) fail(403, 'demo_account');
-  await rateLimit(c, 'RL_AUTH', `email-change:${user.id}`);
+  await rateLimit(c, 'RL_AUTH', `email-change-ip:${clientIP(c)}`);
+  await rateLimit(c, 'RL_AUTH', `email-change-account:${user.id}`);
   const { email } = z.object({ email: z.string().trim().toLowerCase().email().max(254) }).parse(await c.req.json());
+  await rateLimit(c, 'RL_AUTH', `email-change-current:${user.email.toLowerCase()}`);
+  await rateLimit(c, 'RL_AUTH', `email-change-new:${email}`);
   if (email === user.email.toLowerCase()) fail(422, 'email_same');
   if (await emailInUse(c.env, email, user.id)) fail(409, 'email_taken');
   const live = await liveEmailChange(c.env, user.id);
@@ -486,12 +529,14 @@ auth.post('/email/change', requireAuth, async (c) => {
 // POST /v1/auth/email/change/resend — the live step's code again (after 30 s).
 auth.post('/email/change/resend', requireAuth, async (c) => {
   const user = currentUser(c);
-  await rateLimit(c, 'RL_AUTH', `email-change:${user.id}`);
+  await rateLimit(c, 'RL_AUTH', `email-change-ip:${clientIP(c)}`);
+  await rateLimit(c, 'RL_AUTH', `email-change-account:${user.id}`);
   const live = await liveEmailChange(c.env, user.id);
   if (!live) fail(400, 'code_expired');
   const wait = Math.ceil((live!.sent_at + RESEND_AFTER_MS - now()) / 1000);
   if (wait > 0) fail(429, 'resend_too_soon', undefined, { resendAfter: wait });
   const to = live!.step === 'current' ? user.email : live!.new_email;
+  await rateLimit(c, 'RL_AUTH', `email-change-email:${to.toLowerCase()}`);
   await sendEmailChangeCode(c.env, live!.id, user.id, to, live!.step, live!.new_email);
   return c.json({ step: live!.step, sentTo: to, resendAfter: RESEND_AFTER_MS / 1000 });
 });
@@ -500,11 +545,17 @@ auth.post('/email/change/resend', requireAuth, async (c) => {
 // address's code changes the account's e-mail (this session stays; profiles' public e-mails are not touched).
 auth.post('/email/change/verify', requireAuth, async (c) => {
   const user = currentUser(c);
-  await rateLimit(c, 'RL_AUTH', `email-change-verify:${user.id}`);
+  await rateLimit(c, 'RL_AUTH', `email-change-verify-ip:${clientIP(c)}`);
+  await rateLimit(c, 'RL_AUTH', `email-change-verify-account:${user.id}`);
   const { code } = z.object({ code: z.string().regex(/^\d{6}$/) }).parse(await c.req.json());
   const live = await liveEmailChange(c.env, user.id);
   if (!live || live.expires_at < now() || live.attempts >= MAX_CODE_ATTEMPTS) fail(400, 'code_expired');
-  if (!timingSafeEqual(live!.code_hash, await sha256Hex(`${user.id}:${live!.id}:${code}`))) {
+  const targetEmail = live!.step === 'current' ? user.email : live!.new_email;
+  await rateLimit(c, 'RL_AUTH', `email-change-verify-email:${targetEmail.toLowerCase()}`);
+  if (!await verifyOTP(c.env, live!.code_hash, {
+    userId: user.id, purpose: `email-change:${live!.step}`, recordId: live!.id, expiresAt: live!.expires_at, code,
+    legacyValue: `${user.id}:${live!.id}:${code}`,
+  })) {
     await c.env.DB.prepare(`UPDATE email_change_requests SET attempts = attempts + 1 WHERE id = ?`).bind(live!.id).run();
     fail(400, 'code_invalid');
   }
@@ -525,11 +576,13 @@ auth.post('/email/change/verify', requireAuth, async (c) => {
   } catch {
     fail(409, 'email_taken');
   }
-  const inbox = c.env.TEST_CODE_INBOX?.trim().toLowerCase();
   try {
-    await sendEmail(c.env, inbox || old, 'Your kolaba. sign-in e-mail was changed',
-      `The sign-in e-mail of your kolaba. account${inbox && inbox !== old ? ` (${old})` : ''} was changed to ${mask(live!.new_email)}.\n\n` +
-      `If it wasn't you, contact support right away.`);
+    await sendEmail(c.env, old, {
+      subject: 'Your KOLABA sign-in email was changed',
+      title: 'Sign-in email changed',
+      intro: `Your KOLABA sign-in email was changed to ${mask(live!.new_email)}.`,
+      warning: 'If this was not you, contact support immediately.',
+    });
   } catch { /* changed either way */ }
   await notifyAccount(c.env, user.id, 'email_changed', {}, { dedupKey: `email_changed:${user.id}:${now()}` });
   return c.json({ status: 'email_changed', email: live!.new_email });
@@ -539,7 +592,9 @@ auth.post('/email/change/verify', requireAuth, async (c) => {
 auth.post('/password/code', requireAuth, async (c) => {
   const user = currentUser(c);
   if (user.isDemo) fail(403, 'demo_account');
-  await rateLimit(c, 'RL_AUTH', `forgot:${user.email.toLowerCase()}`);
+  await rateLimit(c, 'RL_AUTH', `password-code-ip:${clientIP(c)}`);
+  await rateLimit(c, 'RL_AUTH', `password-code-email:${user.email.toLowerCase()}`);
+  await rateLimit(c, 'RL_AUTH', `password-code-account:${user.id}`);
   const row = await c.env.DB.prepare(`SELECT password_hash FROM users WHERE id = ?`).bind(user.id).first<{ password_hash: string | null }>();
   if (!row?.password_hash) {
     const methods = await c.env.DB.prepare(`SELECT provider FROM auth_identities WHERE user_id = ?`).bind(user.id).all<{ provider: string }>();
@@ -554,7 +609,9 @@ auth.post('/password/code', requireAuth, async (c) => {
 // POST /v1/auth/password/code/verify {code} → {resetToken} for /password/change.
 auth.post('/password/code/verify', requireAuth, async (c) => {
   const user = currentUser(c);
-  await rateLimit(c, 'RL_AUTH', `reset-verify:${user.email.toLowerCase()}`);
+  await rateLimit(c, 'RL_AUTH', `reset-verify-ip:${clientIP(c)}`);
+  await rateLimit(c, 'RL_AUTH', `reset-verify-email:${user.email.toLowerCase()}`);
+  await rateLimit(c, 'RL_AUTH', `reset-verify-account:${user.id}`);
   const { code } = z.object({ code: z.string().regex(/^\d{6}$/) }).parse(await c.req.json());
   await checkCode(c.env, user.id, 'reset', code);
   const token = newToken();
@@ -587,11 +644,13 @@ auth.post('/password/change', requireAuth, async (c) => {
     c.env.DB.prepare(`DELETE FROM sessions WHERE user_id = ? AND id <> ?`).bind(user.id, user.sessionId),
   ]);
   if (!done[0].meta.changes) fail(400, 'reset_token_expired');
-  const inbox = c.env.TEST_CODE_INBOX?.trim().toLowerCase();
   try {
-    await sendEmail(c.env, inbox || user.email, 'Your kolaba. password was changed',
-      `The password of your kolaba. account${inbox && inbox !== user.email ? ` (${user.email})` : ''} was just changed; other devices ` +
-      `were signed out.\n\nIf it wasn't you, reset your password right away from the Log in screen.`);
+    await sendEmail(c.env, user.email, {
+      subject: 'Your KOLABA password was changed',
+      title: 'Password changed',
+      intro: 'Your KOLABA password was changed and your other devices were signed out.',
+      warning: 'If this was not you, reset your password immediately from the Log in screen.',
+    });
   } catch { /* changed either way */ }
   await notifyAccount(c.env, user.id, 'password_changed', {}, { dedupKey: `password_changed:${user.id}:${t}` });
   return c.json({ status: 'password_changed' });
