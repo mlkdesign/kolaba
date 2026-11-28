@@ -100,16 +100,29 @@ notifications.put('/preferences', async (c) => {
   return c.json(prefsJSON(row, t));
 });
 
-// GET /v1/notifications/unread-by-profile — the account's other profiles with unread notifications (Switch profiles'
-// dot); account notices count on every profile, so they're not in these numbers.
+// GET /v1/notifications/unread-by-profile — the account's profiles with something unread (Switch profiles' dot, the
+// profile tab's, Settings', Account center's): unread notifications plus (2026-11-28) chats with unread messages
+// (muted and hidden chats don't count). Account notices count on every profile, so they're not in these numbers.
 notifications.get('/unread-by-profile', async (c) => {
   const profile = actingProfile(c);
-  const rows = await c.env.DB.prepare(`SELECT n.recipient_profile_id AS id, COUNT(*) AS n FROM notifications n
+  const [rows, chats] = await Promise.all([
+    c.env.DB.prepare(`SELECT n.recipient_profile_id AS id, COUNT(*) AS n FROM notifications n
       JOIN profiles p ON p.id = n.recipient_profile_id AND p.owner_user_id = ?1
       WHERE n.scope = 'profile' AND n.recipient_user_id = ?1 AND n.read_at IS NULL
         AND n.type NOT IN ('followed', 'new_message', 'viewed_profile') GROUP BY n.recipient_profile_id`)
-    .bind(profile.ownerUserId).all<{ id: string; n: number }>();
-  return c.json({ items: rows.results.map((r) => ({ profileId: r.id, unread: r.n })) });
+      .bind(profile.ownerUserId).all<{ id: string; n: number }>(),
+    c.env.DB.prepare(`SELECT cp.profile_id AS id, COUNT(*) AS n FROM conversation_participants cp
+      JOIN profiles p ON p.id = cp.profile_id AND p.owner_user_id = ?1 AND p.status = 'active'
+      JOIN conversations c ON c.id = cp.conversation_id
+      LEFT JOIN conversation_read_state rs ON rs.conversation_id = c.id AND rs.profile_id = cp.profile_id
+      WHERE cp.hidden_at IS NULL AND COALESCE(cp.muted, 0) = 0
+        AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.sender_profile_id <> cp.profile_id
+          AND m.deleted_at IS NULL AND m.created_at > MAX(COALESCE(rs.last_read_at, 0), COALESCE(cp.cleared_at, 0)))
+      GROUP BY cp.profile_id`).bind(profile.ownerUserId).all<{ id: string; n: number }>(),
+  ]);
+  const totals = new Map<string, number>();
+  for (const r of [...rows.results, ...chats.results]) totals.set(r.id, (totals.get(r.id) ?? 0) + r.n);
+  return c.json({ items: [...totals].map(([profileId, unread]) => ({ profileId, unread })) });
 });
 
 notifications.post('/read', async (c) => {
