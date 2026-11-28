@@ -15,7 +15,7 @@ notifications.use('*', requireAuth, requireProfile);
 /** SQL: the notifications the acting profile sees — its own, and its account's (security, the team's notices). Never
  *  another profile's of the same account, never a message. */
 const VISIBLE = `((n.scope = 'profile' AND n.recipient_profile_id = ?1) OR (n.scope = 'account' AND n.recipient_user_id = ?2))
-  AND n.type NOT IN ('followed', 'new_message', 'viewed_profile')`;
+  AND n.type NOT IN ('followed', 'new_message', 'viewed_profile', 'review_request')`;
 
 // GET /v1/notifications?cursor=&filter=unread
 notifications.get('/', async (c) => {
@@ -138,7 +138,7 @@ notifications.post('/read-all', async (c) => {
   return c.json({ updated: res.meta.changes });
 });
 
-// ─── Reels: creators' public videos, newest first, cursor by (created_at, id); only what's on screen is fetched.
+// ─── Reels: creators' public portfolio videos (an Intro Video opens only from its profile), newest first, cursor by (created_at, id); only what's on screen is fetched.
 
 export const reels = new Hono<AppEnv>();
 reels.get('/', requireAuth, requireProfile, async (c) => {
@@ -148,7 +148,7 @@ reels.get('/', requireAuth, requireProfile, async (c) => {
   const rows = await c.env.DB.prepare(`SELECT ${mediaColumns},
         EXISTS (SELECT 1 FROM likes l WHERE l.media_id = m.id AND l.profile_id = ?1) AS is_liked
       FROM media m JOIN profiles p ON p.id = m.owner_profile_id AND p.status = 'active' AND p.type = 'creator'
-      WHERE m.kind = 'video' AND m.purpose IN ('portfolio', 'intro') AND m.status = 'ready' AND m.is_public = 1
+      WHERE m.kind = 'video' AND m.purpose = 'portfolio' AND m.status = 'ready' AND m.is_public = 1
         AND m.review_status = 'approved' AND ${notBlockedSQL('p.owner_user_id', '?5')}
         AND (?2 IS NULL OR (m.created_at, m.id) < (?2, ?3))
       ORDER BY m.created_at DESC, m.id DESC LIMIT ?4`)
@@ -172,7 +172,7 @@ reels.get('/creators', requireAuth, requireProfile, async (c) => {
   const limit = clampLimit(c.req.query('limit'), 5, 10);
   const cursor = decodeCursor<{ t: number; id: string }>(c.req.query('cursor'));
   const creators = await c.env.DB.prepare(`SELECT p.id, MAX(m.created_at) AS latest FROM profiles p
-      JOIN media m ON m.owner_profile_id = p.id AND m.kind = 'video' AND m.purpose IN ('portfolio', 'intro') AND m.status = 'ready' AND m.is_public = 1
+      JOIN media m ON m.owner_profile_id = p.id AND m.kind = 'video' AND m.purpose = 'portfolio' AND m.status = 'ready' AND m.is_public = 1
         AND m.review_status = 'approved'
       WHERE p.type = 'creator' AND p.status = 'active' AND p.visibility = 'public' AND p.owner_user_id <> ?4
         AND ${notBlockedSQL('p.owner_user_id', '?4')}
@@ -185,7 +185,7 @@ reels.get('/creators', requireAuth, requireProfile, async (c) => {
   const [cards, videos, bios] = await Promise.all([
     loadCards(c.env, ids),
     c.env.DB.prepare(`SELECT ${mediaColumns}, EXISTS (SELECT 1 FROM likes l WHERE l.media_id = m.id AND l.profile_id = ?) AS is_liked
-        FROM media m WHERE m.owner_profile_id IN (${marks}) AND m.kind = 'video' AND m.purpose IN ('portfolio', 'intro')
+        FROM media m WHERE m.owner_profile_id IN (${marks}) AND m.kind = 'video' AND m.purpose = 'portfolio'
         AND m.status = 'ready' AND m.is_public = 1 AND m.review_status = 'approved' AND m.moderation_status IS NULL
         ORDER BY m.created_at DESC, m.id DESC`).bind(profile.id, ...ids).all<MediaRow & { is_liked: number }>(),
     c.env.DB.prepare(`SELECT id, bio FROM profiles WHERE id IN (${marks})`).bind(...ids).all<{ id: string; bio: string }>(),

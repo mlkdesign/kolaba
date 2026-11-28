@@ -230,7 +230,6 @@ export function NotificationsScreen() {
     if (n.type === 'new_message' && n.payload.conversationId) push('conversation', { id: n.payload.conversationId });
     else if (n.type === 'application_received' && n.payload.jobId) push('job', { id: n.payload.jobId });
     else if (n.type === 'contact_request') push('contacts', { filter: 'requests' });
-    else if (n.type === 'review_request' && n.actor) push('review-form', { recipient: n.actor });
     else if (n.type === 'new_review') push('profile-view', { id: activeProfile.value!.id, tab: 'reviews' });
     else if (n.type === 'liked_video' && n.media) openViewer(n.media);
     else if (n.actor) push('profile-view', { id: n.actor.id });

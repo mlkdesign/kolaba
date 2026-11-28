@@ -175,29 +175,8 @@ reviews.delete('/:id', requireAuth, requireProfile, async (c) => {
   return c.json({ ok: true });
 });
 
-// POST /v1/reviews/requests {contactProfileId} — idempotent: a repeated tap returns the waiting request.
-reviews.post('/requests', requireAuth, requireProfile, async (c) => {
-  const profile = actingProfile(c);
-  const { contactProfileId } = z.object({ contactProfileId: z.string() }).parse(await c.req.json());
-  await c.env.DB.prepare(`UPDATE review_requests SET status = 'expired' WHERE status = 'pending' AND requester_profile_id = ?
-      AND contact_profile_id = ? AND expires_at < ?`).bind(profile.id, contactProfileId, now()).run();
-  const existing = await c.env.DB.prepare(`SELECT id FROM review_requests WHERE requester_profile_id = ? AND contact_profile_id = ?
-      AND status = 'pending'`).bind(profile.id, contactProfileId).first<{ id: string }>();
-  if (existing) return c.json({ id: existing.id, state: 'requested', created: false });
-  const contactOwner = (await ownerOf(c.env, contactProfileId)) ?? fail(404, 'profile_not_found');
-  await checkCanReview(c.env, contactProfileId, contactOwner, profile.id);
-  const id = newId('rrq');
-  try {
-    await c.env.DB.prepare(`INSERT INTO review_requests (id, requester_profile_id, contact_profile_id, created_at, expires_at)
-        VALUES (?, ?, ?, ?, ?)`).bind(id, profile.id, contactProfileId, now(), now() + 30 * 86_400_000).run();
-  } catch (error) {
-    if (String(error).includes('UNIQUE')) return c.json({ state: 'requested', created: false });
-    throw error;
-  }
-  await notify(c.env, contactProfileId, 'review_request', profile.id, { requestId: id },
-               { dedupKey: `review_request:${id}`, targetType: 'review_request', targetId: id });
-  return c.json({ id, state: 'requested', created: true }, 201);
-});
+// POST /v1/reviews/requests — Request a review was removed from the apps: older builds get a clear refusal.
+reviews.post('/requests', requireAuth, requireProfile, async () => fail(410, 'review_requests_removed'));
 
 // GET /v1/reviews/requests/sheet — the Request a Review sheet: each contact with available / requested / reviewed.
 reviews.get('/requests/sheet', requireAuth, requireProfile, async (c) => {

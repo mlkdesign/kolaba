@@ -661,7 +661,6 @@ function Reviews({ profile, own }: { profile: ProfilePage; own: boolean }) {
           {(['quality', 'speed', 'contact'] as const).map((k) => (
             <div class="crit"><span>{k[0].toUpperCase() + k.slice(1)}</span><div class="crit__bar"><i style={{ width: `${(s[k] / 5) * 100}%` }} /></div><b>{s[k].toFixed(1)}</b></div>
           ))}
-          {own && <button class="rrequest" onClick={() => openRequestReview()}>Request a review</button>}
         </div>
       ) : null}
       {data.items.length > 0 && <div class="rdivider" />}
@@ -671,7 +670,6 @@ function Reviews({ profile, own }: { profile: ProfilePage; own: boolean }) {
       )}
       {!data.items.length ? (
         <Empty title="No reviews yet" text={own ? 'Ask your contacts for a review — it will appear here.' : "Reviews from this profile's contacts will appear here."}>
-          {own && <button class="action-pill is-outline" onClick={() => openRequestReview()}>Request a review</button>}
         </Empty>
       ) :
         data.items.map((r) => <ReviewCard r={r} key={r.id} />)}
@@ -698,67 +696,7 @@ function ReviewCard({ r }: { r: Review }) {
   );
 }
 
-// ─── Request a Review sheet ───
 
-export function openRequestReview() {
-  openSheet((close) => <RequestReview close={close} />, true);
-}
-
-function RequestReview({ close }: { close: () => void }) {
-  const [query, setQuery] = useState('');
-  const { data, setData } = useLoad<{ items: { profile: Card; state: string; requestId: string | null }[] }>((s) => get('/v1/reviews/requests/sheet', s), []);
-  const [pending, setPending] = useState<string | null>(null);
-  const request = async (card: Card) => {
-    setPending(card.id);
-    try { await post('/v1/reviews/requests', { contactProfileId: card.id }); setData({ items: data!.items.map((i) => (i.profile.id === card.id ? { ...i, state: 'requested' } : i)) }); showToast(`Request sent to ${card.displayName}`, 'ok'); }
-    catch (e) { showToast(errorText(e), 'error'); } finally { setPending(null); }
-  };
-  const invite = async () => {
-    try { const { url } = await post('/v1/reviews/invites'); openSheet((c2) => <InviteLink url={url} close={c2} />); }
-    catch (e) { showToast(errorText(e), 'error'); }
-  };
-  const items = (data?.items ?? []).filter((i) => !query || i.profile.displayName.toLowerCase().includes(query.toLowerCase()));
-  return (
-    <SheetFrame title="Request a Review" close={close}>
-      <label class="field rr-search"><img src={icon('IconMagnifyingGlass')} alt="" style={{ opacity: 1 }} />
-        <input placeholder="Search" value={query} onInput={(e) => setQuery(e.currentTarget.value)} aria-label="Search contacts" /></label>
-      <div class="rr-label">Your contacts</div>
-      {!data ? <Spinner /> : !items.length ? <Empty title="No contacts yet" text="Reviews come from confirmed contacts. Invite someone new below." iconName="IconUserPlus" /> :
-        items.map((i) => (
-          <div class="rr-row" key={i.profile.id}>
-            <Avatar card={i.profile} size={64} ring />
-            <div class="grow" style={{ minWidth: 0 }}><div class="rr-name ellipsis">{i.profile.displayName}</div>
-              <div class="rr-place ellipsis">{i.profile.location ? `${i.profile.flag ?? ''} ${i.profile.location}` : `@${i.profile.username}`}</div></div>
-            {i.state === 'available'
-              ? <button class="rr-btn" disabled={pending === i.profile.id} onClick={() => request(i.profile)}>{pending === i.profile.id ? '…' : 'Request'}</button>
-              : <span class="rr-btn is-done" aria-disabled="true">{i.state === 'requested' ? 'Requested' : 'Reviewed'}</span>}
-          </div>
-        ))}
-      <div style={{ height: 96 }} />
-      <button class="rr-invite" onClick={invite}>
-        <span class="rr-invite__icon"><img src={icon('IconLink')} alt="" /></span>
-        <span class="grow"><b>Invite someone new</b><span>Send a link to get a review</span></span>
-        <Icon name="IconCaretRight" size={16} />
-      </button>
-    </SheetFrame>
-  );
-}
-
-function InviteLink({ url, close }: { url: string; close: () => void }) {
-  const share = async () => {
-    try {
-      if (navigator.share) await navigator.share({ title: 'Review me on kolaba.', url });
-      else { await navigator.clipboard.writeText(url); showToast('Link copied', 'ok'); }
-    } catch { /* cancelled */ }
-  };
-  return (
-    <SheetFrame title="Invite link" close={close}>
-      <p class="muted" style={{ fontSize: 14, lineHeight: 1.45, marginTop: 0 }}>Send this one-time link to someone outside kolaba. They sign up, become your contact and can leave one review. It expires in 14 days.</p>
-      <div class="field selectable" style={{ fontSize: 13, overflow: 'hidden', whiteSpace: 'nowrap' }}><span class="ellipsis">{url}</span></div>
-      <button class="btn" style={{ marginTop: 16 }} onClick={share}>Send link</button>
-    </SheetFrame>
-  );
-}
 
 export function ReviewForm({ recipient, requestId, inviteId }: { recipient: Card; requestId?: string; inviteId?: string }) {
   const [scores, setScores] = useState({ quality: 0, speed: 0, contact: 0 });
